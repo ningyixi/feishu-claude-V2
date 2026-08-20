@@ -1,0 +1,17 @@
+# 配置文件（包含密钥）
+.env
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 构建产物
+target/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 日志
+*.log
