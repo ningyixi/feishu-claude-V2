@@ -5,16 +5,14 @@
         </encoder>
     </appender>
 
-    <!-- 飞书 SDK 日志 -->
+    <appender name="SSE" class="com.lark.oapi.sample.ws.SseLogAppender"/>
+
     <logger name="com.lark.oapi" level="INFO"/>
-
-    <!-- 本项目日志 -->
     <logger name="com.lark.oapi.sample" level="DEBUG"/>
-
-    <!-- OkHttp 日志（调试时可改为 DEBUG） -->
     <logger name="okhttp3" level="INFO"/>
 
     <root level="INFO">
         <appender-ref ref="STDOUT"/>
+        <appender-ref ref="SSE"/>
     </root>
 </configuration>
