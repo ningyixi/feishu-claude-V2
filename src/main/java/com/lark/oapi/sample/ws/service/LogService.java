@@ -1,5 +1,6 @@
-package com.lark.oapi.sample.ws;
+package com.lark.oapi.sample.ws.service;
 
+import com.lark.oapi.sample.ws.model.entity.LogEntry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -24,7 +25,6 @@ public class LogService {
         while (history.size() > MAX_HISTORY) {
             history.removeFirst();
         }
-        // 推送给所有 SSE 客户端
         for (SseEmitter emitter : emitters) {
             try {
                 emitter.send(SseEmitter.event().data(entry));
@@ -39,7 +39,7 @@ public class LogService {
     }
 
     public SseEmitter createEmitter() {
-        SseEmitter emitter = new SseEmitter(0L); // 不超时
+        SseEmitter emitter = new SseEmitter(0L);
         emitters.add(emitter);
         emitter.onCompletion(() -> emitters.remove(emitter));
         emitter.onTimeout(() -> emitters.remove(emitter));

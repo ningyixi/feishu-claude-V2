@@ -1,4 +1,4 @@
-package com.lark.oapi.sample.ws;
+package com.lark.oapi.sample.ws.model.entity;
 
 import java.time.LocalDateTime;
 

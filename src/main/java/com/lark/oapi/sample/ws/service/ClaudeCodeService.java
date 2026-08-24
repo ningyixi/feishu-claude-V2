@@ -1,4 +1,4 @@
-package com.lark.oapi.sample.ws;
+package com.lark.oapi.sample.ws.service;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;

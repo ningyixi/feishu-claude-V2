@@ -1,16 +1,15 @@
-package com.lark.oapi.sample.ws;
+package com.lark.oapi.sample.ws.config;
 
+import com.lark.oapi.sample.ws.repository.AppConfigRepository;
+import com.lark.oapi.sample.ws.service.ClaudeCodeService;
+import com.lark.oapi.sample.ws.service.LogService;
+import com.lark.oapi.sample.ws.service.ShellService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
-/**
- * 应用启动后的初始化：
- * - 连接 SSE 日志 Appender 到 LogService
- * - 从数据库加载配置到各 Service
- */
 @Component
 public class AppInitializer {
 
@@ -31,11 +30,9 @@ public class AppInitializer {
 
     @EventListener(ApplicationReadyEvent.class)
     public void init() {
-        // 连接日志 Appender
         SseLogAppender.setLogService(logService);
         log.info("SSE 日志 Appender 已连接");
 
-        // 加载配置到各 Service
         configRepo.findById(1L).ifPresent(config -> {
             if (config.getShellWorkingDir() != null && !config.getShellWorkingDir().isBlank()) {
                 shellService.setWorkingDir(config.getShellWorkingDir());

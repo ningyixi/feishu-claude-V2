@@ -1,5 +1,9 @@
-package com.lark.oapi.sample.ws;
+package com.lark.oapi.sample.ws.controller;
 
+import com.lark.oapi.sample.ws.model.dto.TestResultDTO;
+import com.lark.oapi.sample.ws.model.entity.AppConfig;
+import com.lark.oapi.sample.ws.repository.AppConfigRepository;
+import com.lark.oapi.sample.ws.service.FeishuBotService;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import org.slf4j.Logger;

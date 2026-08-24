@@ -1,4 +1,6 @@
-package com.lark.oapi.sample.ws;
+package com.lark.oapi.sample.ws.model.dto;
+
+import com.lark.oapi.sample.ws.model.entity.AppConfig;
 
 public record AppConfigDTO(
     String feishuAppId,

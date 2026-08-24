@@ -1,4 +1,4 @@
-package com.lark.oapi.sample.ws;
+package com.lark.oapi.sample.ws.service;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -36,7 +36,7 @@ public class ShellService {
     public void setWorkingDir(String dir) {
         if (dir != null && !dir.isBlank()) {
             this.workingDir = dir;
-            destroy(); // 重建 shell 进程
+            destroy();
         }
     }
 

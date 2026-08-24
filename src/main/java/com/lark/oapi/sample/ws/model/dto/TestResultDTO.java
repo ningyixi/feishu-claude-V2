@@ -1,4 +1,4 @@
-package com.lark.oapi.sample.ws;
+package com.lark.oapi.sample.ws.model.dto;
 
 public record TestResultDTO(boolean success, String message, String detail) {
     public static TestResultDTO ok(String message) {

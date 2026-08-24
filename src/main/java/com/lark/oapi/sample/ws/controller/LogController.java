@@ -1,5 +1,7 @@
-package com.lark.oapi.sample.ws;
+package com.lark.oapi.sample.ws.controller;
 
+import com.lark.oapi.sample.ws.model.entity.LogEntry;
+import com.lark.oapi.sample.ws.service.LogService;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;

@@ -1,5 +1,8 @@
-package com.lark.oapi.sample.ws;
+package com.lark.oapi.sample.ws.service;
 
+import com.lark.oapi.sample.ws.model.dto.TestResultDTO;
+import com.lark.oapi.sample.ws.model.entity.AppConfig;
+import com.lark.oapi.sample.ws.repository.AppConfigRepository;
 import com.google.gson.JsonObject;
 import com.lark.oapi.Client;
 import com.lark.oapi.core.utils.Jsons;
