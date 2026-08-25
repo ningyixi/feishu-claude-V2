@@ -28,7 +28,8 @@ public class LogService {
         for (SseEmitter emitter : emitters) {
             try {
                 emitter.send(SseEmitter.event().data(entry));
-            } catch (IOException e) {
+            } catch (Exception e) {
+                // 不在此处打日志，避免触发 SseLogAppender 循环
                 emitters.remove(emitter);
             }
         }

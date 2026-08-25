@@ -2,6 +2,7 @@ package com.lark.oapi.sample.ws.service;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.lark.oapi.sample.ws.config.TerminalWebSocketHandler;
 import com.lark.oapi.sample.ws.model.entity.ClaudeSession;
 import com.lark.oapi.sample.ws.repository.ClaudeSessionRepository;
 import org.slf4j.Logger;
@@ -9,8 +10,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.io.File;
-import java.io.IOException;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -28,10 +28,12 @@ public class ClaudeCodeService {
     private static final DateTimeFormatter TIME_FMT = DateTimeFormatter.ofPattern("MM-dd HH:mm");
 
     private final ClaudeSessionRepository sessionRepo;
+    private final TerminalWebSocketHandler terminalWs;
     private volatile String workingDir = "";
 
-    public ClaudeCodeService(ClaudeSessionRepository sessionRepo) {
+    public ClaudeCodeService(ClaudeSessionRepository sessionRepo, TerminalWebSocketHandler terminalWs) {
         this.sessionRepo = sessionRepo;
+        this.terminalWs = terminalWs;
     }
 
     public void setWorkingDir(String dir) {
@@ -65,10 +67,27 @@ public class ClaudeCodeService {
             pb.redirectErrorStream(false);
             Process process = pb.start();
 
-            byte[] stdoutBytes = process.getInputStream().readAllBytes();
-            byte[] stderrBytes = process.getErrorStream().readAllBytes();
+            // 广播开始标记
+            terminalWs.broadcast("━━━ Claude 执行开始 ━━━");
+            terminalWs.broadcast("$ " + String.join(" ", command));
+            terminalWs.broadcast("");
 
+            // 逐行读取 stdout 并实时推送
+            BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+            StringBuilder stdoutBuilder = new StringBuilder();
+            String line;
+            while ((line = reader.readLine()) != null) {
+                terminalWs.broadcast(line);
+                stdoutBuilder.append(line).append("\n");
+            }
+
+            byte[] stderrBytes = process.getErrorStream().readAllBytes();
             boolean finished = process.waitFor(TIMEOUT_MINUTES, TimeUnit.MINUTES);
+
+            terminalWs.broadcast("");
+            terminalWs.broadcast("━━━ Claude 执行完成 ━━━");
+            terminalWs.broadcast("");
 
             if (!finished) {
                 process.destroyForcibly();
@@ -81,7 +100,7 @@ public class ClaudeCodeService {
                 log.debug("[ClaudeCode] stderr: {}", stderr.strip());
             }
 
-            String stdout = new String(stdoutBytes, StandardCharsets.UTF_8);
+            String stdout = stdoutBuilder.toString();
             return parseResponse(stdout, openId);
 
         } catch (IOException e) {

@@ -2,7 +2,9 @@ package com.lark.oapi.sample.ws.service;
 
 import com.lark.oapi.sample.ws.model.dto.TestResultDTO;
 import com.lark.oapi.sample.ws.model.entity.AppConfig;
+import com.lark.oapi.sample.ws.model.entity.UserMode;
 import com.lark.oapi.sample.ws.repository.AppConfigRepository;
+import com.lark.oapi.sample.ws.repository.UserModeRepository;
 import com.google.gson.JsonObject;
 import com.lark.oapi.Client;
 import com.lark.oapi.core.utils.Jsons;
@@ -18,7 +20,9 @@ import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PreDestroy;
-import java.util.Map;
+import java.time.LocalDateTime;
+import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -28,19 +32,23 @@ public class FeishuBotService {
     private static final Logger log = LoggerFactory.getLogger(FeishuBotService.class);
 
     private final AppConfigRepository configRepo;
+    private final UserModeRepository userModeRepo;
     private final ShellService shellService;
     private final ClaudeCodeService claudeCodeService;
 
     enum Mode { SHELL, CHAT }
-    private final Map<String, Mode> userModes = new ConcurrentHashMap<>();
+    // 记录本次服务运行中已发送过欢迎消息的用户
+    private final Set<String> greetedUsers = ConcurrentHashMap.newKeySet();
 
     private com.lark.oapi.ws.Client wsClient;
     private Client httpClient;
 
     public FeishuBotService(AppConfigRepository configRepo,
+                            UserModeRepository userModeRepo,
                             ShellService shellService,
                             ClaudeCodeService claudeCodeService) {
         this.configRepo = configRepo;
+        this.userModeRepo = userModeRepo;
         this.shellService = shellService;
         this.claudeCodeService = claudeCodeService;
     }
@@ -171,9 +179,17 @@ public class FeishuBotService {
             return;
         }
 
+        // 首次消息：从 DB 加载模式并推送欢迎消息
+        if (!greetedUsers.contains(openId)) {
+            greetedUsers.add(openId);
+            Mode mode = loadMode(openId);
+            String modeLabel = mode == Mode.CHAT ? "🤖 Claude 对话模式" : "🖥️ Shell 模式";
+            replyText(openId, "当前模式: " + modeLabel + "\n输入 /shell 或 /chat 切换模式");
+        }
+
         if (text.startsWith("/") && handleCommand(openId, text)) return;
 
-        Mode mode = userModes.getOrDefault(openId, Mode.SHELL);
+        Mode mode = loadMode(openId);
         if (mode == Mode.CHAT) {
             log.info("[Chat] 调用 Claude Code: openId={}", openId);
             String reply = claudeCodeService.chat(openId, text);
@@ -189,12 +205,12 @@ public class FeishuBotService {
         String cmd = text.trim().toLowerCase();
         return switch (cmd) {
             case "/shell" -> {
-                userModes.put(openId, Mode.SHELL);
+                saveMode(openId, Mode.SHELL);
                 replyText(openId, "🖥️ 已切换到 Shell 模式");
                 yield true;
             }
             case "/chat" -> {
-                userModes.put(openId, Mode.CHAT);
+                saveMode(openId, Mode.CHAT);
                 replyText(openId, "🤖 已切换到 Claude 对话模式");
                 yield true;
             }
@@ -213,13 +229,49 @@ public class FeishuBotService {
                 yield true;
             }
             case "/help" -> {
-                Mode current = userModes.getOrDefault(openId, Mode.SHELL);
+                Mode current = loadMode(openId);
                 String modeLabel = current == Mode.CHAT ? "🤖 Claude" : "🖥️ Shell";
                 replyText(openId, "当前模式: " + modeLabel + "\n\n/shell /chat /new /sessions /help");
                 yield true;
             }
             default -> false;
         };
+    }
+
+    private String getWorkingDir() {
+        AppConfig config = getConfig();
+        if (config == null) return "";
+        String dir = config.getClaudeWorkingDir();
+        if (dir == null || dir.isBlank()) dir = config.getShellWorkingDir();
+        return dir != null ? dir : "";
+    }
+
+    private Mode loadMode(String openId) {
+        String workDir = getWorkingDir();
+        Optional<UserMode> existing = userModeRepo.findByOpenIdAndWorkingDir(openId, workDir);
+        if (existing.isPresent()) {
+            return "CHAT".equals(existing.get().getMode()) ? Mode.CHAT : Mode.SHELL;
+        }
+        return Mode.SHELL;
+    }
+
+    private void saveMode(String openId, Mode mode) {
+        String workDir = getWorkingDir();
+        Optional<UserMode> existing = userModeRepo.findByOpenIdAndWorkingDir(openId, workDir);
+        if (existing.isPresent()) {
+            UserMode um = existing.get();
+            um.setMode(mode.name());
+            um.setUpdatedAt(LocalDateTime.now());
+            userModeRepo.save(um);
+        } else {
+            UserMode um = new UserMode();
+            um.setOpenId(openId);
+            um.setWorkingDir(workDir);
+            um.setMode(mode.name());
+            um.setUpdatedAt(LocalDateTime.now());
+            userModeRepo.save(um);
+        }
+        log.info("[Mode] 保存: openId={}, dir={}, mode={}", openId, workDir, mode);
     }
 
     private void replyText(String openId, String content) {
