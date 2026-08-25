@@ -5,8 +5,7 @@ const FIELDS = [
   { key: 'feishuAppSecret', label: '飞书 APP Secret', placeholder: '应用密钥', password: true },
   { key: 'authorizedOpenId', label: '授权用户 Open ID', placeholder: 'ou_xxxxx' },
   { key: 'shellWorkingDir', label: 'Shell 工作目录', placeholder: 'C:\\Users\\xxx 或留空使用默认' },
-  { key: 'claudeCmdPath', label: 'Claude 命令路径', placeholder: 'claude 或完整路径如 C:\\...\\claude.cmd' },
-  { key: 'claudeWorkingDir', label: 'Claude 工作目录', placeholder: '执行 Claude 命令的项目目录，如 D:\\projects\\my-app' },
+  { key: 'claudeWorkingDir', label: 'Claude 项目目录', placeholder: 'Claude 会话执行的项目目录，如 D:\\dida\\SupplierV2' },
 ]
 
 export default function Config() {

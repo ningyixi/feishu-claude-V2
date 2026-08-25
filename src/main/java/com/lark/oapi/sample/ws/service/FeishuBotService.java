@@ -199,7 +199,7 @@ public class FeishuBotService {
                 yield true;
             }
             case "/new" -> {
-                claudeCodeService.newSession();
+                claudeCodeService.newSession(openId);
                 replyText(openId, "✨ 已开启新 session");
                 yield true;
             }
@@ -208,7 +208,7 @@ public class FeishuBotService {
                 yield true;
             }
             case "/reset", "/clear" -> {
-                claudeCodeService.newSession();
+                claudeCodeService.newSession(openId);
                 replyText(openId, "Session 已重置 ✨");
                 yield true;
             }

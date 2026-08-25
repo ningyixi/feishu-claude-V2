@@ -45,18 +45,19 @@ public class TestController {
     @PostMapping("/claude")
     public TestResultDTO testClaude() {
         AppConfig config = configRepo.findById(1L).orElse(null);
-        String cmdPath = config != null && !config.getClaudeCmdPath().isBlank()
-                ? config.getClaudeCmdPath() : "claude";
 
-        // 验证 Claude 工作目录是否存在
+        // 验证 Claude 项目目录是否存在（优先 claudeWorkingDir，回退 shellWorkingDir）
         String workDir = config != null ? config.getClaudeWorkingDir() : "";
+        if (workDir == null || workDir.isBlank()) {
+            workDir = config != null ? config.getShellWorkingDir() : "";
+        }
         if (workDir != null && !workDir.isBlank()) {
             Path dirPath = Path.of(workDir);
             if (!Files.exists(dirPath)) {
-                return TestResultDTO.fail("Claude 工作目录不存在", workDir);
+                return TestResultDTO.fail("Claude 项目目录不存在", workDir);
             }
             if (!Files.isDirectory(dirPath)) {
-                return TestResultDTO.fail("Claude 工作目录不是有效的目录", workDir);
+                return TestResultDTO.fail("Claude 项目目录不是有效的目录", workDir);
             }
         }
 
@@ -67,7 +68,7 @@ public class TestController {
                 command.add("cmd.exe");
                 command.add("/c");
             }
-            command.add(cmdPath);
+            command.add("claude");
             command.add("-p");
             command.add("hi");
             command.add("--output-format");

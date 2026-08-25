@@ -34,14 +34,18 @@ public class AppInitializer {
         log.info("SSE 日志 Appender 已连接");
 
         configRepo.findById(1L).ifPresent(config -> {
+            log.info("加载配置: shellWorkingDir='{}', claudeWorkingDir='{}'",
+                    config.getShellWorkingDir(), config.getClaudeWorkingDir());
             if (config.getShellWorkingDir() != null && !config.getShellWorkingDir().isBlank()) {
                 shellService.setWorkingDir(config.getShellWorkingDir());
             }
-            if (config.getClaudeCmdPath() != null && !config.getClaudeCmdPath().isBlank()) {
-                claudeCodeService.setClaudeCmdPath(config.getClaudeCmdPath());
+            // Claude 项目目录优先使用 claudeWorkingDir，为空时回退到 shellWorkingDir
+            String claudeDir = config.getClaudeWorkingDir();
+            if (claudeDir == null || claudeDir.isBlank()) {
+                claudeDir = config.getShellWorkingDir();
             }
-            if (config.getClaudeWorkingDir() != null && !config.getClaudeWorkingDir().isBlank()) {
-                claudeCodeService.setWorkingDir(config.getClaudeWorkingDir());
+            if (claudeDir != null && !claudeDir.isBlank()) {
+                claudeCodeService.setWorkingDir(claudeDir);
             }
             log.info("配置已加载到各服务");
         });

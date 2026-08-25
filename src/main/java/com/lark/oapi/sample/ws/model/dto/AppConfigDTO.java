@@ -7,7 +7,6 @@ public record AppConfigDTO(
     String feishuAppSecret,
     String authorizedOpenId,
     String shellWorkingDir,
-    String claudeCmdPath,
     String claudeWorkingDir
 ) {
     public static AppConfigDTO fromEntity(AppConfig entity, boolean maskSecret) {
@@ -20,7 +19,6 @@ public record AppConfigDTO(
             secret,
             entity.getAuthorizedOpenId(),
             entity.getShellWorkingDir(),
-            entity.getClaudeCmdPath(),
             entity.getClaudeWorkingDir()
         );
     }

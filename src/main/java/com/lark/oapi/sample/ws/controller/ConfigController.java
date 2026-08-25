@@ -66,19 +66,22 @@ public class ConfigController {
         }
         if (dto.authorizedOpenId() != null) config.setAuthorizedOpenId(dto.authorizedOpenId());
         if (dto.shellWorkingDir() != null) config.setShellWorkingDir(dto.shellWorkingDir());
-        if (dto.claudeCmdPath() != null) config.setClaudeCmdPath(dto.claudeCmdPath());
         if (dto.claudeWorkingDir() != null) config.setClaudeWorkingDir(dto.claudeWorkingDir());
 
         configRepo.save(config);
         log.info("配置已保存");
 
         // 传播配置到各 Service（无需重启即可生效）
-        if (config.getClaudeCmdPath() != null && !config.getClaudeCmdPath().isBlank()) {
-            claudeCodeService.setClaudeCmdPath(config.getClaudeCmdPath());
-        }
-        claudeCodeService.setWorkingDir(config.getClaudeWorkingDir());
         if (config.getShellWorkingDir() != null && !config.getShellWorkingDir().isBlank()) {
             shellService.setWorkingDir(config.getShellWorkingDir());
+        }
+        // Claude 项目目录优先使用 claudeWorkingDir，为空时回退到 shellWorkingDir
+        String claudeDir = config.getClaudeWorkingDir();
+        if (claudeDir == null || claudeDir.isBlank()) {
+            claudeDir = config.getShellWorkingDir();
+        }
+        if (claudeDir != null && !claudeDir.isBlank()) {
+            claudeCodeService.setWorkingDir(claudeDir);
         }
 
         // 飞书凭证变更时重启 bot
