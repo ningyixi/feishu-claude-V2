@@ -6,7 +6,9 @@ import com.lark.oapi.Client;
 import com.lark.oapi.sample.ws.model.dto.BotInstanceDTO;
 import com.lark.oapi.sample.ws.model.dto.TestResultDTO;
 import com.lark.oapi.sample.ws.model.entity.BotInstance;
+import com.lark.oapi.sample.ws.model.entity.ChatMessage;
 import com.lark.oapi.sample.ws.repository.BotInstanceRepository;
+import com.lark.oapi.sample.ws.repository.ChatMessageRepository;
 import com.lark.oapi.sample.ws.service.FeishuBotService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -30,10 +32,14 @@ public class BotInstanceController {
     private static final Logger log = LoggerFactory.getLogger(BotInstanceController.class);
 
     private final BotInstanceRepository instanceRepo;
+    private final ChatMessageRepository chatMessageRepo;
     private final FeishuBotService feishuBotService;
 
-    public BotInstanceController(BotInstanceRepository instanceRepo, FeishuBotService feishuBotService) {
+    public BotInstanceController(BotInstanceRepository instanceRepo,
+                                 ChatMessageRepository chatMessageRepo,
+                                 FeishuBotService feishuBotService) {
         this.instanceRepo = instanceRepo;
+        this.chatMessageRepo = chatMessageRepo;
         this.feishuBotService = feishuBotService;
     }
 
@@ -176,6 +182,17 @@ public class BotInstanceController {
                 return ResponseEntity.ok(TestResultDTO.fail("测试异常: " + e.getMessage()));
             }
         }).orElse(ResponseEntity.notFound().build());
+    }
+
+    // ===== 对话历史 =====
+
+    @GetMapping("/{id}/messages")
+    public ResponseEntity<List<ChatMessage>> messages(@PathVariable Long id) {
+        if (!instanceRepo.existsById(id)) return ResponseEntity.notFound().build();
+        List<ChatMessage> msgs = chatMessageRepo.findTop100ByInstanceIdOrderByCreatedAtDesc(id);
+        // 反转为时间正序
+        java.util.Collections.reverse(msgs);
+        return ResponseEntity.ok(msgs);
     }
 
     // ===== 内部方法 =====

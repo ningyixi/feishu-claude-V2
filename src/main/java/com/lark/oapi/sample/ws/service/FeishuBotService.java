@@ -2,7 +2,9 @@ package com.lark.oapi.sample.ws.service;
 
 import com.lark.oapi.sample.ws.model.dto.TestResultDTO;
 import com.lark.oapi.sample.ws.model.entity.BotInstance;
+import com.lark.oapi.sample.ws.model.entity.ChatMessage;
 import com.lark.oapi.sample.ws.model.entity.UserMode;
+import com.lark.oapi.sample.ws.repository.ChatMessageRepository;
 import com.lark.oapi.sample.ws.repository.UserModeRepository;
 import com.google.gson.JsonObject;
 import com.lark.oapi.Client;
@@ -30,6 +32,7 @@ public class FeishuBotService {
     private static final Logger log = LoggerFactory.getLogger(FeishuBotService.class);
 
     private final UserModeRepository userModeRepo;
+    private final ChatMessageRepository chatMessageRepo;
     private final ShellService shellService;
     private final ClaudeCodeService claudeCodeService;
 
@@ -47,9 +50,11 @@ public class FeishuBotService {
     private final Map<Long, InstanceConnection> connections = new ConcurrentHashMap<>();
 
     public FeishuBotService(UserModeRepository userModeRepo,
+                            ChatMessageRepository chatMessageRepo,
                             ShellService shellService,
                             ClaudeCodeService claudeCodeService) {
         this.userModeRepo = userModeRepo;
+        this.chatMessageRepo = chatMessageRepo;
         this.shellService = shellService;
         this.claudeCodeService = claudeCodeService;
     }
@@ -89,15 +94,17 @@ public class FeishuBotService {
                         String messageId = eventData.getMessage().getMessageId();
                         String msgType = eventData.getMessage().getMessageType();
                         String rawContent = eventData.getMessage().getContent();
+                        String chatType = eventData.getMessage().getChatType();
+                        String chatId = eventData.getMessage().getChatId();
 
-                        log.info("[Feishu][{}] 收到消息: openId={}, msgType={}", instance.getName(), openId, msgType);
+                        log.info("[Feishu][{}] 收到消息: openId={}, chatType={}, msgType={}", instance.getName(), openId, chatType, msgType);
 
                         Thread.ofVirtual().name("msg-" + messageId).start(() -> {
                             try {
-                                handleMessage(instanceId, openId, msgType, rawContent);
+                                handleMessage(instanceId, openId, chatType, chatId, msgType, rawContent);
                             } catch (Exception e) {
                                 log.error("[Handler] 处理消息异常: openId={}", openId, e);
-                                replyText(instanceId, openId, "处理消息时出错了: " + e.getMessage());
+                                replyText(instanceId, openId, chatType, chatId, "处理消息时出错了: " + e.getMessage());
                             }
                         });
                     }
@@ -164,31 +171,34 @@ public class FeishuBotService {
 
     // ===== 消息处理 =====
 
-    private void handleMessage(Long instanceId, String openId, String msgType, String rawContent) {
+    private void handleMessage(Long instanceId, String openId, String chatType, String chatId, String msgType, String rawContent) {
         InstanceConnection conn = connections.get(instanceId);
         if (conn == null) return;
 
         BotInstance instance = conn.instance;
 
         if (!"text".equals(msgType)) {
-            replyText(instanceId, openId, "暂时只支持文本消息。");
+            replyText(instanceId, openId, chatType, chatId, "暂时只支持文本消息。");
             return;
         }
 
         String text = extractText(rawContent);
         if (text == null || text.isBlank()) {
-            replyText(instanceId, openId, "消息内容为空。");
+            replyText(instanceId, openId, chatType, chatId, "消息内容为空。");
             return;
         }
 
         text = text.replaceAll("@_user_\\d+\\s*", "").trim();
         if (text.isEmpty()) return;
 
+        // 保存用户消息到对话历史
+        saveChatMessage(instanceId, openId, "user", text, chatType);
+
         // 权限检查：允许的 openId 或实例配置的 openId
         boolean allowed = ALLOWED_OPEN_IDS.contains(openId)
                 || (instance.getAuthorizedOpenId() != null && instance.getAuthorizedOpenId().equals(openId));
         if (!allowed) {
-            replyText(instanceId, openId, "⛔ 无权访问此机器人。");
+            replyText(instanceId, openId, chatType, chatId, "⛔ 无权访问此机器人。");
             return;
         }
 
@@ -198,10 +208,10 @@ public class FeishuBotService {
             greetedUsers.add(greetKey);
             Mode mode = loadMode(openId, instance);
             String modeLabel = mode == Mode.CHAT ? "🤖 Claude 对话模式" : "🖥️ Shell 模式";
-            replyText(instanceId, openId, "当前模式: " + modeLabel + "\n输入 /shell 或 /chat 切换模式");
+            replyText(instanceId, openId, chatType, chatId, "当前模式: " + modeLabel + "\n输入 /shell 或 /chat 切换模式");
         }
 
-        if (text.startsWith("/") && handleCommand(instanceId, openId, text, instance)) return;
+        if (text.startsWith("/") && handleCommand(instanceId, openId, chatType, chatId, text, instance)) return;
 
         Mode mode = loadMode(openId, instance);
         if (mode == Mode.CHAT) {
@@ -213,45 +223,45 @@ public class FeishuBotService {
                 claudeCodeService.setWorkingDir(dir);
             }
             String reply = claudeCodeService.chat(openId, text);
-            replyText(instanceId, openId, reply);
+            replyText(instanceId, openId, chatType, chatId, reply);
         } else {
             log.info("[Shell][{}] 执行: openId={}, cmd={}", instance.getName(), openId, text);
             String output = shellService.execute(text);
-            replyText(instanceId, openId, output);
+            replyText(instanceId, openId, chatType, chatId, output);
         }
     }
 
-    private boolean handleCommand(Long instanceId, String openId, String text, BotInstance instance) {
+    private boolean handleCommand(Long instanceId, String openId, String chatType, String chatId, String text, BotInstance instance) {
         String cmd = text.trim().toLowerCase();
         return switch (cmd) {
             case "/shell" -> {
                 saveMode(openId, Mode.SHELL, instance);
-                replyText(instanceId, openId, "🖥️ 已切换到 Shell 模式");
+                replyText(instanceId, openId, chatType, chatId, "🖥️ 已切换到 Shell 模式");
                 yield true;
             }
             case "/chat" -> {
                 saveMode(openId, Mode.CHAT, instance);
-                replyText(instanceId, openId, "🤖 已切换到 Claude 对话模式");
+                replyText(instanceId, openId, chatType, chatId, "🤖 已切换到 Claude 对话模式");
                 yield true;
             }
             case "/new" -> {
                 claudeCodeService.newSession(openId);
-                replyText(instanceId, openId, "✨ 已开启新 session");
+                replyText(instanceId, openId, chatType, chatId, "✨ 已开启新 session");
                 yield true;
             }
             case "/sessions" -> {
-                replyText(instanceId, openId, claudeCodeService.listSessions());
+                replyText(instanceId, openId, chatType, chatId, claudeCodeService.listSessions());
                 yield true;
             }
             case "/reset", "/clear" -> {
                 claudeCodeService.newSession(openId);
-                replyText(instanceId, openId, "Session 已重置 ✨");
+                replyText(instanceId, openId, chatType, chatId, "Session 已重置 ✨");
                 yield true;
             }
             case "/help" -> {
                 Mode current = loadMode(openId, instance);
                 String modeLabel = current == Mode.CHAT ? "🤖 Claude" : "🖥️ Shell";
-                replyText(instanceId, openId, "当前模式: " + modeLabel + "\n\n/shell /chat /new /sessions /help");
+                replyText(instanceId, openId, chatType, chatId, "当前模式: " + modeLabel + "\n\n/shell /chat /new /sessions /help");
                 yield true;
             }
             default -> false;
@@ -296,9 +306,12 @@ public class FeishuBotService {
 
     // ===== 回复消息（使用对应实例的 httpClient） =====
 
-    private void replyText(Long instanceId, String openId, String content) {
+    private void replyText(Long instanceId, String openId, String chatType, String chatId, String content) {
         InstanceConnection conn = connections.get(instanceId);
         if (conn == null || conn.httpClient == null) return;
+
+        // 保存机器人回复到对话历史
+        saveChatMessage(instanceId, openId, "bot", content, chatType);
 
         String escaped = content.replace("\\", "\\\\")
                 .replace("\"", "\\\"")
@@ -307,10 +320,15 @@ public class FeishuBotService {
                 .replace("\t", "\\t");
         String jsonContent = "{\"text\":\"" + escaped + "\"}";
 
+        // 群聊用 chat_id 回复，私聊用 open_id 回复
+        boolean isGroup = "group".equals(chatType);
+        String receiveId = isGroup ? chatId : openId;
+        String receiveIdType = isGroup ? "chat_id" : "open_id";
+
         CreateMessageReq req = CreateMessageReq.newBuilder()
-                .receiveIdType("open_id")
+                .receiveIdType(receiveIdType)
                 .createMessageReqBody(CreateMessageReqBody.newBuilder()
-                        .receiveId(openId)
+                        .receiveId(receiveId)
                         .uuid(UUID.randomUUID().toString())
                         .msgType("text")
                         .content(jsonContent)
@@ -323,6 +341,20 @@ public class FeishuBotService {
             }
         } catch (Exception e) {
             log.error("[Feishu] 发送消息异常", e);
+        }
+    }
+
+    private void saveChatMessage(Long instanceId, String openId, String role, String content, String chatType) {
+        try {
+            ChatMessage msg = new ChatMessage();
+            msg.setInstanceId(instanceId);
+            msg.setOpenId(openId);
+            msg.setRole(role);
+            msg.setContent(content);
+            msg.setChatType(chatType);
+            chatMessageRepo.save(msg);
+        } catch (Exception e) {
+            log.warn("[ChatHistory] 保存消息失败: {}", e.getMessage());
         }
     }
 
