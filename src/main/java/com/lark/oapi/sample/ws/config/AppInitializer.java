@@ -1,14 +1,16 @@
 package com.lark.oapi.sample.ws.config;
 
-import com.lark.oapi.sample.ws.repository.AppConfigRepository;
-import com.lark.oapi.sample.ws.service.ClaudeCodeService;
+import com.lark.oapi.sample.ws.model.entity.BotInstance;
+import com.lark.oapi.sample.ws.repository.BotInstanceRepository;
+import com.lark.oapi.sample.ws.service.FeishuBotService;
 import com.lark.oapi.sample.ws.service.LogService;
-import com.lark.oapi.sample.ws.service.ShellService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
+
+import java.util.List;
 
 @Component
 public class AppInitializer {
@@ -16,38 +18,30 @@ public class AppInitializer {
     private static final Logger log = LoggerFactory.getLogger(AppInitializer.class);
 
     private final LogService logService;
-    private final AppConfigRepository configRepo;
-    private final ShellService shellService;
-    private final ClaudeCodeService claudeCodeService;
+    private final BotInstanceRepository instanceRepo;
+    private final FeishuBotService feishuBotService;
 
-    public AppInitializer(LogService logService, AppConfigRepository configRepo,
-                          ShellService shellService, ClaudeCodeService claudeCodeService) {
+    public AppInitializer(LogService logService,
+                          BotInstanceRepository instanceRepo,
+                          FeishuBotService feishuBotService) {
         this.logService = logService;
-        this.configRepo = configRepo;
-        this.shellService = shellService;
-        this.claudeCodeService = claudeCodeService;
+        this.instanceRepo = instanceRepo;
+        this.feishuBotService = feishuBotService;
     }
 
     @EventListener(ApplicationReadyEvent.class)
     public void init() {
         SseLogAppender.setLogService(logService);
-        log.info("SSE 日志 Appender 已连接");
 
-        configRepo.findById(1L).ifPresent(config -> {
-            log.info("加载配置: shellWorkingDir='{}', claudeWorkingDir='{}'",
-                    config.getShellWorkingDir(), config.getClaudeWorkingDir());
-            if (config.getShellWorkingDir() != null && !config.getShellWorkingDir().isBlank()) {
-                shellService.setWorkingDir(config.getShellWorkingDir());
+        // 启动时自动连接所有已启用的实例
+        List<BotInstance> instances = instanceRepo.findAll();
+        long enabledCount = instances.stream().filter(BotInstance::isEnabled).count();
+        log.info("应用已启动，发现 {} 个实例（{} 个已启用）", instances.size(), enabledCount);
+
+        for (BotInstance inst : instances) {
+            if (inst.isEnabled() && !inst.getFeishuAppId().isBlank()) {
+                feishuBotService.connectInstance(inst);
             }
-            // Claude 项目目录优先使用 claudeWorkingDir，为空时回退到 shellWorkingDir
-            String claudeDir = config.getClaudeWorkingDir();
-            if (claudeDir == null || claudeDir.isBlank()) {
-                claudeDir = config.getShellWorkingDir();
-            }
-            if (claudeDir != null && !claudeDir.isBlank()) {
-                claudeCodeService.setWorkingDir(claudeDir);
-            }
-            log.info("配置已加载到各服务");
-        });
+        }
     }
 }

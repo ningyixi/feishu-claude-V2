@@ -84,10 +84,7 @@ public class ConfigController {
             claudeCodeService.setWorkingDir(claudeDir);
         }
 
-        // 飞书凭证变更时重启 bot
-        if (feishuChanged && !config.getFeishuAppId().isBlank()) {
-            feishuBotService.restart();
-        }
+        // 飞书凭证变更时不再自动重启（由实例管理驱动）
 
         return ResponseEntity.ok(AppConfigDTO.fromEntity(config, true));
     }

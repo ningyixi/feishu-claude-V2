@@ -1,12 +1,8 @@
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
-import Config from './pages/Config'
-import Test from './pages/Test'
-import Terminal from './pages/Terminal'
+import Instances from './pages/Instances'
 
 const NAV = [
-  { to: '/', label: '⚙️', title: '配置' },
-  { to: '/test', label: '🔌', title: '测试' },
-  { to: '/terminal', label: '🖥️', title: '终端' },
+  { to: '/', label: '📡', title: '实例' },
 ]
 
 export default function App() {
@@ -26,9 +22,7 @@ export default function App() {
         </nav>
         <main className="main">
           <Routes>
-            <Route path="/" element={<Config />} />
-            <Route path="/test" element={<Test />} />
-            <Route path="/terminal" element={<Terminal />} />
+            <Route path="/" element={<Instances />} />
           </Routes>
         </main>
       </div>
