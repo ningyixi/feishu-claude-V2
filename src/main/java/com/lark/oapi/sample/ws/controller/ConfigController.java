@@ -4,7 +4,6 @@ import com.lark.oapi.sample.ws.model.dto.AppConfigDTO;
 import com.lark.oapi.sample.ws.model.dto.TestResultDTO;
 import com.lark.oapi.sample.ws.model.entity.AppConfig;
 import com.lark.oapi.sample.ws.repository.AppConfigRepository;
-import com.lark.oapi.sample.ws.service.ClaudeCodeService;
 import com.lark.oapi.sample.ws.service.FeishuBotService;
 import com.lark.oapi.sample.ws.service.ShellService;
 import org.slf4j.Logger;
@@ -20,14 +19,12 @@ public class ConfigController {
 
     private final AppConfigRepository configRepo;
     private final FeishuBotService feishuBotService;
-    private final ClaudeCodeService claudeCodeService;
     private final ShellService shellService;
 
     public ConfigController(AppConfigRepository configRepo, FeishuBotService feishuBotService,
-                            ClaudeCodeService claudeCodeService, ShellService shellService) {
+                            ShellService shellService) {
         this.configRepo = configRepo;
         this.feishuBotService = feishuBotService;
-        this.claudeCodeService = claudeCodeService;
         this.shellService = shellService;
     }
 
@@ -75,14 +72,7 @@ public class ConfigController {
         if (config.getShellWorkingDir() != null && !config.getShellWorkingDir().isBlank()) {
             shellService.setWorkingDir(config.getShellWorkingDir());
         }
-        // Claude 项目目录优先使用 claudeWorkingDir，为空时回退到 shellWorkingDir
-        String claudeDir = config.getClaudeWorkingDir();
-        if (claudeDir == null || claudeDir.isBlank()) {
-            claudeDir = config.getShellWorkingDir();
-        }
-        if (claudeDir != null && !claudeDir.isBlank()) {
-            claudeCodeService.setWorkingDir(claudeDir);
-        }
+        // Claude 工作目录现在由每个机器人实例的配置驱动，不再需要全局设置
 
         // 飞书凭证变更时不再自动重启（由实例管理驱动）
 

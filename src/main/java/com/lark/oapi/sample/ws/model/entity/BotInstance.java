@@ -29,6 +29,9 @@ public class BotInstance {
     @Column(name = "claude_working_dir")
     private String claudeWorkingDir = "";
 
+    @Column(name = "claude_model")
+    private String claudeModel = "";
+
     private boolean enabled = true;
 
     @Column(name = "created_at")
@@ -65,6 +68,9 @@ public class BotInstance {
 
     public String getClaudeWorkingDir() { return claudeWorkingDir; }
     public void setClaudeWorkingDir(String claudeWorkingDir) { this.claudeWorkingDir = claudeWorkingDir; }
+
+    public String getClaudeModel() { return claudeModel; }
+    public void setClaudeModel(String claudeModel) { this.claudeModel = claudeModel; }
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }

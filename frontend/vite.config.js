@@ -12,14 +12,15 @@ export default defineConfig({
     // 修复 Z: 盘等网络驱动器不支持 fs.watch 的问题
     watch: {
       usePolling: true,
-      interval: 1000,
+      interval: 2000,
+      // 忽略 node_modules 和大型目录，减少网络盘 stat 失败
+      ignored: ['**/node_modules/**', '**/.git/**'],
     },
     proxy: {
       '/api': 'http://localhost:8080',
       '/ws': {
         target: 'ws://localhost:8080',
         ws: true,
-        // 静默处理代理错误，后端未启动时不刷屏
         configure: (proxy) => {
           proxy.on('error', () => {})
         },

@@ -206,6 +206,7 @@ public class BotInstanceController {
         if (dto.authorizedOpenId() != null) instance.setAuthorizedOpenId(dto.authorizedOpenId());
         if (dto.shellWorkingDir() != null) instance.setShellWorkingDir(dto.shellWorkingDir());
         if (dto.claudeWorkingDir() != null) instance.setClaudeWorkingDir(dto.claudeWorkingDir());
+        if (dto.claudeModel() != null) instance.setClaudeModel(dto.claudeModel());
         instance.setEnabled(dto.enabled());
     }
 }

@@ -10,6 +10,7 @@ public record BotInstanceDTO(
     String authorizedOpenId,
     String shellWorkingDir,
     String claudeWorkingDir,
+    String claudeModel,
     boolean enabled,
     String createdAt,
     String updatedAt
@@ -27,6 +28,7 @@ public record BotInstanceDTO(
             e.getAuthorizedOpenId(),
             e.getShellWorkingDir(),
             e.getClaudeWorkingDir(),
+            e.getClaudeModel(),
             e.isEnabled(),
             e.getCreatedAt() != null ? e.getCreatedAt().toString() : "",
             e.getUpdatedAt() != null ? e.getUpdatedAt().toString() : ""

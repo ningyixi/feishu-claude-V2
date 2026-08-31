@@ -7,9 +7,13 @@ import com.lark.oapi.sample.ws.model.entity.UserMode;
 import com.lark.oapi.sample.ws.repository.ChatMessageRepository;
 import com.lark.oapi.sample.ws.repository.UserModeRepository;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.lark.oapi.Client;
 import com.lark.oapi.core.utils.Jsons;
 import com.lark.oapi.event.EventDispatcher;
+import com.lark.oapi.event.cardcallback.P2CardActionTriggerHandler;
+import com.lark.oapi.event.cardcallback.model.P2CardActionTrigger;
+import com.lark.oapi.event.cardcallback.model.P2CardActionTriggerResponse;
 import com.lark.oapi.service.im.ImService;
 import com.lark.oapi.service.im.v1.model.CreateMessageReq;
 import com.lark.oapi.service.im.v1.model.CreateMessageReqBody;
@@ -109,6 +113,34 @@ public class FeishuBotService {
                         });
                     }
                 })
+                .onP2CardActionTrigger(new P2CardActionTriggerHandler() {
+                    @Override
+                    public P2CardActionTriggerResponse handle(P2CardActionTrigger event) throws Exception {
+                        var data = event.getEvent();
+                        String openId = data.getOperator().getOpenId();
+                        var actionValue = data.getAction().getValue();
+                        String choice = actionValue != null && actionValue.containsKey("choice")
+                                ? String.valueOf(actionValue.get("choice")) : "";
+
+                        log.info("[Card][{}] 按钮点击: openId={}, choice={}", instance.getName(), openId, choice);
+
+                        // 先回复一条消息显示用户选了什么
+                        Thread.ofVirtual().name("card-" + openId).start(() -> {
+                            try {
+                                // 发送选择反馈
+                                replyText(instanceId, openId, "p2p", "",
+                                        "✅ 你选择了: **" + choice + "**");
+                                // 将按钮选择作为消息处理
+                                handleMessage(instanceId, openId, "p2p", "", "text",
+                                        "{\"text\":\"" + choice + "\"}");
+                            } catch (Exception e) {
+                                log.error("[Card] 处理按钮点击异常", e);
+                            }
+                        });
+
+                        return new P2CardActionTriggerResponse();
+                    }
+                })
                 .build();
 
         com.lark.oapi.ws.Client wsClient = new com.lark.oapi.ws.Client.Builder(appId, appSecret)
@@ -132,6 +164,8 @@ public class FeishuBotService {
             conn.wsClient = null; // GC 会处理
             log.info("[FeishuBot] 实例 id={} 已断开", instanceId);
         }
+        // 同时销毁该实例的终端会话
+        claudeCodeService.destroySession(instanceId);
     }
 
     /**
@@ -211,18 +245,19 @@ public class FeishuBotService {
             replyText(instanceId, openId, chatType, chatId, "当前模式: " + modeLabel + "\n输入 /shell 或 /chat 切换模式");
         }
 
-        if (text.startsWith("/") && handleCommand(instanceId, openId, chatType, chatId, text, instance)) return;
+        // 提前准备实例配置（命令处理如 /new 也需要正确的目录）
+        String dir = instance.getClaudeWorkingDir();
+        if (dir == null || dir.isBlank()) dir = instance.getShellWorkingDir();
+        if (dir == null) dir = "";
+        String model = instance.getClaudeModel();
+        if (model == null) model = "";
+
+        if (text.startsWith("/") && handleCommand(instanceId, openId, chatType, chatId, text, instance, dir, model)) return;
 
         Mode mode = loadMode(openId, instance);
         if (mode == Mode.CHAT) {
             log.info("[Chat][{}] 调用 Claude: openId={}", instance.getName(), openId);
-            // 设置 Claude 工作目录为该实例的目录
-            String dir = instance.getClaudeWorkingDir();
-            if (dir == null || dir.isBlank()) dir = instance.getShellWorkingDir();
-            if (dir != null && !dir.isBlank()) {
-                claudeCodeService.setWorkingDir(dir);
-            }
-            String reply = claudeCodeService.chat(openId, text);
+            String reply = claudeCodeService.chat(instanceId, openId, text, dir, model);
             replyText(instanceId, openId, chatType, chatId, reply);
         } else {
             log.info("[Shell][{}] 执行: openId={}, cmd={}", instance.getName(), openId, text);
@@ -231,7 +266,7 @@ public class FeishuBotService {
         }
     }
 
-    private boolean handleCommand(Long instanceId, String openId, String chatType, String chatId, String text, BotInstance instance) {
+    private boolean handleCommand(Long instanceId, String openId, String chatType, String chatId, String text, BotInstance instance, String dir, String model) {
         String cmd = text.trim().toLowerCase();
         return switch (cmd) {
             case "/shell" -> {
@@ -245,7 +280,7 @@ public class FeishuBotService {
                 yield true;
             }
             case "/new" -> {
-                claudeCodeService.newSession(openId);
+                claudeCodeService.newSession(instanceId, dir, model);
                 replyText(instanceId, openId, chatType, chatId, "✨ 已开启新 session");
                 yield true;
             }
@@ -254,7 +289,7 @@ public class FeishuBotService {
                 yield true;
             }
             case "/reset", "/clear" -> {
-                claudeCodeService.newSession(openId);
+                claudeCodeService.newSession(instanceId, dir, model);
                 replyText(instanceId, openId, chatType, chatId, "Session 已重置 ✨");
                 yield true;
             }
@@ -313,25 +348,29 @@ public class FeishuBotService {
         // 保存机器人回复到对话历史
         saveChatMessage(instanceId, openId, "bot", content, chatType);
 
-        String escaped = content.replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\r", "\\r")
-                .replace("\t", "\\t");
-        String jsonContent = "{\"text\":\"" + escaped + "\"}";
-
         // 群聊用 chat_id 回复，私聊用 open_id 回复
         boolean isGroup = "group".equals(chatType);
         String receiveId = isGroup ? chatId : openId;
         String receiveIdType = isGroup ? "chat_id" : "open_id";
+
+        // 检测是否有选项，有则发送交互式卡片，否则发送普通卡片
+        String cardJson;
+        if (CardBuilder.hasOptions(content)) {
+            var options = CardBuilder.extractOptions(content);
+            cardJson = CardBuilder.buildOptionsCard(content, options);
+            log.info("[Feishu] 发送选项卡片: {} 个按钮", options.size());
+        } else {
+            cardJson = CardBuilder.buildTextCard(content);
+            log.info("[Feishu] 发送文本卡片");
+        }
 
         CreateMessageReq req = CreateMessageReq.newBuilder()
                 .receiveIdType(receiveIdType)
                 .createMessageReqBody(CreateMessageReqBody.newBuilder()
                         .receiveId(receiveId)
                         .uuid(UUID.randomUUID().toString())
-                        .msgType("text")
-                        .content(jsonContent)
+                        .msgType("interactive")
+                        .content(cardJson)
                         .build())
                 .build();
         try {
