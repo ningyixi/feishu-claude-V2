@@ -63,6 +63,12 @@ public class TerminalSession {
     /** 当前活跃轮次（reader 线程路由事件的目标），受 turnLock 保护 */
     private volatile Turn currentTurn;
 
+    /** 轮次活动阶段 — 供实例状态展示（思考中/工具执行/生成回复） */
+    public enum ActivityPhase { IDLE, THINKING, TOOL_RUNNING, GENERATING }
+    private volatile ActivityPhase activityPhase = ActivityPhase.IDLE;
+    private volatile String currentToolName;
+    private volatile long lastTurnEndTime;
+
     private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor(r -> {
         Thread t = new Thread(r, "terminal-watchdog");
         t.setDaemon(true);
@@ -154,7 +160,50 @@ public class TerminalSession {
     public String getWorkingDir() { return workingDir; }
     public String getModel() { return model != null && !model.isBlank() ? model : detectedModel; }
 
+    // ===== 活动状态（供实例状态服务读取，全部 volatile 无锁） =====
+
+    /** 当前活动阶段：IDLE / THINKING / TOOL_RUNNING / GENERATING */
+    public ActivityPhase getActivityPhase() { return activityPhase; }
+
+    /** 正在执行的工具名（TOOL_RUNNING 时非空） */
+    public String getCurrentToolName() { return currentToolName; }
+
+    /** 是否有活跃轮次（已写入 stdin、尚未 result） */
+    public boolean isTurnActive() {
+        Turn t = currentTurn;
+        return t != null && !t.future.isDone();
+    }
+
+    /** 当前轮次已进行毫秒数（无活跃轮次为 0） */
+    public long getTurnElapsedMs() {
+        Turn t = currentTurn;
+        return isTurnActive() ? System.currentTimeMillis() - t.startTime : 0;
+    }
+
+    /** 排队等待的轮次数（turnLock 队列长度） */
+    public int getQueuedCount() { return turnLock.getQueueLength(); }
+
+    /** 上一轮结束时间戳（0 = 本进程还没完成过任何轮次） */
+    public long getLastTurnEndTime() { return lastTurnEndTime; }
+
+    /** stdout 最后一次有输出的时间戳（看门狗同源数据） */
+    public long getLastEventTime() { return lastEventTime; }
+
     // ===== 消息发送 =====
+
+    /**
+     * 图片附件 — base64 + mediaType，随 user 消息的 content 数组发给 CLI。
+     * 实测 stream-json 输入原生支持 Anthropic image content block（网关视觉模型直接读取）。
+     */
+    public static class ImageAttachment {
+        public final String mediaType;   // image/png, image/jpeg, image/gif, image/webp
+        public final String base64Data;
+
+        public ImageAttachment(String mediaType, String base64Data) {
+            this.mediaType = mediaType;
+            this.base64Data = base64Data;
+        }
+    }
 
     /**
      * 向常驻进程发送消息并等待本轮完成（阻塞至 result 事件）。
@@ -164,6 +213,13 @@ public class TerminalSession {
      * @return 本轮最终文本（出错时以 ❌/⏰ 前缀）
      */
     public String sendMessage(String message, TurnListener listener) {
+        return sendMessage(message, null, listener);
+    }
+
+    /**
+     * 带图片附件的消息发送 — content 变成 [text块, image块...] 数组（Anthropic 消息格式）。
+     */
+    public String sendMessage(String message, List<ImageAttachment> images, TurnListener listener) {
         if (listener == null) listener = new NullTurnListener();
 
         // 排队提示：若锁被占用说明上一轮还在跑
@@ -184,21 +240,46 @@ public class TerminalSession {
 
             Turn turn = new Turn(listener);
             currentTurn = turn;
+            activityPhase = ActivityPhase.THINKING;
+            currentToolName = null;
             listener.onTurnStart();
 
-            // 写入 stdin（NDJSON user 消息）
+            // 写入 stdin（NDJSON user 消息；有图片时 content 为块数组）
             try {
                 JsonObject msg = new JsonObject();
                 msg.addProperty("type", "user");
                 msg.addProperty("session_id", "");
                 JsonObject messageObj = new JsonObject();
                 messageObj.addProperty("role", "user");
-                messageObj.addProperty("content", message);
+                if (images == null || images.isEmpty()) {
+                    messageObj.addProperty("content", message);
+                } else {
+                    JsonArray content = new JsonArray();
+                    if (message != null && !message.isBlank()) {
+                        JsonObject textBlock = new JsonObject();
+                        textBlock.addProperty("type", "text");
+                        textBlock.addProperty("text", message);
+                        content.add(textBlock);
+                    }
+                    for (ImageAttachment img : images) {
+                        JsonObject imageBlock = new JsonObject();
+                        imageBlock.addProperty("type", "image");
+                        JsonObject source = new JsonObject();
+                        source.addProperty("type", "base64");
+                        source.addProperty("media_type", img.mediaType);
+                        source.addProperty("data", img.base64Data);
+                        imageBlock.add("source", source);
+                        content.add(imageBlock);
+                    }
+                    messageObj.add("content", content);
+                }
                 msg.add("message", messageObj);
                 msg.add("parent_tool_use_id", JsonNull.INSTANCE);
 
                 String json = msg.toString();
-                log.info("[Terminal] >> {}", json.substring(0, Math.min(200, json.length())));
+                log.info("[Terminal] >> {} ({}字, 图片{}张)",
+                        json.substring(0, Math.min(200, json.length())), message != null ? message.length() : 0,
+                        images != null ? images.size() : 0);
                 writer.write(json);
                 writer.newLine();
                 writer.flush();
@@ -230,6 +311,9 @@ public class TerminalSession {
             } finally {
                 wd.cancel(false);
                 currentTurn = null;
+                activityPhase = ActivityPhase.IDLE;
+                currentToolName = null;
+                lastTurnEndTime = System.currentTimeMillis();
             }
         } finally {
             turnLock.unlock();
@@ -372,12 +456,14 @@ public class TerminalSession {
             if (text.isEmpty()) return;
             if (turn.thinkingStartMs > 0 && turn.thinkingEndMs == 0) turn.thinkingEndMs = now;  // 思考结束
             turn.answerText.append(text);
+            activityPhase = ActivityPhase.GENERATING;
             turn.listener.onTextDelta(text);
         } else if ("thinking_delta".equals(dType) && delta.has("thinking")) {
             String th = delta.get("thinking").getAsString();
             if (th.isEmpty()) return;
             if (turn.thinkingStartMs == 0) turn.thinkingStartMs = now;
             turn.thinkingText.append(th);
+            if (activityPhase != ActivityPhase.TOOL_RUNNING) activityPhase = ActivityPhase.THINKING;
             turn.listener.onThinkingDelta(th);
         }
         // input_json_delta / signature_delta 忽略
@@ -400,6 +486,8 @@ public class TerminalSession {
                 ToolStep step = new ToolStep(id, name, detail, "Task".equalsIgnoreCase(name));
                 turn.toolSteps.add(step);
                 turn.stepsById.put(id, step);
+                activityPhase = ActivityPhase.TOOL_RUNNING;
+                currentToolName = name;
                 log.info("[Terminal] [tool_use] {} {}", name, detail);
                 turn.listener.onToolStart(step);
             }
@@ -423,6 +511,16 @@ public class TerminalSession {
             boolean isError = obj.has("is_error") && obj.get("is_error").getAsBoolean();
             step.markEnd(isError ? ToolStep.Status.ERROR : ToolStep.Status.SUCCESS);
             turn.listener.onToolEnd(step);
+            // 所有工具都结束了 → 回到"等模型下一步动作"的思考态
+            String stillRunning = turn.toolSteps.stream()
+                    .filter(s -> s.status == ToolStep.Status.RUNNING)
+                    .map(s -> s.name).findFirst().orElse(null);
+            if (stillRunning == null) {
+                activityPhase = ActivityPhase.THINKING;
+                currentToolName = null;
+            } else {
+                currentToolName = stillRunning;
+            }
         }
     }
 

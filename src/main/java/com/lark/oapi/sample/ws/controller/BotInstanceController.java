@@ -4,12 +4,14 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.lark.oapi.Client;
 import com.lark.oapi.sample.ws.model.dto.BotInstanceDTO;
+import com.lark.oapi.sample.ws.model.dto.InstanceStatusDTO;
 import com.lark.oapi.sample.ws.model.dto.TestResultDTO;
 import com.lark.oapi.sample.ws.model.entity.BotInstance;
 import com.lark.oapi.sample.ws.model.entity.ChatMessage;
 import com.lark.oapi.sample.ws.repository.BotInstanceRepository;
 import com.lark.oapi.sample.ws.repository.ChatMessageRepository;
 import com.lark.oapi.sample.ws.service.FeishuBotService;
+import com.lark.oapi.sample.ws.service.InstanceStatusService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.ResponseEntity;
@@ -34,13 +36,22 @@ public class BotInstanceController {
     private final BotInstanceRepository instanceRepo;
     private final ChatMessageRepository chatMessageRepo;
     private final FeishuBotService feishuBotService;
+    private final InstanceStatusService instanceStatusService;
 
     public BotInstanceController(BotInstanceRepository instanceRepo,
                                  ChatMessageRepository chatMessageRepo,
-                                 FeishuBotService feishuBotService) {
+                                 FeishuBotService feishuBotService,
+                                 InstanceStatusService instanceStatusService) {
         this.instanceRepo = instanceRepo;
         this.chatMessageRepo = chatMessageRepo;
         this.feishuBotService = feishuBotService;
+        this.instanceStatusService = instanceStatusService;
+    }
+
+    /** 全部实例的实时运行状态（前端 4s 轮询，趣味徽章） */
+    @GetMapping("/status")
+    public List<InstanceStatusDTO> statuses() {
+        return instanceStatusService.resolveAll();
     }
 
     @GetMapping

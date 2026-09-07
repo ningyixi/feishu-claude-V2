@@ -54,6 +54,19 @@ public class FeishuBotService {
     // 多实例连接管理：instanceId -> InstanceConnection
     private final Map<Long, InstanceConnection> connections = new ConcurrentHashMap<>();
 
+    // 每实例最后收到消息的时间（实例状态"空闲/摸鱼/睡觉"分级依据）
+    private final Map<Long, Long> lastMessageTime = new ConcurrentHashMap<>();
+
+    /** 实例的飞书 WS 是否在线 */
+    public boolean isInstanceConnected(Long instanceId) {
+        return connections.containsKey(instanceId);
+    }
+
+    /** 实例最后一次收到消息的时间戳（0=从未） */
+    public long getLastMessageTime(Long instanceId) {
+        return lastMessageTime.getOrDefault(instanceId, 0L);
+    }
+
     public FeishuBotService(UserModeRepository userModeRepo,
                             ChatMessageRepository chatMessageRepo,
                             ShellService shellService,
@@ -106,7 +119,7 @@ public class FeishuBotService {
 
                         Thread.ofVirtual().name("msg-" + messageId).start(() -> {
                             try {
-                                handleMessage(instanceId, openId, chatType, chatId, msgType, rawContent);
+                                handleMessage(instanceId, openId, chatType, chatId, messageId, msgType, rawContent);
                             } catch (Exception e) {
                                 log.error("[Handler] 处理消息异常: openId={}", openId, e);
                                 replyText(instanceId, openId, chatType, chatId, "处理消息时出错了: " + e.getMessage());
@@ -132,7 +145,7 @@ public class FeishuBotService {
                                 replyText(instanceId, openId, "p2p", "",
                                         "✅ 你选择了: **" + choice + "**");
                                 // 将按钮选择作为消息处理
-                                handleMessage(instanceId, openId, "p2p", "", "text",
+                                handleMessage(instanceId, openId, "p2p", "", "", "text",
                                         "{\"text\":\"" + choice + "\"}");
                             } catch (Exception e) {
                                 log.error("[Card] 处理按钮点击异常", e);
@@ -236,28 +249,40 @@ public class FeishuBotService {
 
     // ===== 消息处理 =====
 
-    private void handleMessage(Long instanceId, String openId, String chatType, String chatId, String msgType, String rawContent) {
+    /** 单张图片大小上限（base64 前的原始字节数） */
+    private static final int MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+    private void handleMessage(Long instanceId, String openId, String chatType, String chatId, String messageId, String msgType, String rawContent) {
         InstanceConnection conn = connections.get(instanceId);
         if (conn == null) return;
 
+        lastMessageTime.put(instanceId, System.currentTimeMillis());   // 活跃时间（状态分级用）
+
         BotInstance instance = conn.instance;
 
-        if (!"text".equals(msgType)) {
-            replyText(instanceId, openId, chatType, chatId, "暂时只支持文本消息。");
+        // ===== 解析消息内容：text / image / sticker =====
+        boolean isText = "text".equals(msgType);
+        boolean isImage = "image".equals(msgType);
+        boolean isSticker = "sticker".equals(msgType);
+        if (!isText && !isImage && !isSticker) {
+            replyText(instanceId, openId, chatType, chatId, "暂时只支持文本、图片和表情包消息。");
             return;
         }
 
-        String text = extractText(rawContent);
-        if (text == null || text.isBlank()) {
-            replyText(instanceId, openId, chatType, chatId, "消息内容为空。");
-            return;
+        String text = "";
+        if (isText) {
+            text = extractText(rawContent);
+            if (text == null || text.isBlank()) {
+                replyText(instanceId, openId, chatType, chatId, "消息内容为空。");
+                return;
+            }
+            text = text.replaceAll("@_user_\\d+\\s*", "").trim();
+            if (text.isEmpty()) return;
         }
-
-        text = text.replaceAll("@_user_\\d+\\s*", "").trim();
-        if (text.isEmpty()) return;
 
         // 保存用户消息到对话历史
-        saveChatMessage(instanceId, openId, "user", text, chatType);
+        saveChatMessage(instanceId, openId, "user",
+                isText ? text : (isImage ? "[图片]" : "[表情包]"), chatType);
 
         // 权限检查：允许的 openId 或实例配置的 openId
         boolean allowed = ALLOWED_OPEN_IDS.contains(openId)
@@ -283,7 +308,7 @@ public class FeishuBotService {
         String model = instance.getClaudeModel();
         if (model == null) model = "";
 
-        if (text.startsWith("/")) {
+        if (isText && text.startsWith("/")) {
             try {
                 if (handleCommand(instanceId, openId, chatType, chatId, text, instance, dir, model)) return;
             } catch (Exception e) {
@@ -295,13 +320,46 @@ public class FeishuBotService {
 
         Mode mode = loadMode(openId, instance);
         if (mode == Mode.CHAT) {
-            log.info("[Chat][{}] 调用 Claude: openId={}, dir={}, model={}", instance.getName(), openId, dir, model);
+            // ===== 媒体消息：下载图片并转成 image content block =====
+            List<TerminalSession.ImageAttachment> images = List.of();
+            if (isImage || isSticker) {
+                String fileKey = extractMediaKey(rawContent, isImage ? "image_key" : "file_key");
+                if (fileKey == null || fileKey.isBlank()) {
+                    replyText(instanceId, openId, chatType, chatId, "❌ 无法解析" + (isImage ? "图片" : "表情包") + "资源。");
+                    return;
+                }
+                MediaData media = downloadMedia(conn.httpClient, messageId, fileKey, isImage ? "image" : "file");
+                if (media == null) {
+                    replyText(instanceId, openId, chatType, chatId, isSticker
+                            ? "😅 飞书接口暂不支持下载商店表情包资源。可以截图后以图片形式发给我，我就能看到啦。"
+                            : "❌ 图片下载失败。请确认应用已开通「获取消息资源」权限（im:resource），且机器人与消息在同一会话中。");
+                    return;
+                }
+                if (!media.mediaType.startsWith("image/")) {
+                    replyText(instanceId, openId, chatType, chatId, "暂只支持图片类文件（收到的是 " + media.mediaType + "）。");
+                    return;
+                }
+                if (media.bytes.length > MAX_IMAGE_BYTES) {
+                    replyText(instanceId, openId, chatType, chatId, "❌ 图片过大（" + (media.bytes.length / 1024 / 1024) + "MB > 10MB），请压缩后重发。");
+                    return;
+                }
+                images = List.of(new TerminalSession.ImageAttachment(
+                        media.mediaType, java.util.Base64.getEncoder().encodeToString(media.bytes)));
+                text = isSticker
+                        ? "用户发来一个表情包，请理解表情包的画面内容和情绪，并作出回应。"
+                        : "用户发来一张图片，请查看图片内容并作出回应。";
+                log.info("[Chat][{}] 媒体消息: type={}, {}KB, mediaType={}",
+                        instance.getName(), isImage ? "image" : "sticker", media.bytes.length / 1024, media.mediaType);
+            }
+
+            log.info("[Chat][{}] 调用 Claude: openId={}, dir={}, model={}, 图片={}张",
+                    instance.getName(), openId, dir, model, images.size());
             try {
                 // 流式卡片控制器：CardKit 原地增量更新，完成判定由协议 result 事件驱动（零等待）
                 boolean isGroup = "group".equals(chatType);
                 StreamingCardController controller = new StreamingCardController(
                         conn.httpClient, isGroup ? "chat_id" : "open_id", isGroup ? chatId : openId);
-                String reply = claudeCodeService.chat(instanceId, openId, text, dir, model, controller);
+                String reply = claudeCodeService.chat(instanceId, openId, text, images, dir, model, controller);
                 log.info("[Chat][{}] Claude 轮次完成 ({}字, 卡片送达={})",
                         instance.getName(), reply != null ? reply.length() : 0, controller.isDelivered());
                 if (controller.isDelivered()) {
@@ -316,10 +374,70 @@ public class FeishuBotService {
                 replyText(instanceId, openId, chatType, chatId, "❌ Claude 调用失败: " + e.getMessage());
             }
         } else {
+            if (!isText) {
+                replyText(instanceId, openId, chatType, chatId, "🖥️ Shell 模式不支持图片消息，发送 /chat 切换到对话模式。");
+                return;
+            }
             log.info("[Shell][{}] 执行: openId={}, cmd={}", instance.getName(), openId, text);
             String output = shellService.execute(text);
             replyText(instanceId, openId, chatType, chatId, output);
         }
+    }
+
+    // ===== 媒体下载与识别 =====
+
+    private record MediaData(String mediaType, byte[] bytes) {}
+
+    /** 从消息 content JSON 提取 image_key / file_key（对照 openclaw-lark converters/image.ts、sticker.ts） */
+    private String extractMediaKey(String rawContent, String keyName) {
+        try {
+            JsonObject json = Jsons.DEFAULT.fromJson(rawContent, JsonObject.class);
+            if (json != null && json.has(keyName)) return json.get(keyName).getAsString();
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    /**
+     * 下载消息中的媒体资源（im.message.resource API，需 im:resource 权限）。
+     * 注意：飞书 API 明确「暂不支持表情包资源下载」，sticker 会走 type=file 尝试，失败返回 null 由上层友好提示。
+     */
+    private MediaData downloadMedia(Client client, String messageId, String fileKey, String type) {
+        try {
+            var resp = client.im().messageResource().get(
+                    com.lark.oapi.service.im.v1.model.GetMessageResourceReq.newBuilder()
+                            .messageId(messageId)
+                            .fileKey(fileKey)
+                            .type(type)
+                            .build());
+            if (resp.getData() == null) {
+                log.warn("[Media] 下载失败: code={}, msg={}, fileKey={}", resp.getCode(), resp.getMsg(), fileKey);
+                return null;
+            }
+            byte[] bytes = resp.getData().toByteArray();
+            String mediaType = detectMediaType(bytes, resp.getFileName());
+            log.info("[Media] 下载成功: {}KB, mediaType={}, fileName={}", bytes.length / 1024, mediaType, resp.getFileName());
+            return new MediaData(mediaType, bytes);
+        } catch (Exception e) {
+            log.warn("[Media] 下载异常: fileKey={}, {}", fileKey, e.getMessage());
+            return null;
+        }
+    }
+
+    /** 按魔数识别图片 MIME（飞书响应不一定带可靠文件名） */
+    static String detectMediaType(byte[] b, String fileName) {
+        if (b.length >= 4 && b[0] == (byte) 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return "image/png";
+        if (b.length >= 3 && b[0] == (byte) 0xFF && b[1] == (byte) 0xD8 && b[2] == (byte) 0xFF) return "image/jpeg";
+        if (b.length >= 6 && b[0] == 'G' && b[1] == 'I' && b[2] == 'F' && b[3] == '8') return "image/gif";
+        if (b.length >= 12 && b[0] == 'R' && b[1] == 'I' && b[2] == 'F' && b[3] == 'F'
+                && b[8] == 'W' && b[9] == 'E' && b[10] == 'B' && b[11] == 'P') return "image/webp";
+        if (fileName != null) {
+            String lower = fileName.toLowerCase();
+            if (lower.endsWith(".png")) return "image/png";
+            if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+            if (lower.endsWith(".gif")) return "image/gif";
+            if (lower.endsWith(".webp")) return "image/webp";
+        }
+        return "application/octet-stream";
     }
 
     private boolean handleCommand(Long instanceId, String openId, String chatType, String chatId, String text, BotInstance instance, String dir, String model) {

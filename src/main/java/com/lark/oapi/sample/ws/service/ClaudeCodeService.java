@@ -41,10 +41,19 @@ public class ClaudeCodeService {
      */
     public String chat(Long instanceId, String openId, String message, String workingDir, String model,
                        TurnListener listener) {
+        return chat(instanceId, openId, message, null, workingDir, model, listener);
+    }
+
+    /**
+     * 带图片附件的对话 — 图片以 base64 image content block 随消息发给 CLI。
+     */
+    public String chat(Long instanceId, String openId, String message,
+                       java.util.List<TerminalSession.ImageAttachment> images,
+                       String workingDir, String model, TurnListener listener) {
         try {
             TerminalSession session = getOrCreate(instanceId, workingDir, model);
-            log.info("[ClaudeCode][{}] 发送消息: openId={}", instanceId, openId);
-            return session.sendMessage(message, listener);
+            log.info("[ClaudeCode][{}] 发送消息: openId={}, 图片={}张", instanceId, openId, images != null ? images.size() : 0);
+            return session.sendMessage(message, images, listener);
         } catch (Exception e) {
             log.error("[ClaudeCode][{}] 对话失败", instanceId, e);
             if (listener != null) listener.onTurnError("Claude 对话失败: " + e.getMessage(), false);
@@ -100,6 +109,11 @@ public class ClaudeCodeService {
         if (a == null && b == null) return true;
         if (a == null || b == null) return false;
         return a.equals(b);
+    }
+
+    /** 获取实例的终端会话（可能为 null = 尚未创建），供状态服务读取活动阶段 */
+    public TerminalSession getSession(Long instanceId) {
+        return sessions.get(instanceId);
     }
 
     /**
