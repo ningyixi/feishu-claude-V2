@@ -8,6 +8,23 @@
 
 # 构建产物
 target/
+frontend/dist/
+
+# 依赖目录（绝不入库）
+node_modules/
+frontend/node_modules/
+
+# Vite 缓存
+.vite/
+frontend/node_modules/.vite/
+
+# 运行时数据（H2 数据库，含飞书 appSecret 等敏感配置，绝不入库）
+data/
+*.mv.db
+*.trace.db
+
+# 临时验证脚手架
+verify/
 
 # OS
 .DS_Store
