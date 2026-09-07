@@ -342,7 +342,10 @@ public class TerminalSession {
         cmd.add("--output-format"); cmd.add("stream-json");
         cmd.add("--include-partial-messages");   // ★ token 级增量流（text_delta / thinking_delta）
         cmd.add("--verbose");
-        cmd.add("--permission-mode"); cmd.add("acceptEdits");
+        // bypassPermissions：无头(-p)模式下没有交互界面，acceptEdits 只放行文件编辑，
+        // Bash 命令（git/curl 等）仍会弹审批 → 无人可批 → 被拦截。
+        // 本机个人工作台场景直接放行全部工具（安全边界=本机+飞书白名单，见安全立项）。
+        cmd.add("--permission-mode"); cmd.add("bypassPermissions");
         if (!model.isBlank()) {
             cmd.add("--model");
             cmd.add(model);
