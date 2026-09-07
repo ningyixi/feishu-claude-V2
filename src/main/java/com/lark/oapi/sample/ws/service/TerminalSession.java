@@ -1,5 +1,7 @@
 package com.lark.oapi.sample.ws.service;
 
+import com.google.gson.JsonArray;
+import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -8,20 +10,39 @@ import org.slf4j.LoggerFactory;
 
 import java.io.*;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.*;
+import java.util.concurrent.locks.ReentrantLock;
 
 /**
  * 常驻终端会话 — 包装一个长运行的 Claude CLI 进程。
  * <p>
- * 使用 {@code --input-format stream-json --output-format stream-json} 模式，
- * 通过 stdin 发送 NDJSON 消息，通过 stdout 接收 NDJSON 事件流。
- * 进程在多次对话之间保持存活，上下文自动维护在同一进程内。
+ * 使用 {@code --input-format stream-json --output-format stream-json --include-partial-messages}，
+ * 通过 stdin 发送 NDJSON user 消息，通过 stdout 接收 NDJSON 事件流。
+ * <p>
+ * <b>完成判定是事件驱动的，不靠超时猜测</b>：协议的 {@code result} 事件是每轮唯一且确定的终局信号
+ * （实测含子 Agent 场景也是每轮恰好一个 result），收到即完成、零等待。
+ * 增量文本来自 {@code stream_event} 的 {@code content_block_delta}（text_delta / thinking_delta），
+ * 工具步骤来自 {@code assistant} 的 tool_use 块与 {@code user} 的 tool_result 块。
+ * <p>
+ * 超时只作为进程卡死的兜底（{@link #NO_EVENT_IDLE_MS} 无任何输出 / {@link #HARD_TURN_TIMEOUT_MS} 硬上限），
+ * 不参与正常完成判定。轮次之间用 {@link ReentrantLock} 串行化，杜绝两轮事件串写同一 buffer 的竞态。
+ * <p>
+ * 生命周期回调全部在 reader 虚拟线程上触发（见 {@link TurnListener}），实现方（卡片控制器）不得阻塞。
  */
 public class TerminalSession {
 
     private static final Logger log = LoggerFactory.getLogger(TerminalSession.class);
-    private static final long READ_TIMEOUT_MS = 120_000; // 每行读取超时 2 分钟
-    private static final int MAX_OUTPUT_CHARS = 18000;
+
+    /** 单轮硬性最大时长兜底：超过判定进程失控，强制终止并重启 */
+    private static final long HARD_TURN_TIMEOUT_MS = 30 * 60_000L;
+    /** stdout 完全无输出的兜底：thinking/tool 事件流会持续刷新，静默这么久=进程卡死 */
+    private static final long NO_EVENT_IDLE_MS = 120_000L;
+    /** 看门狗检查周期 */
+    private static final long WATCHDOG_PERIOD_MS = 10_000L;
+    /** future.get 相对硬上限的额外宽限，确保看门狗先触发 */
+    private static final long FUTURE_GRACE_MS = 60_000L;
 
     private final String sessionKey;   // 会话标识（用于日志）
     private final String workingDir;
@@ -31,13 +52,22 @@ public class TerminalSession {
     private volatile BufferedWriter writer;
     private volatile BufferedReader reader;
     private volatile String claudeSessionId;
+    private volatile String detectedModel;
     private volatile boolean alive;
-
-    // 当前轮次的结果 Future 和累积文本
-    private CompletableFuture<TurnResult> currentResult;
-    private StringBuilder accumulatedText;
+    private volatile long lastEventTime;
 
     private Thread readerThread;
+
+    /** 轮次串行化锁 — 同一时刻只有一轮在跑 */
+    private final ReentrantLock turnLock = new ReentrantLock();
+    /** 当前活跃轮次（reader 线程路由事件的目标），受 turnLock 保护 */
+    private volatile Turn currentTurn;
+
+    private final ScheduledExecutorService watchdog = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "terminal-watchdog");
+        t.setDaemon(true);
+        return t;
+    });
 
     public TerminalSession(String sessionKey, String workingDir, String model) {
         this.sessionKey = sessionKey;
@@ -47,15 +77,13 @@ public class TerminalSession {
 
     // ===== 生命周期 =====
 
-    /**
-     * 启动 Claude CLI 常驻进程
-     */
+    /** 启动 Claude CLI 常驻进程 */
     public synchronized void start() throws IOException {
         if (alive && process != null && process.isAlive()) {
             return;
         }
 
-        java.util.List<String> command = buildCommand();
+        List<String> command = buildCommand();
         log.info("[Terminal] 启动常驻进程: {}", String.join(" ", command));
 
         ProcessBuilder pb = new ProcessBuilder(command);
@@ -75,28 +103,24 @@ public class TerminalSession {
         }
         writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
         reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
+        lastEventTime = System.currentTimeMillis();
 
-        // stderr 后台读取，避免阻塞
         Thread.ofVirtual().name("stderr-" + sessionKey).start(this::readStderr);
-
-        // stdout 事件读取线程
         readerThread = Thread.ofVirtual().name("reader-" + sessionKey).start(this::readerLoop);
 
         alive = true;
         log.info("[Terminal] 常驻进程已启动: key={}, pid={}", sessionKey, process.pid());
     }
 
-    /**
-     * 销毁进程，释放资源
-     */
+    /** 销毁进程，释放资源。若有活跃轮次则以中止收尾。 */
     public synchronized void destroy() {
         alive = false;
-        if (currentResult != null && !currentResult.isDone()) {
-            currentResult.completeExceptionally(new IOException("终端已销毁"));
+        Turn t = currentTurn;
+        if (t != null && !t.future.isDone()) {
+            t.listener.onTurnError("会话已销毁", true);
+            t.future.complete(errorResult(t, "会话已销毁", true));
         }
-        if (writer != null) {
-            try { writer.close(); } catch (IOException ignored) {}
-        }
+        closeQuietly(writer);
         if (process != null) {
             process.destroy();
             try {
@@ -108,100 +132,133 @@ public class TerminalSession {
                 process.destroyForcibly();
             }
         }
+        watchdog.shutdownNow();
         log.info("[Terminal] 常驻进程已销毁: key={}", sessionKey);
+    }
+
+    /** 仅中止当前轮次（/new、/stop），不销毁进程。对照 openclaw-lark 的 abortCard 快路径。 */
+    public void abortCurrentTurn() {
+        Turn t = currentTurn;
+        if (t != null && !t.future.isDone()) {
+            log.info("[Terminal] 主动中止当前轮次: key={}", sessionKey);
+            t.listener.onTurnError("已停止", true);
+            t.future.complete(errorResult(t, "已停止", true));
+        }
     }
 
     public boolean isAlive() {
         return alive && process != null && process.isAlive();
     }
 
-    public String getClaudeSessionId() {
-        return claudeSessionId;
-    }
+    public String getClaudeSessionId() { return claudeSessionId; }
+    public String getWorkingDir() { return workingDir; }
+    public String getModel() { return model != null && !model.isBlank() ? model : detectedModel; }
 
     // ===== 消息发送 =====
 
     /**
-     * 向常驻进程发送消息并等待回复。
-     * 同步方法，同一时间只处理一条消息。
+     * 向常驻进程发送消息并等待本轮完成（阻塞至 result 事件）。
+     * 流式增量、工具步骤、终局都通过 {@code listener} 回调推送。
+     * 同一会话的多轮消息串行化：上一轮未完成时，本轮先触发 {@link TurnListener#onQueued()} 再排队等待。
+     *
+     * @return 本轮最终文本（出错时以 ❌/⏰ 前缀）
      */
-    public synchronized String sendMessage(String message) {
-        if (!isAlive()) {
-            try {
-                log.info("[Terminal] 进程已死，重启中...");
-                start();
-            } catch (IOException e) {
-                return "❌ 无法重启终端: " + e.getMessage();
-            }
+    public String sendMessage(String message, TurnListener listener) {
+        if (listener == null) listener = new NullTurnListener();
+
+        // 排队提示：若锁被占用说明上一轮还在跑
+        if (!turnLock.tryLock()) {
+            listener.onQueued();
+            turnLock.lock();
         }
-
-        accumulatedText = new StringBuilder();
-        currentResult = new CompletableFuture<>();
-
         try {
-            // 构造 NDJSON 消息
-            JsonObject msg = new JsonObject();
-            msg.addProperty("type", "user");
-            msg.addProperty("session_id", "");
-            JsonObject messageObj = new JsonObject();
-            messageObj.addProperty("role", "user");
-            messageObj.addProperty("content", message);
-            msg.add("message", messageObj);
-            msg.add("parent_tool_use_id", JsonNull.INSTANCE);
-
-            String json = msg.toString();
-            log.info("[Terminal] >> {}", json.substring(0, Math.min(200, json.length())));
-            writer.write(json);
-            writer.newLine();
-            writer.flush();
-
-            // 等待 result 事件（由 reader 线程完成 future）
-            TurnResult result = currentResult.get(15, TimeUnit.MINUTES);
-            if (result.isError) {
-                return "❌ " + result.text;
+            if (!isAlive()) {
+                try {
+                    log.info("[Terminal] 进程已死，重启中...");
+                    start();
+                } catch (IOException e) {
+                    listener.onTurnError("无法重启终端: " + e.getMessage(), false);
+                    return "❌ 无法重启终端: " + e.getMessage();
+                }
             }
-            String text = result.text;
-            if (text.isBlank()) {
-                text = accumulatedText.toString();
-            }
-            return truncate(text.isBlank() ? "(Claude 返回了空回复)" : text);
 
-        } catch (TimeoutException e) {
-            currentResult.cancel(true);
-            return "⏰ Claude 响应超时（15分钟）";
-        } catch (Exception e) {
-            log.error("[Terminal] 发送消息失败", e);
-            return "❌ 发送消息失败: " + e.getMessage();
+            Turn turn = new Turn(listener);
+            currentTurn = turn;
+            listener.onTurnStart();
+
+            // 写入 stdin（NDJSON user 消息）
+            try {
+                JsonObject msg = new JsonObject();
+                msg.addProperty("type", "user");
+                msg.addProperty("session_id", "");
+                JsonObject messageObj = new JsonObject();
+                messageObj.addProperty("role", "user");
+                messageObj.addProperty("content", message);
+                msg.add("message", messageObj);
+                msg.add("parent_tool_use_id", JsonNull.INSTANCE);
+
+                String json = msg.toString();
+                log.info("[Terminal] >> {}", json.substring(0, Math.min(200, json.length())));
+                writer.write(json);
+                writer.newLine();
+                writer.flush();
+            } catch (Exception e) {
+                log.error("[Terminal] 写入 stdin 失败", e);
+                currentTurn = null;
+                listener.onTurnError("发送失败: " + e.getMessage(), false);
+                return "❌ 发送失败: " + e.getMessage();
+            }
+
+            // 看门狗：仅兜底进程卡死/失控，不参与正常完成判定
+            ScheduledFuture<?> wd = watchdog.scheduleAtFixedRate(
+                    () -> checkWatchdog(turn), WATCHDOG_PERIOD_MS, WATCHDOG_PERIOD_MS, TimeUnit.MILLISECONDS);
+
+            try {
+                TurnResult result = turn.future.get(HARD_TURN_TIMEOUT_MS + FUTURE_GRACE_MS, TimeUnit.MILLISECONDS);
+                return result.isError || result.aborted
+                        ? (result.text != null && !result.text.isBlank() ? result.text : "❌ 本轮未成功")
+                        : result.text;
+            } catch (TimeoutException e) {
+                log.error("[Terminal] future 等待超时（看门狗应已先触发）: key={}", sessionKey);
+                listener.onTurnError("⏰ Claude 响应超时", false);
+                restartProcess();
+                return "⏰ Claude 响应超时，已重启终端，请重试";
+            } catch (Exception e) {
+                log.error("[Terminal] 等待回复失败", e);
+                listener.onTurnError("等待回复失败: " + e.getMessage(), false);
+                return "❌ 等待回复失败: " + e.getMessage();
+            } finally {
+                wd.cancel(false);
+                currentTurn = null;
+            }
+        } finally {
+            turnLock.unlock();
         }
     }
 
     // ===== 内部：构建启动命令 =====
 
-    private java.util.List<String> buildCommand() {
-        java.util.List<String> cmd = new java.util.ArrayList<>();
+    private List<String> buildCommand() {
+        List<String> cmd = new ArrayList<>();
         String os = System.getProperty("os.name", "").toLowerCase();
         String resolved = resolveCommand("claude");
 
         if (os.contains("win") && resolved != null
                 && (resolved.endsWith(".cmd") || resolved.endsWith(".bat"))) {
-            // Windows batch file 必须通过 cmd.exe /c 运行（ProcessBuilder 不能直接执行 .cmd）
             cmd.add("cmd.exe");
             cmd.add("/c");
             cmd.add(resolved);
             log.info("[Terminal] 使用 cmd.exe 运行: {}", resolved);
         } else {
-            // 直接运行可执行文件（Linux/Mac 的 claude binary 或 Windows 的 .exe）
             cmd.add(resolved != null ? resolved : "claude");
         }
 
         cmd.add("-p");
-        cmd.add("--input-format");
-        cmd.add("stream-json");
-        cmd.add("--output-format");
-        cmd.add("stream-json");
+        cmd.add("--input-format");  cmd.add("stream-json");
+        cmd.add("--output-format"); cmd.add("stream-json");
+        cmd.add("--include-partial-messages");   // ★ token 级增量流（text_delta / thinking_delta）
         cmd.add("--verbose");
-        cmd.add("--permission-mode");
-        cmd.add("acceptEdits");
+        cmd.add("--permission-mode"); cmd.add("acceptEdits");
         if (!model.isBlank()) {
             cmd.add("--model");
             cmd.add(model);
@@ -209,10 +266,6 @@ public class TerminalSession {
         return cmd;
     }
 
-    /**
-     * 在 PATH 中解析命令的完整路径。
-     * Windows 上 npm 安装的 claude 是 .cmd 文件，需要找到完整路径。
-     */
     private String resolveCommand(String command) {
         String os = System.getProperty("os.name", "").toLowerCase();
         if (os.contains("win")) {
@@ -221,7 +274,7 @@ public class TerminalSession {
             for (String dir : path.split(";")) {
                 if (dir.isBlank()) continue;
                 for (String ext : new String[]{".exe", ".cmd", ".bat"}) {
-                    java.io.File f = new java.io.File(dir, command + ext);
+                    File f = new File(dir, command + ext);
                     if (f.exists()) {
                         log.info("[Terminal] 解析命令路径: {} -> {}", command, f.getAbsolutePath());
                         return f.getAbsolutePath();
@@ -236,104 +289,291 @@ public class TerminalSession {
 
     private void readerLoop() {
         try {
-            while (alive && process.isAlive()) {
-                String line = readLineWithTimeout(reader, READ_TIMEOUT_MS);
-                if (line == null) {
-                    if (!process.isAlive()) {
-                        log.info("[Terminal] 进程已退出, exitCode={}", getExitCode());
-                        break;
-                    }
-                    log.debug("[Terminal] readLine 返回 null, 进程仍存活, 继续等待");
-                    continue;
-                }
-
+            String line;
+            // 阻塞 readLine 跑在专用虚拟线程上（不再用 supplyAsync + commonPool，杜绝并发读流）
+            while (alive && process != null && process.isAlive() && (line = reader.readLine()) != null) {
                 line = line.trim();
                 if (line.isEmpty()) continue;
 
-                log.info("[Terminal] << {}", line.substring(0, Math.min(500, line.length())));
+                lastEventTime = System.currentTimeMillis();   // 任何输出都刷新看门狗
+
+                // 高频噪声：thinking_tokens 计数、task_progress 只刷新时间不打日志
+                boolean noisy = line.contains("\"thinking_tokens\"") || line.contains("\"task_progress\"");
+                if (!noisy) {
+                    log.info("[Terminal] << {}", line.substring(0, Math.min(400, line.length())));
+                }
 
                 try {
                     processEvent(JsonParser.parseString(line).getAsJsonObject());
                 } catch (Exception e) {
-                    log.info("[Terminal] [非JSON] {}", line.substring(0, Math.min(200, line.length())));
+                    log.debug("[Terminal] [非JSON] {}", line.substring(0, Math.min(200, line.length())));
                 }
             }
+        } catch (IOException e) {
+            log.info("[Terminal] reader 读取结束: {}", e.getMessage());
         } finally {
-            // 进程退出，确保 pending 的 future 不会永远等待
-            if (currentResult != null && !currentResult.isDone()) {
-                String text = accumulatedText != null ? accumulatedText.toString() : "";
-                currentResult.complete(new TurnResult(
-                        text.isBlank() ? "⚠️ 终端进程意外退出" : text, false));
-            }
             alive = false;
-            log.info("[Terminal] reader 线程退出: key={}, alive={}", sessionKey, process != null && process.isAlive());
+            // 进程退出：未完成轮次以错误收尾（不阻塞 future）
+            Turn t = currentTurn;
+            if (t != null && !t.future.isDone()) {
+                String partial = t.answerText.toString();
+                log.info("[Terminal] 进程退出，收尾未完成轮次 ({}字)", partial.length());
+                t.listener.onTurnError("终端进程意外退出", false);
+                t.future.complete(errorResult(t, partial.isBlank() ? "⚠️ 终端进程意外退出" : partial, false));
+            }
+            log.info("[Terminal] reader 线程退出: key={}", sessionKey);
         }
     }
 
     private void processEvent(JsonObject event) {
         String type = event.has("type") ? event.get("type").getAsString() : "";
         String subtype = event.has("subtype") ? event.get("subtype").getAsString() : "";
+        boolean isSubAgent = event.has("parent_tool_use_id") && !event.get("parent_tool_use_id").isJsonNull();
 
         switch (type) {
-            case "system" -> {
-                if (event.has("session_id")) {
-                    claudeSessionId = event.get("session_id").getAsString();
-                    log.info("[Terminal] session_id: {}", claudeSessionId);
-                }
-                if (!"thinking_tokens".equals(subtype)) {
-                    log.info("[Terminal] [system] {}", subtype);
-                }
-            }
-            case "user" -> {
-                // replay-user-messages 回显，或 tool_result 反馈 — 忽略
-            }
-            case "assistant" -> {
-                if (event.has("message")) {
-                    JsonObject msg = event.getAsJsonObject("message");
-                    if (msg.has("content")) {
-                        for (var item : msg.getAsJsonArray("content")) {
-                            JsonObject obj = item.getAsJsonObject();
-                            String ct = obj.has("type") ? obj.get("type").getAsString() : "";
-                            if ("text".equals(ct) && obj.has("text")) {
-                                String text = obj.get("text").getAsString();
-                                accumulatedText.append(text);
-                                log.info("[Terminal] [assistant] {}",
-                                        text.substring(0, Math.min(200, text.length())));
-                            }
-                            if ("tool_use".equals(ct)) {
-                                log.info("[Terminal] [tool_use] {}",
-                                        obj.has("name") ? obj.get("name").getAsString() : "?");
-                            }
-                        }
-                    }
-                }
-            }
-            case "result" -> {
-                log.info("[Terminal] [result] 完成");
-                String result = "";
-                boolean isError = false;
-                if (event.has("is_error") && event.get("is_error").getAsBoolean()) {
-                    isError = true;
-                    result = event.has("result") ? event.get("result").getAsString() : "unknown";
-                } else if (event.has("result")) {
-                    result = event.get("result").getAsString();
-                }
-                String finalText = result.isBlank() ? accumulatedText.toString() : result;
-                if (currentResult != null && !currentResult.isDone()) {
-                    currentResult.complete(new TurnResult(finalText, isError));
-                }
-                accumulatedText = new StringBuilder(); // 为下一轮重置
-            }
-            case "control_response" -> {
-                log.info("[Terminal] [control_response] {}", subtype);
-            }
-            default -> log.info("[Terminal] [{}]", type);
+            case "system" -> handleSystem(event, subtype);
+            case "stream_event" -> { if (!isSubAgent) handleStreamEvent(event); }
+            case "assistant" -> { if (!isSubAgent) handleAssistant(event); }
+            case "user" -> handleUser(event);   // tool_result 反馈（含子 Agent 的，用 tool_use_id 匹配）
+            case "result" -> handleResult(event);
+            case "control_response" -> log.debug("[Terminal] [control_response] {}", subtype);
+            default -> log.debug("[Terminal] [{}]", type);
         }
     }
 
-    // ===== 内部：stderr 读取 =====
+    private void handleSystem(JsonObject event, String subtype) {
+        switch (subtype) {
+            case "init" -> {
+                if (event.has("session_id")) claudeSessionId = event.get("session_id").getAsString();
+                if (event.has("model") && !event.get("model").isJsonNull()) detectedModel = event.get("model").getAsString();
+                log.info("[Terminal] [init] session_id={}, model={}", claudeSessionId, detectedModel);
+            }
+            case "task_started", "task_updated", "task_notification" ->
+                log.debug("[Terminal] [task:{}] {}", subtype, event.has("status") ? event.get("status").getAsString() : "");
+            case "thinking_tokens", "status", "hook_started", "hook_response" -> { /* 忽略 */ }
+            default -> log.debug("[Terminal] [system:{}] {}", subtype, event);
+        }
+    }
+
+    /** stream_event 携带原始 Anthropic 流事件；只取主 Agent 的 text_delta / thinking_delta。 */
+    private void handleStreamEvent(JsonObject event) {
+        Turn turn = currentTurn;
+        if (turn == null || !event.has("event")) return;
+        JsonObject inner = event.getAsJsonObject("event");
+        String innerType = inner.has("type") ? inner.get("type").getAsString() : "";
+        if (!"content_block_delta".equals(innerType) || !inner.has("delta")) return;
+
+        JsonObject delta = inner.getAsJsonObject("delta");
+        String dType = delta.has("type") ? delta.get("type").getAsString() : "";
+        long now = System.currentTimeMillis();
+
+        if ("text_delta".equals(dType) && delta.has("text")) {
+            String text = delta.get("text").getAsString();
+            if (text.isEmpty()) return;
+            if (turn.thinkingStartMs > 0 && turn.thinkingEndMs == 0) turn.thinkingEndMs = now;  // 思考结束
+            turn.answerText.append(text);
+            turn.listener.onTextDelta(text);
+        } else if ("thinking_delta".equals(dType) && delta.has("thinking")) {
+            String th = delta.get("thinking").getAsString();
+            if (th.isEmpty()) return;
+            if (turn.thinkingStartMs == 0) turn.thinkingStartMs = now;
+            turn.thinkingText.append(th);
+            turn.listener.onThinkingDelta(th);
+        }
+        // input_json_delta / signature_delta 忽略
+    }
+
+    /** assistant 完整块 — 只用于提取主 Agent 的 tool_use 步骤（文本增量已由 stream_event 处理）。 */
+    private void handleAssistant(JsonObject event) {
+        Turn turn = currentTurn;
+        if (turn == null || !event.has("message")) return;
+        JsonObject msg = event.getAsJsonObject("message");
+        if (!msg.has("content")) return;
+        for (JsonElement item : msg.getAsJsonArray("content")) {
+            if (!item.isJsonObject()) continue;
+            JsonObject obj = item.getAsJsonObject();
+            String ct = obj.has("type") ? obj.get("type").getAsString() : "";
+            if ("tool_use".equals(ct)) {
+                String id = obj.has("id") ? obj.get("id").getAsString() : ("anon-" + System.nanoTime());
+                String name = obj.has("name") ? obj.get("name").getAsString() : "?";
+                String detail = extractToolDetail(name, obj.has("input") ? obj.getAsJsonObject("input") : null);
+                ToolStep step = new ToolStep(id, name, detail, "Task".equalsIgnoreCase(name));
+                turn.toolSteps.add(step);
+                turn.stepsById.put(id, step);
+                log.info("[Terminal] [tool_use] {} {}", name, detail);
+                turn.listener.onToolStart(step);
+            }
+        }
+    }
+
+    /** user 事件的 tool_result — 按 tool_use_id 匹配步骤并标记完成/失败。 */
+    private void handleUser(JsonObject event) {
+        Turn turn = currentTurn;
+        if (turn == null || !event.has("message")) return;
+        JsonObject msg = event.getAsJsonObject("message");
+        if (!msg.has("content") || !msg.get("content").isJsonArray()) return;
+        for (JsonElement item : msg.getAsJsonArray("content")) {
+            if (!item.isJsonObject()) continue;
+            JsonObject obj = item.getAsJsonObject();
+            if (!"tool_result".equals(obj.has("type") ? obj.get("type").getAsString() : "")) continue;
+            String toolUseId = obj.has("tool_use_id") ? obj.get("tool_use_id").getAsString() : null;
+            if (toolUseId == null) continue;
+            ToolStep step = turn.stepsById.get(toolUseId);
+            if (step == null || step.status != ToolStep.Status.RUNNING) continue;
+            boolean isError = obj.has("is_error") && obj.get("is_error").getAsBoolean();
+            step.markEnd(isError ? ToolStep.Status.ERROR : ToolStep.Status.SUCCESS);
+            turn.listener.onToolEnd(step);
+        }
+    }
+
+    /** result 事件 = 本轮终局（确定性完成信号，零等待）。每轮恰好一个。 */
+    private void handleResult(JsonObject event) {
+        Turn turn = currentTurn;
+        if (turn == null || turn.future.isDone()) {
+            log.warn("[Terminal] 收到 result 但无活跃轮次（或已完成），忽略");
+            return;
+        }
+
+        boolean isError = event.has("is_error") && event.get("is_error").getAsBoolean();
+        String resultText = event.has("result") && !event.get("result").isJsonNull()
+                ? event.get("result").getAsString() : "";
+        String finalText = resultText.isBlank() ? turn.answerText.toString() : resultText;
+
+        TurnResult r = new TurnResult(finalText, isError);
+        r.thinkingText = turn.thinkingText.toString();
+        r.thinkingMs = (turn.thinkingStartMs > 0)
+                ? ((turn.thinkingEndMs > 0 ? turn.thinkingEndMs : System.currentTimeMillis()) - turn.thinkingStartMs)
+                : 0;
+        r.toolSteps.addAll(turn.toolSteps);
+        r.toolElapsedMs = computeToolElapsed(turn.toolSteps);
+        r.model = getModel() != null ? getModel() : "";
+
+        // result 事件携带的 metrics
+        if (event.has("duration_ms") && !event.get("duration_ms").isJsonNull()) {
+            r.durationMs = event.get("duration_ms").getAsLong();
+        } else {
+            r.durationMs = System.currentTimeMillis() - turn.startTime;
+        }
+        if (event.has("total_cost_usd") && !event.get("total_cost_usd").isJsonNull()) {
+            r.costUsd = event.get("total_cost_usd").getAsDouble();
+        }
+        if (event.has("usage") && event.get("usage").isJsonObject()) {
+            JsonObject u = event.getAsJsonObject("usage");
+            r.inputTokens = optLong(u, "input_tokens");
+            r.outputTokens = optLong(u, "output_tokens");
+            r.cacheReadTokens = optLong(u, "cache_read_input_tokens");
+            r.cacheWriteTokens = optLong(u, "cache_creation_input_tokens");
+        }
+        if ((r.model == null || r.model.isBlank()) && event.has("modelUsage") && event.get("modelUsage").isJsonObject()) {
+            var keys = event.getAsJsonObject("modelUsage").keySet();
+            if (!keys.isEmpty()) r.model = keys.iterator().next();
+        }
+
+        log.info("[Terminal] [result] 完成: isError={}, {}字, {}ms, tools={}",
+                isError, finalText.length(), r.durationMs, r.toolSteps.size());
+
+        turn.future.complete(r);          // 先 complete，解锁 sendMessage 等待线程
+        turn.listener.onTurnComplete(r);  // 再回调收尾卡片
+    }
+
+    // ===== 内部：看门狗（仅兜底进程卡死/失控） =====
+
+    private void checkWatchdog(Turn turn) {
+        if (turn.future.isDone()) return;
+        long now = System.currentTimeMillis();
+
+        if (now - turn.startTime > HARD_TURN_TIMEOUT_MS) {
+            log.error("[Terminal] 硬上限超时 ({}min)，强制终止并重启进程", HARD_TURN_TIMEOUT_MS / 60_000);
+            turn.listener.onTurnError("⏰ Claude 处理超时（30分钟）", false);
+            turn.future.complete(errorResult(turn, "⏰ Claude 处理超时，请重试", false));
+            restartProcess();
+            return;
+        }
+        if (now - lastEventTime > NO_EVENT_IDLE_MS) {
+            log.error("[Terminal] stdout 静默 {}s，判定进程卡死，终止并重启", NO_EVENT_IDLE_MS / 1000);
+            String partial = turn.answerText.toString();
+            turn.listener.onTurnError("⏰ Claude 无响应，可能进程卡住", false);
+            turn.future.complete(errorResult(turn,
+                    partial.isBlank() ? "⏰ Claude 无响应，已重启终端，请重试" : partial, false));
+            restartProcess();
+        }
+    }
+
+    private synchronized void restartProcess() {
+        log.info("[Terminal] 重启进程: key={}", sessionKey);
+        alive = false;
+        closeQuietly(writer);
+        if (process != null) {
+            process.destroyForcibly();
+            try { process.waitFor(3, TimeUnit.SECONDS); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+        }
+        try {
+            start();
+        } catch (IOException e) {
+            log.error("[Terminal] 重启失败: key={}", sessionKey, e);
+        }
+    }
+
+    // ===== 工具方法 =====
+
+    private TurnResult errorResult(Turn turn, String text, boolean aborted) {
+        TurnResult r = new TurnResult(text, !aborted);
+        r.aborted = aborted;
+        r.thinkingText = turn.thinkingText.toString();
+        r.toolSteps.addAll(turn.toolSteps);
+        r.toolElapsedMs = computeToolElapsed(turn.toolSteps);
+        r.durationMs = System.currentTimeMillis() - turn.startTime;
+        r.model = getModel() != null ? getModel() : "";
+        return r;
+    }
+
+    private static long computeToolElapsed(List<ToolStep> steps) {
+        if (steps.isEmpty()) return 0;
+        long min = Long.MAX_VALUE, max = 0;
+        for (ToolStep s : steps) {
+            min = Math.min(min, s.startMs);
+            long end = s.endMs > 0 ? s.endMs : System.currentTimeMillis();
+            max = Math.max(max, end);
+        }
+        return min == Long.MAX_VALUE ? 0 : Math.max(0, max - min);
+    }
+
+    private static long optLong(JsonObject o, String key) {
+        return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsLong() : -1;
+    }
+
+    /** 从 tool_use 的 input 提取一行摘要（命令/路径/查询等，脱敏截断）。 */
+    private static String extractToolDetail(String toolName, JsonObject input) {
+        if (input == null) return "";
+        String n = toolName == null ? "" : toolName.toLowerCase();
+        String raw = null;
+        switch (n) {
+            case "bash", "exec" -> raw = firstPresent(input, "command", "description");
+            case "read", "edit", "write", "multiedit", "notebookedit" -> raw = firstPresent(input, "file_path", "path", "notebook_path");
+            case "grep" -> raw = firstPresent(input, "pattern");
+            case "glob" -> raw = firstPresent(input, "pattern");
+            case "websearch", "web_search" -> raw = firstPresent(input, "query", "q");
+            case "webfetch", "web_fetch" -> raw = firstPresent(input, "url");
+            case "task", "agent" -> raw = firstPresent(input, "description", "prompt", "task");
+            default -> raw = firstPresent(input, "description", "path", "command", "query");
+        }
+        if (raw == null) return "";
+        raw = raw.replaceAll("\\s+", " ").trim();
+        return raw.length() > 100 ? raw.substring(0, 100) + "…" : raw;
+    }
+
+    private static String firstPresent(JsonObject o, String... keys) {
+        for (String k : keys) {
+            if (o.has(k) && !o.get(k).isJsonNull()) {
+                JsonElement e = o.get(k);
+                return e.isJsonPrimitive() ? e.getAsString() : e.toString();
+            }
+        }
+        return null;
+    }
 
     private void readStderr() {
+        if (process == null) return;
         try (BufferedReader errReader = new BufferedReader(
                 new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
             String line;
@@ -343,47 +583,37 @@ public class TerminalSession {
         } catch (IOException ignored) {}
     }
 
-    // ===== 工具方法 =====
-
-    private String readLineWithTimeout(BufferedReader reader, long timeoutMs) {
-        try {
-            return CompletableFuture.supplyAsync(() -> {
-                try { return reader.readLine(); }
-                catch (IOException e) {
-                    log.warn("[Terminal] readLine IOException: {}", e.getMessage());
-                    return null;
-                }
-            }).get(timeoutMs, TimeUnit.MILLISECONDS);
-        } catch (TimeoutException e) {
-            return null;
-        } catch (Exception e) {
-            log.warn("[Terminal] readLineWithTimeout 异常: {}", e.getMessage());
-            return null;
-        }
-    }
-
-    private String truncate(String text) {
-        if (text.length() <= MAX_OUTPUT_CHARS) return text;
-        return text.substring(0, MAX_OUTPUT_CHARS) + "\n\n... (截断，共 " + text.length() + " 字符)";
-    }
-
-    private int getExitCode() {
-        try {
-            return process != null ? process.exitValue() : -1;
-        } catch (IllegalThreadStateException e) {
-            return -1; // 进程仍在运行
-        }
+    private static void closeQuietly(Closeable c) {
+        if (c != null) { try { c.close(); } catch (IOException ignored) {} }
     }
 
     // ===== 内部数据结构 =====
 
-    private static class TurnResult {
-        final String text;
-        final boolean isError;
+    /** 一轮对话的状态容器 — 每条用户消息一个，reader 线程按此路由事件。 */
+    private static class Turn {
+        final TurnListener listener;
+        final CompletableFuture<TurnResult> future = new CompletableFuture<>();
+        final StringBuilder answerText = new StringBuilder();
+        final StringBuilder thinkingText = new StringBuilder();
+        final List<ToolStep> toolSteps = new ArrayList<>();
+        final ConcurrentMap<String, ToolStep> stepsById = new ConcurrentHashMap<>();
+        final long startTime = System.currentTimeMillis();
+        volatile long thinkingStartMs;
+        volatile long thinkingEndMs;
 
-        TurnResult(String text, boolean isError) {
-            this.text = text;
-            this.isError = isError;
+        Turn(TurnListener listener) {
+            this.listener = listener;
         }
+    }
+
+    /** 无 UI 回调场景（测试/兼容）用的空监听器。 */
+    private static class NullTurnListener implements TurnListener {
+        public void onTurnStart() {}
+        public void onThinkingDelta(String delta) {}
+        public void onTextDelta(String delta) {}
+        public void onToolStart(ToolStep step) {}
+        public void onToolEnd(ToolStep step) {}
+        public void onTurnComplete(TurnResult result) {}
+        public void onTurnError(String message, boolean aborted) {}
     }
 }

@@ -24,6 +24,7 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PreDestroy;
 import java.time.LocalDateTime;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -161,11 +162,41 @@ public class FeishuBotService {
     public void disconnectInstance(Long instanceId) {
         InstanceConnection conn = connections.remove(instanceId);
         if (conn != null) {
-            conn.wsClient = null; // GC 会处理
+            closeWsClient(conn.wsClient);
+            conn.wsClient = null;
             log.info("[FeishuBot] 实例 id={} 已断开", instanceId);
         }
-        // 同时销毁该实例的终端会话
-        claudeCodeService.destroySession(instanceId);
+        // 不再自动销毁终端 — 终端只在 workingDir/model 变更时由 ClaudeCodeService 自动回收
+    }
+
+    /**
+     * 真正关闭飞书 WS 长连接。
+     * SDK 2.5.3 的 ws.Client 没有公开 close API，且 onClosed 会触发自动重连，
+     * 因此通过反射：先关 autoReconnect，再调 protected disconnect()，最后停掉内部 executor（pingLoop）。
+     * 不关闭的后果：实例更新重连后新旧两个连接同时收事件，消息被重复处理或静默吞掉。
+     */
+    private void closeWsClient(com.lark.oapi.ws.Client ws) {
+        if (ws == null) return;
+        try {
+            var clazz = com.lark.oapi.ws.Client.class;
+            java.lang.reflect.Field ar = clazz.getDeclaredField("autoReconnect");
+            ar.setAccessible(true);
+            ar.set(ws, Boolean.FALSE);
+
+            java.lang.reflect.Method disconnect = clazz.getDeclaredMethod("disconnect");
+            disconnect.setAccessible(true);
+            disconnect.invoke(ws);
+
+            java.lang.reflect.Field ex = clazz.getDeclaredField("executor");
+            ex.setAccessible(true);
+            Object executor = ex.get(ws);
+            if (executor instanceof java.util.concurrent.ExecutorService es) {
+                es.shutdownNow();
+            }
+            log.info("[FeishuBot] WS 客户端已关闭（autoReconnect=false + disconnect + executor 停止）");
+        } catch (Exception e) {
+            log.warn("[FeishuBot] 关闭 WS 客户端失败（SDK 无公开 close API，已尝试反射）: {}", e.getMessage());
+        }
     }
 
     /**
@@ -252,13 +283,38 @@ public class FeishuBotService {
         String model = instance.getClaudeModel();
         if (model == null) model = "";
 
-        if (text.startsWith("/") && handleCommand(instanceId, openId, chatType, chatId, text, instance, dir, model)) return;
+        if (text.startsWith("/")) {
+            try {
+                if (handleCommand(instanceId, openId, chatType, chatId, text, instance, dir, model)) return;
+            } catch (Exception e) {
+                log.error("[Command] 命令处理异常: {}", text, e);
+                replyText(instanceId, openId, chatType, chatId, "❌ 命令执行出错: " + e.getMessage());
+                return;
+            }
+        }
 
         Mode mode = loadMode(openId, instance);
         if (mode == Mode.CHAT) {
-            log.info("[Chat][{}] 调用 Claude: openId={}", instance.getName(), openId);
-            String reply = claudeCodeService.chat(instanceId, openId, text, dir, model);
-            replyText(instanceId, openId, chatType, chatId, reply);
+            log.info("[Chat][{}] 调用 Claude: openId={}, dir={}, model={}", instance.getName(), openId, dir, model);
+            try {
+                // 流式卡片控制器：CardKit 原地增量更新，完成判定由协议 result 事件驱动（零等待）
+                boolean isGroup = "group".equals(chatType);
+                StreamingCardController controller = new StreamingCardController(
+                        conn.httpClient, isGroup ? "chat_id" : "open_id", isGroup ? chatId : openId);
+                String reply = claudeCodeService.chat(instanceId, openId, text, dir, model, controller);
+                log.info("[Chat][{}] Claude 轮次完成 ({}字, 卡片送达={})",
+                        instance.getName(), reply != null ? reply.length() : 0, controller.isDelivered());
+                if (controller.isDelivered()) {
+                    // 卡片已承载完整回复，只补存历史记录
+                    saveChatMessage(instanceId, openId, "bot", reply, chatType);
+                } else if (reply != null && !reply.isBlank()) {
+                    // 卡片通道完全失败的兜底：退回普通消息
+                    replyText(instanceId, openId, chatType, chatId, reply);
+                }
+            } catch (Exception e) {
+                log.error("[Chat][{}] Claude 调用异常", instance.getName(), e);
+                replyText(instanceId, openId, chatType, chatId, "❌ Claude 调用失败: " + e.getMessage());
+            }
         } else {
             log.info("[Shell][{}] 执行: openId={}, cmd={}", instance.getName(), openId, text);
             String output = shellService.execute(text);
@@ -343,7 +399,10 @@ public class FeishuBotService {
 
     private void replyText(Long instanceId, String openId, String chatType, String chatId, String content) {
         InstanceConnection conn = connections.get(instanceId);
-        if (conn == null || conn.httpClient == null) return;
+        if (conn == null || conn.httpClient == null) {
+            log.warn("[Feishu] replyText 跳过: instanceId={}, conn={}", instanceId, conn != null ? "有" : "null");
+            return;
+        }
 
         // 保存机器人回复到对话历史
         saveChatMessage(instanceId, openId, "bot", content, chatType);
@@ -352,34 +411,34 @@ public class FeishuBotService {
         boolean isGroup = "group".equals(chatType);
         String receiveId = isGroup ? chatId : openId;
         String receiveIdType = isGroup ? "chat_id" : "open_id";
+        log.info("[Feishu] 发送回复: instanceId={}, receiveId={}, {}字", instanceId, receiveId, content.length());
 
-        // 检测是否有选项，有则发送交互式卡片，否则发送普通卡片
-        String cardJson;
-        if (CardBuilder.hasOptions(content)) {
-            var options = CardBuilder.extractOptions(content);
-            cardJson = CardBuilder.buildOptionsCard(content, options);
-            log.info("[Feishu] 发送选项卡片: {} 个按钮", options.size());
-        } else {
-            cardJson = CardBuilder.buildTextCard(content);
-            log.info("[Feishu] 发送文本卡片");
-        }
+        // 检测是否有选项
+        List<CardBuilder.Option> options = CardBuilder.hasOptions(content)
+                ? CardBuilder.extractOptions(content) : null;
+        // 长文本自动拆分为多条卡片
+        List<String> cardJsons = CardBuilder.buildCards(content, options);
+        log.info("[Feishu] 发送 {} 条卡片消息{}", cardJsons.size(),
+                options != null ? " (" + options.size() + " 个按钮)" : "");
 
-        CreateMessageReq req = CreateMessageReq.newBuilder()
-                .receiveIdType(receiveIdType)
-                .createMessageReqBody(CreateMessageReqBody.newBuilder()
-                        .receiveId(receiveId)
-                        .uuid(UUID.randomUUID().toString())
-                        .msgType("interactive")
-                        .content(cardJson)
-                        .build())
-                .build();
-        try {
-            var resp = conn.httpClient.im().message().create(req);
-            if (!resp.success()) {
-                log.error("[Feishu] 回复失败: code={}, msg={}", resp.getCode(), resp.getMsg());
+        for (String cardJson : cardJsons) {
+            CreateMessageReq req = CreateMessageReq.newBuilder()
+                    .receiveIdType(receiveIdType)
+                    .createMessageReqBody(CreateMessageReqBody.newBuilder()
+                            .receiveId(receiveId)
+                            .uuid(UUID.randomUUID().toString())
+                            .msgType("interactive")
+                            .content(cardJson)
+                            .build())
+                    .build();
+            try {
+                var resp = conn.httpClient.im().message().create(req);
+                if (!resp.success()) {
+                    log.error("[Feishu] 回复失败: code={}, msg={}", resp.getCode(), resp.getMsg());
+                }
+            } catch (Exception e) {
+                log.error("[Feishu] 发送消息异常", e);
             }
-        } catch (Exception e) {
-            log.error("[Feishu] 发送消息异常", e);
         }
     }
 

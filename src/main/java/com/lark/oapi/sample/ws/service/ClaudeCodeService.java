@@ -27,20 +27,27 @@ public class ClaudeCodeService {
     /**
      * 与 Claude 对话 — 路由到对应实例的常驻终端。
      * 如果终端不存在则自动创建，如果终端已崩溃则自动重启。
+     * <p>
+     * 阻塞至本轮 result 事件（确定性完成信号）；流式增量/工具步骤/终局
+     * 全部通过 {@code listener} 回调推送（通常绑定一个流式卡片控制器）。
      *
-     * @param instanceId  飞书机器人实例 ID
-     * @param openId      用户飞书 openId（用于日志）
-     * @param message     用户消息文本
-     * @param workingDir  Claude 工作目录
-     * @param model       Claude 模型名称（可为空）
+     * @param instanceId 飞书机器人实例 ID
+     * @param openId     用户飞书 openId（用于日志）
+     * @param message    用户消息文本
+     * @param workingDir Claude 工作目录
+     * @param model      Claude 模型名称（可为空）
+     * @param listener   轮次生命周期监听器，可为 null（纯文本等待模式）
+     * @return 本轮最终文本
      */
-    public String chat(Long instanceId, String openId, String message, String workingDir, String model) {
+    public String chat(Long instanceId, String openId, String message, String workingDir, String model,
+                       TurnListener listener) {
         try {
             TerminalSession session = getOrCreate(instanceId, workingDir, model);
             log.info("[ClaudeCode][{}] 发送消息: openId={}", instanceId, openId);
-            return session.sendMessage(message);
+            return session.sendMessage(message, listener);
         } catch (Exception e) {
             log.error("[ClaudeCode][{}] 对话失败", instanceId, e);
+            if (listener != null) listener.onTurnError("Claude 对话失败: " + e.getMessage(), false);
             return "❌ Claude 对话失败: " + e.getMessage();
         }
     }
@@ -60,12 +67,20 @@ public class ClaudeCodeService {
 
     /**
      * 获取或创建终端会话。
-     * 如果会话已存在且进程存活，直接复用；否则创建新的。
+     * 如果会话已存在且进程存活且配置未变，直接复用；否则创建新的。
      */
     private TerminalSession getOrCreate(Long instanceId, String workingDir, String model) throws IOException {
         TerminalSession session = sessions.get(instanceId);
         if (session != null && session.isAlive()) {
-            return session;
+            // 检测配置是否变更（工作目录或模型）
+            boolean configChanged = !nullSafeEquals(session.getWorkingDir(), workingDir)
+                    || !nullSafeEquals(session.getModel(), model);
+            if (!configChanged) {
+                return session;
+            }
+            log.info("[ClaudeCode] 配置变更，重建终端: instanceId={}, dir: {} -> {}, model: {} -> {}",
+                    instanceId, session.getWorkingDir(), workingDir, session.getModel(), model);
+            session.destroy();
         }
 
         // 旧的进程可能已死，清理掉
@@ -79,6 +94,12 @@ public class ClaudeCodeService {
         sessions.put(instanceId, session);
         log.info("[ClaudeCode] 创建新终端: instanceId={}, dir={}", instanceId, workingDir);
         return session;
+    }
+
+    private static boolean nullSafeEquals(String a, String b) {
+        if (a == null && b == null) return true;
+        if (a == null || b == null) return false;
+        return a.equals(b);
     }
 
     /**
