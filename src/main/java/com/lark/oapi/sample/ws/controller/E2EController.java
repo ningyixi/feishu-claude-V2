@@ -2,6 +2,7 @@ package com.lark.oapi.sample.ws.controller;
 
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 import com.lark.oapi.sample.ws.config.E2EWebSocketHandler;
 import com.lark.oapi.sample.ws.service.E2ETaskService;
 import org.slf4j.Logger;
@@ -32,10 +33,13 @@ public class E2EController {
     /**
      * 创建群聊任务。
      * body: {members:[{instanceId, role(programmer|designer|executor)}], requirement, autoFix?, maxRounds?}
+     * 注意：收原始 String 自行 Gson 解析 —— Spring 默认 Jackson 不认识 Gson JsonObject，
+     * 直接 @RequestBody JsonObject 会被静默反序列化成空对象（members 丢失）。
      */
     @PostMapping(value = "/tasks", produces = "application/json;charset=UTF-8")
-    public ResponseEntity<String> create(@RequestBody JsonObject body) {
+    public ResponseEntity<String> create(@RequestBody String rawBody) {
         try {
+            JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
             List<E2ETaskService.MemberSpec> members = new java.util.ArrayList<>();
             JsonArray arr = body.has("members") ? body.getAsJsonArray("members") : null;
             if (arr != null) {
