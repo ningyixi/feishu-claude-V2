@@ -1,0 +1,184 @@
+package com.lark.oapi.sample.ws.controller;
+
+import com.lark.oapi.sample.ws.model.entity.HookRun;
+import com.lark.oapi.sample.ws.model.entity.SkillFileChange;
+import com.lark.oapi.sample.ws.model.entity.SkillHook;
+import com.lark.oapi.sample.ws.repository.HookRunRepository;
+import com.lark.oapi.sample.ws.repository.SkillFileChangeRepository;
+import com.lark.oapi.sample.ws.repository.SkillHookRepository;
+import com.lark.oapi.sample.ws.service.SkillHookService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.*;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * Skill 自进化 Hook 管理 REST API。
+ */
+@RestController
+@RequestMapping("/api/hooks")
+public class SkillHookController {
+
+    private static final Logger log = LoggerFactory.getLogger(SkillHookController.class);
+
+    private final SkillHookRepository hookRepo;
+    private final HookRunRepository runRepo;
+    private final SkillFileChangeRepository changeRepo;
+    private final SkillHookService hookService;
+
+    public SkillHookController(SkillHookRepository hookRepo, HookRunRepository runRepo,
+                               SkillFileChangeRepository changeRepo, SkillHookService hookService) {
+        this.hookRepo = hookRepo;
+        this.runRepo = runRepo;
+        this.changeRepo = changeRepo;
+        this.hookService = hookService;
+    }
+
+    /** 列表（附带每个 hook 最近一次运行） */
+    @GetMapping
+    public List<Map<String, Object>> list() {
+        return hookRepo.findAll().stream()
+                .sorted((a, b) -> Long.compare(b.getId(), a.getId()))
+                .map(h -> {
+                    Map<String, Object> m = hookMap(h);
+                    HookRun last = runRepo.findFirstByHookIdOrderByStartedAtDesc(h.getId());
+                    m.put("lastRun", last != null ? runMap(last) : null);
+                    return m;
+                })
+                .toList();
+    }
+
+    @PostMapping
+    public ResponseEntity<?> create(@RequestBody SkillHook body) {
+        try {
+            validate(body);
+            body.setId(null);
+            SkillHook saved = hookRepo.save(body);
+            log.info("[Hook] 创建: id={}, name={}, trigger={}", saved.getId(), saved.getName(), saved.getTriggerType());
+            return ResponseEntity.ok(hookMap(saved));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @PutMapping("/{id}")
+    public ResponseEntity<?> update(@PathVariable Long id, @RequestBody SkillHook body) {
+        return hookRepo.findById(id).map(h -> {
+            try {
+                validate(body);
+            } catch (IllegalArgumentException e) {
+                return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+            }
+            h.setName(body.getName());
+            h.setInstanceIds(body.getInstanceIds());
+            h.setMaintainerInstanceId(body.getMaintainerInstanceId());
+            h.setSkillDir(body.getSkillDir());
+            h.setTriggerType(body.getTriggerType());
+            h.setCronExpr(body.getCronExpr());
+            h.setEnabled(body.isEnabled());
+            SkillHook saved = hookRepo.save(h);
+            hookService.invalidateSession(id);   // 配置可能变了，下次触发按新配置重建会话
+            log.info("[Hook] 更新: id={}", id);
+            return ResponseEntity.ok(hookMap(saved));
+        }).orElse(ResponseEntity.notFound().build());
+    }
+
+    @DeleteMapping("/{id}")
+    public ResponseEntity<?> delete(@PathVariable Long id) {
+        if (!hookRepo.existsById(id)) return ResponseEntity.notFound().build();
+        hookService.deleteHook(id);
+        log.info("[Hook] 删除: id={}", id);
+        return ResponseEntity.ok(Map.of("ok", true));
+    }
+
+    @PostMapping("/{id}/toggle")
+    public ResponseEntity<?> toggle(@PathVariable Long id) {
+        return hookRepo.findById(id).map(h -> {
+            h.setEnabled(!h.isEnabled());
+            hookRepo.save(h);
+            return ResponseEntity.ok(hookMap(h));
+        }).orElse(ResponseEntity.notFound().build());
+    }
+
+    /** 手动触发（异步执行，立即返回） */
+    @PostMapping("/{id}/run")
+    public ResponseEntity<?> run(@PathVariable Long id) {
+        try {
+            hookService.runManually(id);
+            return ResponseEntity.ok(Map.of("ok", true, "message", "已触发，执行完成后可在执行记录中查看"));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    @GetMapping("/{id}/runs")
+    public List<Map<String, Object>> runs(@PathVariable Long id) {
+        return runRepo.findTop50ByHookIdOrderByStartedAtDesc(id).stream().map(this::runMap).toList();
+    }
+
+    /** skill 修改流水（跨 hook） */
+    @GetMapping("/changes")
+    public List<SkillFileChange> changes() {
+        return changeRepo.findTop100ByOrderByAtDesc();
+    }
+
+    // ===== 工具 =====
+
+    private void validate(SkillHook h) {
+        if (h.getName() == null || h.getName().isBlank()) throw new IllegalArgumentException("请填写 Hook 名称");
+        if (h.getInstanceIds() == null || h.getInstanceIds().isBlank()) throw new IllegalArgumentException("请至少选择一个监控实例");
+        if (h.getSkillDir() == null || h.getSkillDir().isBlank()) throw new IllegalArgumentException("请填写 skill 目录");
+        if (!new java.io.File(h.getSkillDir()).isDirectory()) throw new IllegalArgumentException("skill 目录不存在: " + h.getSkillDir());
+        if ("CRON".equals(h.getTriggerType()) && (h.getCronExpr() == null || h.getCronExpr().isBlank())) {
+            throw new IllegalArgumentException("定时触发需要 cron 表达式");
+        }
+        if ("CRON".equals(h.getTriggerType())) {
+            try {
+                org.springframework.scheduling.support.CronExpression.parse(normalizeCron(h.getCronExpr()));
+            } catch (Exception e) {
+                throw new IllegalArgumentException("cron 表达式无效: " + h.getCronExpr());
+            }
+        }
+    }
+
+    private static String normalizeCron(String expr) {
+        String e = expr != null ? expr.trim() : "";
+        if (e.split("\\s+").length == 5) e = "0 " + e;
+        return e;
+    }
+
+    private Map<String, Object> hookMap(SkillHook h) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", h.getId());
+        m.put("name", h.getName());
+        m.put("instanceIds", h.getInstanceIds());
+        m.put("maintainerInstanceId", h.getMaintainerInstanceId());
+        m.put("skillDir", h.getSkillDir());
+        m.put("triggerType", h.getTriggerType());
+        m.put("cronExpr", h.getCronExpr());
+        m.put("enabled", h.isEnabled());
+        m.put("lastRunAt", h.getLastRunAt());
+        m.put("createdAt", h.getCreatedAt());
+        return m;
+    }
+
+    private Map<String, Object> runMap(HookRun r) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", r.getId());
+        m.put("hookId", r.getHookId());
+        m.put("triggerType", r.getTriggerType());
+        m.put("status", r.getStatus());
+        m.put("windowFrom", r.getWindowFrom());
+        m.put("windowTo", r.getWindowTo());
+        m.put("messageCount", r.getMessageCount());
+        m.put("judgeReason", r.getJudgeReason());
+        m.put("summary", r.getSummary());
+        m.put("durationMs", r.getDurationMs());
+        m.put("startedAt", r.getStartedAt());
+        return m;
+    }
+}

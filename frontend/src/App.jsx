@@ -1,10 +1,12 @@
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom'
 import Instances from './pages/Instances'
 import E2ETest from './pages/E2ETest'
+import Hooks from './pages/Hooks'
 
 const NAV = [
   { to: '/', label: '📡', title: '实例' },
   { to: '/e2e', label: '🧪', title: 'E2E 测试' },
+  { to: '/hooks', label: '🪝', title: 'Hook' },
 ]
 
 export default function App() {
@@ -26,6 +28,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Instances />} />
             <Route path="/e2e" element={<E2ETest />} />
+            <Route path="/hooks" element={<Hooks />} />
           </Routes>
         </main>
       </div>

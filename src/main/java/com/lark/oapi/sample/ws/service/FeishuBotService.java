@@ -40,6 +40,7 @@ public class FeishuBotService {
     private final ChatMessageRepository chatMessageRepo;
     private final ShellService shellService;
     private final ClaudeCodeService claudeCodeService;
+    private final SkillHookService skillHookService;
 
     enum Mode { SHELL, CHAT }
 
@@ -88,11 +89,13 @@ public class FeishuBotService {
     public FeishuBotService(UserModeRepository userModeRepo,
                             ChatMessageRepository chatMessageRepo,
                             ShellService shellService,
-                            ClaudeCodeService claudeCodeService) {
+                            ClaudeCodeService claudeCodeService,
+                            SkillHookService skillHookService) {
         this.userModeRepo = userModeRepo;
         this.chatMessageRepo = chatMessageRepo;
         this.shellService = shellService;
         this.claudeCodeService = claudeCodeService;
+        this.skillHookService = skillHookService;
     }
 
     @PreDestroy
@@ -387,6 +390,8 @@ public class FeishuBotService {
                     // 卡片通道完全失败的兜底：退回普通消息
                     replyText(instanceId, openId, chatType, chatId, reply);
                 }
+                // Skill 自进化 Hook：轮次完成后异步判定（内部吞异常，绝不影响对话链路）
+                skillHookService.onTurnCompleted(instanceId, text, reply);
             } catch (Exception e) {
                 log.error("[Chat][{}] Claude 调用异常", instance.getName(), e);
                 replyText(instanceId, openId, chatType, chatId, "❌ Claude 调用失败: " + e.getMessage());
