@@ -35,9 +35,11 @@ public class TerminalSession {
 
     private static final Logger log = LoggerFactory.getLogger(TerminalSession.class);
 
-    /** 单轮硬性最大时长兜底：超过判定进程失控，强制终止并重启 */
-    private static final long HARD_TURN_TIMEOUT_MS = 30 * 60_000L;
-    /** stdout 完全无输出的兜底：thinking/tool 事件流会持续刷新，静默这么久=进程卡死 */
+    /** 单轮硬性最大时长兜底：超过判定进程失控，强制终止并重启。
+     *  默认 60 分钟（真实开发任务可以很长），可用 -Dterminal.hardTurnTimeoutMinutes=90 调整 */
+    private static final long HARD_TURN_TIMEOUT_MS = Long.getLong("terminal.hardTurnTimeoutMinutes", 60L) * 60_000L;
+    /** stdout 完全无输出的兜底：thinking/tool/status 事件都会刷新它。
+     *  工具执行期间（如长编译）stdout 可能静默，此时豁免——只有"无工具在跑且完全静默"才判定卡死 */
     private static final long NO_EVENT_IDLE_MS = 120_000L;
     /** 看门狗检查周期 */
     private static final long WATCHDOG_PERIOD_MS = 10_000L;
@@ -585,18 +587,25 @@ public class TerminalSession {
 
         if (now - turn.startTime > HARD_TURN_TIMEOUT_MS) {
             log.error("[Terminal] 硬上限超时 ({}min)，强制终止并重启进程", HARD_TURN_TIMEOUT_MS / 60_000);
-            turn.listener.onTurnError("⏰ Claude 处理超时（30分钟）", false);
+            turn.listener.onTurnError("⏰ Claude 处理超时（" + HARD_TURN_TIMEOUT_MS / 60_000 + "分钟）", false);
             turn.future.complete(errorResult(turn, "⏰ Claude 处理超时，请重试", false));
             restartProcess();
             return;
         }
-        if (now - lastEventTime > NO_EVENT_IDLE_MS) {
-            log.error("[Terminal] stdout 静默 {}s，判定进程卡死，终止并重启", NO_EVENT_IDLE_MS / 1000);
+        // 工具执行期间 stdout 可能长时间静默（编译/测试/长命令），豁免空闲判定防误杀
+        boolean toolRunning = false;
+        for (ToolStep s : turn.toolSteps) {
+            if (s.status == ToolStep.Status.RUNNING) { toolRunning = true; break; }
+        }
+        if (!toolRunning && now - lastEventTime > NO_EVENT_IDLE_MS) {
+            log.error("[Terminal] stdout 静默 {}s 且无工具在执行，判定进程卡死，终止并重启", NO_EVENT_IDLE_MS / 1000);
             String partial = turn.answerText.toString();
             turn.listener.onTurnError("⏰ Claude 无响应，可能进程卡住", false);
             turn.future.complete(errorResult(turn,
                     partial.isBlank() ? "⏰ Claude 无响应，已重启终端，请重试" : partial, false));
             restartProcess();
+        } else if (toolRunning && now - lastEventTime > NO_EVENT_IDLE_MS) {
+            log.debug("[Terminal] stdout 静默但有工具在执行，豁免空闲判定");
         }
     }
 

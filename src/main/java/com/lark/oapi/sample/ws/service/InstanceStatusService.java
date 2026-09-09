@@ -85,10 +85,13 @@ public class InstanceStatusService {
         if (!inst.isEnabled()) {
             return new InstanceStatusDTO(id, "DISABLED", "🚫", "已停用", "老板说了，这个机器人放假", false);
         }
-        // 2. 飞书断线
-        if (!feishuBotService.isInstanceConnected(id)) {
-            return new InstanceStatusDTO(id, "DISCONNECTED", "🔌", "未连接",
-                    "飞书长连接不在线，检查网络或凭证后重连", false);
+        // 2. 飞书断线（用真实连线状态，能识别"SDK 静默重连中"的假在线）
+        if (!feishuBotService.isWsAlive(id)) {
+            boolean everConnected = feishuBotService.isInstanceConnected(id);
+            return new InstanceStatusDTO(id, "DISCONNECTED", "📡", "信号中断",
+                    everConnected ? "飞书长连接断开，SDK 自动重连中（网络恢复后自愈，无需重启）"
+                                  : "飞书长连接未建立，检查网络或凭证后重连",
+                    false);
         }
 
         TerminalSession session = claudeCodeService.getSession(id);

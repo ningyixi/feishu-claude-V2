@@ -3,6 +3,7 @@ package com.lark.oapi.sample.ws.config;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.lark.oapi.sample.ws.service.E2EOrchestrator;
 import com.lark.oapi.sample.ws.service.E2ETaskService;
 import com.lark.oapi.sample.ws.service.ToolStep;
 import org.slf4j.Logger;
@@ -20,15 +21,14 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * E2E 测试工作台 WebSocket — /ws/e2e?taskId=xxx
+ * E2E 测试群聊 WebSocket — /ws/e2e?taskId=xxx
  * <p>
- * 浏览器 ⇄ 任务的实时通道：
+ * 浏览器 ⇄ 群聊任务的实时通道：
  * <ul>
- *   <li>连接建立 → 注册为该任务的观众 → 立即推送 snapshot（任务信息 + 完整历史 transcript），刷新/断线重连即恢复现场</li>
- *   <li>浏览器发 {"type":"message","text":"..."} → E2ETaskService.sendMessage（虚拟线程执行，忙碌自动排队）</li>
- *   <li>任务事件（thinking/delta/tool/complete/error/queued）→ 广播给该任务的所有观众（支持多人围观）</li>
+ *   <li>连接建立 → 注册为该任务的观众 → 立即推送 snapshot（任务+成员+流水线状态+完整群聊记录），刷新/断线重连即恢复现场</li>
+ *   <li>浏览器发 {"type":"message","text":"...","to":"auto|programmer|designer|executor"} → 群聊发言（auto 驱动流水线，@角色直聊）</li>
+ *   <li>任务事件（成员发言流式增量/工具/完成、阶段流转、用例更新、轮次报告、系统横幅）→ 广播给所有观众</li>
  * </ul>
- * 发送用 ConcurrentWebSocketSessionDecorator 保证并发安全（广播线程与快照线程可能同时写同一 session）。
  */
 @Component
 public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETaskService.Broadcaster {
@@ -38,11 +38,13 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
     private static final int BUFFER_SIZE_LIMIT = 512 * 1024;
 
     private final E2ETaskService taskService;
+    private final E2EOrchestrator orchestrator;
     /** taskId → 观众会话集合 */
     private final Map<String, Set<WebSocketSession>> viewers = new ConcurrentHashMap<>();
 
-    public E2EWebSocketHandler(E2ETaskService taskService) {
+    public E2EWebSocketHandler(E2ETaskService taskService, E2EOrchestrator orchestrator) {
         this.taskService = taskService;
+        this.orchestrator = orchestrator;
         taskService.setBroadcaster(this);   // 自注册，打破循环依赖
     }
 
@@ -75,12 +77,17 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
             String type = msg.has("type") ? msg.get("type").getAsString() : "";
             if ("message".equals(type) && msg.has("text")) {
                 String text = msg.get("text").getAsString();
+                String to = msg.has("to") ? msg.get("to").getAsString() : "auto";
                 if (!text.isBlank() && taskId != null) {
-                    taskService.sendMessage(taskId, text);
+                    E2ETaskService.E2ETask task = taskService.getTask(taskId);
+                    if (task != null) {
+                        orchestrator.postUserMessage(task, text, to);
+                    }
                 }
+            } else if ("start".equals(type) && taskId != null) {
+                E2ETaskService.E2ETask task = taskService.getTask(taskId);
+                if (task != null) orchestrator.start(task);
             }
-        } catch (IllegalArgumentException e) {
-            sendError(session, e.getMessage());
         } catch (Exception e) {
             log.error("[E2E WS] 消息处理异常: task={}", taskId, e);
             sendError(session, "消息处理异常: " + e.getMessage());
@@ -129,23 +136,64 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
         return snap;
     }
 
-    private JsonObject taskJson(E2ETaskService.E2ETask task) {
+    public static JsonObject taskJson(E2ETaskService.E2ETask task) {
         JsonObject t = new JsonObject();
         t.addProperty("id", task.id);
-        t.addProperty("testerInstanceId", task.testerInstanceId);
-        t.addProperty("targetInstanceId", task.targetInstanceId);
-        t.addProperty("testerName", task.testerName);
-        t.addProperty("targetName", task.targetName);
-        t.addProperty("workingDir", task.workingDir);
-        t.addProperty("model", task.model);
+        t.addProperty("requirement", task.requirement);
+        t.addProperty("autoFix", task.autoFix);
+        t.addProperty("maxRounds", task.maxRounds);
+        t.addProperty("sharedDir", task.sharedDir != null ? task.sharedDir : "");
         t.addProperty("createdAt", task.createdAt);
         t.addProperty("busy", task.busy);
+        t.addProperty("pipelineStarted", task.pipelineStarted);
+        t.addProperty("pipelineDone", task.pipelineDone);
+
+        JsonArray members = new JsonArray();
+        for (E2ETaskService.Member m : task.members) {
+            JsonObject mo = new JsonObject();
+            mo.addProperty("instanceId", m.instanceId);
+            mo.addProperty("name", m.name);
+            mo.addProperty("role", m.role);
+            mo.addProperty("roleLabel", m.roleLabel());
+            mo.addProperty("roleEmoji", m.roleEmoji());
+            mo.addProperty("workingDir", m.workingDir);
+            mo.addProperty("model", m.model);
+            members.add(mo);
+        }
+        t.add("members", members);
+
+        E2ETaskService.PipelineState ps = task.pipeline;
+        JsonObject p = new JsonObject();
+        p.addProperty("stage", ps.stage);
+        p.addProperty("stageDetail", ps.stageDetail);
+        p.addProperty("round", ps.round);
+        p.addProperty("failReason", ps.failReason != null ? ps.failReason : "");
+        JsonArray cases = new JsonArray();
+        for (E2ETaskService.TestCase c : ps.cases) cases.add(E2EOrchestrator.caseJson(c));
+        p.add("cases", cases);
+        JsonArray rounds = new JsonArray();
+        for (E2ETaskService.RoundReport r : ps.rounds) {
+            JsonObject ro = new JsonObject();
+            ro.addProperty("round", r.round);
+            ro.addProperty("passed", r.passed);
+            ro.addProperty("failed", r.failed);
+            ro.addProperty("blocked", r.blocked);
+            ro.addProperty("total", r.total);
+            ro.addProperty("atMs", r.atMs);
+            ro.addProperty("fixSummary", r.fixSummary);
+            rounds.add(ro);
+        }
+        p.add("rounds", rounds);
+        t.add("pipeline", p);
         return t;
     }
 
-    /** 单轮记录 → JSON（与 BrowserTurnListener 的实时事件字段对齐，前端可共用渲染逻辑） */
+    /** 单条群聊记录 → JSON（与实时事件字段对齐，前端共用渲染逻辑） */
     public static JsonObject turnJson(E2ETaskService.TurnRecord rec) {
         JsonObject t = new JsonObject();
+        t.addProperty("kind", rec.kind);
+        t.addProperty("author", rec.author);
+        t.addProperty("authorName", rec.authorName);
         t.addProperty("userText", rec.userText);
         t.addProperty("startMs", rec.startMs);
         synchronized (rec) {

@@ -19,11 +19,14 @@ public class BrowserTurnListener implements TurnListener {
     private final E2ETaskService.E2ETask task;
     private final E2ETaskService.TurnRecord rec;
     private final int turnIndex;
+    /** 事件来源标记："A"=测试方输出，"B"=被测方修复输出（流水线模式），前端据此区分气泡样式 */
+    private final String source;
 
-    public BrowserTurnListener(E2ETaskService service, E2ETaskService.E2ETask task, E2ETaskService.TurnRecord rec) {
+    public BrowserTurnListener(E2ETaskService service, E2ETaskService.E2ETask task, E2ETaskService.TurnRecord rec, String source) {
         this.service = service;
         this.task = task;
         this.rec = rec;
+        this.source = source != null ? source : "A";
         this.turnIndex = task.transcript.size() - 1;
     }
 
@@ -109,6 +112,9 @@ public class BrowserTurnListener implements TurnListener {
         JsonObject e = new JsonObject();
         e.addProperty("type", type);
         e.addProperty("turnIndex", turnIndex);
+        e.addProperty("source", source);
+        e.addProperty("author", rec.author);
+        e.addProperty("authorName", rec.authorName);
         return e;
     }
 

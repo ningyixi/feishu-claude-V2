@@ -406,7 +406,11 @@ public class CardBuilder {
     /**
      * 工具面板（collapsible_panel）。
      * steps 为空 → 折叠的"等待工具执行"占位面板；否则每步渲染 标题+状态色标+detail。
+     * 步骤过多时只渲染最近 {@value #MAX_PANEL_STEPS} 步（飞书卡片元素数量有上限，
+     * 96 步全渲染会报 230099/11310 element exceeds the limit）。
      */
+    private static final int MAX_PANEL_STEPS = 15;
+
     private static JsonObject buildToolPanel(List<ToolStep> steps, boolean expanded, long elapsedMs) {
         boolean hasSteps = steps != null && !steps.isEmpty();
 
@@ -445,7 +449,20 @@ public class CardBuilder {
 
         JsonArray panelElements = new JsonArray();
         if (hasSteps) {
-            for (ToolStep step : steps) {
+            int omitted = steps.size() - MAX_PANEL_STEPS;
+            List<ToolStep> shown = omitted > 0 ? steps.subList(omitted, steps.size()) : steps;
+            if (omitted > 0) {
+                JsonObject omitDiv = new JsonObject();
+                omitDiv.addProperty("tag", "div");
+                JsonObject ot = new JsonObject();
+                ot.addProperty("tag", "plain_text");
+                ot.addProperty("content", "… 省略较早的 " + omitted + " 步（仅显示最近 " + MAX_PANEL_STEPS + " 步）");
+                ot.addProperty("text_color", "grey");
+                ot.addProperty("text_size", "notation");
+                omitDiv.add("text", ot);
+                panelElements.add(omitDiv);
+            }
+            for (ToolStep step : shown) {
                 panelElements.add(buildToolStepTitle(step));
                 if (step.detail != null && !step.detail.isBlank()) {
                     JsonObject detailDiv = new JsonObject();

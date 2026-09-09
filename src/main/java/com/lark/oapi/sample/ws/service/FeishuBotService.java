@@ -62,6 +62,24 @@ public class FeishuBotService {
         return connections.containsKey(instanceId);
     }
 
+    /**
+     * WS 长连接的<b>真实</b>存活状态 — 反射读 SDK 内部的 conn 字段（null=断线重连中）。
+     * connections 里有对象只代表"连过"，云桌面夜间断网时 SDK 会静默重连数小时，
+     * 表面状态与真实状态脱节，管理面板需要这个真实信号（2026-09-08 断线9.5小时无人察觉的教训）。
+     */
+    public boolean isWsAlive(Long instanceId) {
+        InstanceConnection conn = connections.get(instanceId);
+        if (conn == null || conn.wsClient == null) return false;
+        try {
+            java.lang.reflect.Field f = com.lark.oapi.ws.Client.class.getDeclaredField("conn");
+            f.setAccessible(true);
+            return f.get(conn.wsClient) != null;
+        } catch (Exception e) {
+            log.debug("[FeishuBot] 反射探测 WS 状态失败，乐观视为在线: {}", e.getMessage());
+            return true;   // 反射失败不阻塞状态展示
+        }
+    }
+
     /** 实例最后一次收到消息的时间戳（0=从未） */
     public long getLastMessageTime(Long instanceId) {
         return lastMessageTime.getOrDefault(instanceId, 0L);
@@ -514,6 +532,19 @@ public class FeishuBotService {
     }
 
     // ===== 回复消息（使用对应实例的 httpClient） =====
+
+    /**
+     * 主动向指定实例的某个用户推送文本（E2E 流水线终报等系统通知用）。
+     * 连接不存在或 openId 为空时静默跳过。
+     */
+    public void notifyUser(Long instanceId, String openId, String content) {
+        if (openId == null || openId.isBlank()) return;
+        if (!connections.containsKey(instanceId)) {
+            log.warn("[Feishu] notifyUser 跳过: 实例 {} 未连接", instanceId);
+            return;
+        }
+        replyText(instanceId, openId, "p2p", "", content);
+    }
 
     private void replyText(Long instanceId, String openId, String chatType, String chatId, String content) {
         InstanceConnection conn = connections.get(instanceId);
