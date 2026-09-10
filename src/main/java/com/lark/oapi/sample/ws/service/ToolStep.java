@@ -33,6 +33,15 @@ public class ToolStep {
         this.endMs = 0;
     }
 
+    /** 从持久化记录重建历史步骤（保留原始状态与耗时） */
+    public static ToolStep restore(String name, String detail, Status status, long elapsedMs) {
+        ToolStep s = new ToolStep("restored", name, detail, false) {
+            @Override public long elapsedMs() { return elapsedMs; }
+        };
+        s.status = status;
+        return s;
+    }
+
     public void markEnd(Status s) {
         this.status = s;
         this.endMs = System.currentTimeMillis();

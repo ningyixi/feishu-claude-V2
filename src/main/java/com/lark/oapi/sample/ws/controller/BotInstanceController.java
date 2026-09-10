@@ -113,21 +113,9 @@ public class BotInstanceController {
             if (instance.getFeishuAppId().isBlank()) {
                 return ResponseEntity.ok(TestResultDTO.fail("飞书 APP ID 未配置"));
             }
-            try {
-                Client testClient = Client.newBuilder(instance.getFeishuAppId(), instance.getFeishuAppSecret()).build();
-                testClient.im().message().list(com.lark.oapi.service.im.v1.model.ListMessageReq.newBuilder()
-                        .containerIdType("chat")
-                        .containerId("oc_test")
-                        .pageSize(1)
-                        .build());
-                return ResponseEntity.ok(TestResultDTO.ok("飞书连接成功", "APP ID: " + instance.getFeishuAppId()));
-            } catch (Exception e) {
-                String msg = e.getMessage() != null ? e.getMessage() : e.toString();
-                if (msg.contains("invalid") || msg.contains("app_id") || msg.contains("app_secret")) {
-                    return ResponseEntity.ok(TestResultDTO.fail("飞书凭证无效", msg));
-                }
-                return ResponseEntity.ok(TestResultDTO.ok("飞书凭证有效（业务错误，鉴权通过）", msg));
-            }
+            // 统一走 FeishuBotService.testConnection（含网络/DNS 异常的如实上报，不再吞成"凭证有效"）
+            return ResponseEntity.ok(feishuBotService.testConnection(
+                    instance.getFeishuAppId(), instance.getFeishuAppSecret()));
         }).orElse(ResponseEntity.notFound().build());
     }
 

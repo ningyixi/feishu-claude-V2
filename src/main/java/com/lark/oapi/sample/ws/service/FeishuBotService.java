@@ -260,6 +260,21 @@ public class FeishuBotService {
             return TestResultDTO.ok("飞书连接成功", "APP ID: " + appId);
         } catch (Exception e) {
             String msg = e.getMessage() != null ? e.getMessage() : e.toString();
+            // 网络/DNS 类异常必须如实报失败 —— 旧逻辑把它们吞成"凭证有效"，
+            // 断网整夜时测试按钮依然显示绿色（2026-09-10 实际误导过排查）
+            Throwable root = e;
+            while (root.getCause() != null && root.getCause() != root) root = root.getCause();
+            boolean network = root instanceof java.net.UnknownHostException
+                    || root instanceof java.net.ConnectException
+                    || root instanceof java.net.SocketTimeoutException
+                    || root instanceof java.net.NoRouteToHostException
+                    || root instanceof java.net.SocketException
+                    || msg.contains("UnknownHost") || msg.contains("不知道这样的主机")
+                    || msg.contains("Connection reset") || msg.contains("timed out");
+            if (network) {
+                return TestResultDTO.fail("无法连接飞书服务器（网络/DNS 故障，与凭证无关）",
+                        root.getClass().getSimpleName() + ": " + msg);
+            }
             if (msg.contains("invalid") || msg.contains("99991663") || msg.contains("99991664")
                     || msg.contains("1000040346") || msg.contains("app_id") || msg.contains("app_secret")) {
                 return TestResultDTO.fail("飞书凭证无效", msg);

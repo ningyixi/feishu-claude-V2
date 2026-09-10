@@ -138,7 +138,7 @@ export default function E2ETest() {
         ;(e.turns || []).forEach((t, i) => {
           arr[i] = {
             kind: t.kind || 'agent', author: t.author || 'user', authorName: t.authorName || '',
-            userText: t.userText || '', thinking: t.thinking || '', answer: t.answer || '',
+            addressedTo: t.addressedTo || '', userText: t.userText || '', thinking: t.thinking || '', answer: t.answer || '',
             tools: t.tools || [], result: t.result || null,
             error: t.errorMessage || null, aborted: !!t.aborted,
           }
@@ -150,9 +150,18 @@ export default function E2ETest() {
       case 'user_message':
         setTurns(prev => {
           const arr = [...prev]
-          arr[e.turnIndex] = { kind: 'user', author: 'user', authorName: '', userText: e.text, thinking: '', answer: '', tools: [], result: null }
+          arr[e.turnIndex] = { kind: 'user', author: 'user', authorName: '', addressedTo: e.to || 'auto', userText: e.text, thinking: '', answer: '', tools: [], result: null }
           return arr
         })
+        break
+      case 'ask':
+        setTaskInfo(prev => prev ? {
+          ...prev,
+          pendingQuestion: { role: e.role, roleLabel: e.roleLabel, roleEmoji: e.roleEmoji, memberName: e.memberName, question: e.question, why: e.why },
+        } : prev)
+        break
+      case 'ask_resolved':
+        setTaskInfo(prev => prev ? { ...prev, pendingQuestion: null } : prev)
         break
       case 'system':
         setTurns(prev => {
@@ -226,7 +235,7 @@ export default function E2ETest() {
         setTaskInfo(prev => {
           if (!prev) return prev
           const rounds = [...(prev.pipeline.rounds || []).filter(r => r.round !== e.round),
-            { round: e.round, passed: e.passed, failed: e.failed, blocked: e.blocked, total: e.total }]
+            { round: e.round, passed: e.passed, failed: e.failed, blocked: e.blocked, total: e.total, atMs: e.atMs, results: e.results || [] }]
           return { ...prev, pipeline: { ...prev.pipeline, rounds: rounds.sort((a, b) => a.round - b.round) } }
         })
         break
@@ -283,10 +292,13 @@ export default function E2ETest() {
                 <span key={t.id} onClick={() => setActiveTaskId(t.id)}
                   className={'task-tab' + (t.id === activeTaskId ? ' active' : '')}
                   title={`需求: ${t.requirement}\n成员: ${t.members.map(m => m.roleEmoji + m.name).join(' / ')}\n${t.sharedDir ? '共享目录: ' + t.sharedDir : '成员目录不同（群聊全文模式）'}`}>
-                  {t.busy && <span className="task-dot" />}
+                  {t.pendingQuestion
+                    ? <span title="流水线暂停，等你回答提问">⏸</span>
+                    : (t.busy || t.active) && <span className="task-dot" />}
                   {t.members.map(m => m.roleEmoji).join('')} {truncate(t.requirement, 14)}
                   {t.pipeline?.stage === 'DONE' && <span style={{ color: '#16a34a' }}>✓</span>}
                   {t.pipeline?.stage === 'FAILED' && <span style={{ color: '#dc2626' }}>✗</span>}
+                  {t.interrupted && <span style={{ color: '#d97706' }} title="应用重启中断，可读档续跑">⚠</span>}
                   <button className="task-del" onClick={e => handleDelete(t.id, e)}>×</button>
                 </span>
               ))}
@@ -309,7 +321,7 @@ export default function E2ETest() {
                   {taskInfo.members.map(m => `${m.roleEmoji}${m.name}`).join(' · ')}
                   {taskInfo.sharedDir ? ' · 📁 同目录文件中转' : ' · 📨 群聊全文传递'}
                 </span>
-                {taskInfo.busy && <span className="spinner" title="有成员正在发言" />}
+                {(taskInfo.busy || (taskInfo.pipelineStarted && !taskInfo.pipelineDone)) && <span className="spinner" title="流水线执行中" />}
                 <span className={'conn-badge ' + (connected ? 'on' : 'off')}>{connected ? '● 已连接' : '○ 未连接'}</span>
               </>
             ) : <span style={{ color: 'var(--text-dim)', fontSize: 13 }}>选择或新建一个群聊任务开始</span>}
@@ -338,6 +350,31 @@ export default function E2ETest() {
               live={taskInfo?.busy && i === turns.length - 1 && t.kind === 'agent'} />)}
           </div>
 
+          {/* 应用重启导致的流水线中断：读档横幅 + 断点续跑 */}
+          {taskInfo?.interrupted && (
+            <div className="ask-banner" style={{ background: 'rgba(220,38,38,0.08)', borderColor: 'rgba(220,38,38,0.4)', color: '#991b1b' }}>
+              ⚠️ 应用重启中断了这条流水线 —— 群聊记录与用例状态已从数据库读档恢复。
+              <button className="btn btn-primary" style={{ marginLeft: 10, fontSize: 12, padding: '3px 14px' }}
+                onClick={async () => {
+                  await fetch(`/api/e2e/tasks/${activeTaskId}/resume`, { method: 'POST' })
+                  showToast('▶ 已从断点继续执行', 'success')
+                  setTaskInfo(prev => prev ? { ...prev, interrupted: false } : prev)
+                  loadTasks()
+                }}>▶ 继续执行</button>
+              <span className="ask-hint">用例已就绪时直接跳到执行阶段复测未通过项；也可先 @成员 单聊确认情况</span>
+            </div>
+          )}
+
+          {/* 流水线暂停：成员在等玩家回答 */}
+          {taskInfo?.pendingQuestion && (
+            <div className="ask-banner">
+              ⏸ {taskInfo.pendingQuestion.roleEmoji} <b>{taskInfo.pendingQuestion.roleLabel}{taskInfo.pendingQuestion.memberName ? `·${taskInfo.pendingQuestion.memberName}` : ''}</b> 在等你回答：
+              <b style={{ margin: '0 4px' }}>{taskInfo.pendingQuestion.question}</b>
+              {taskInfo.pendingQuestion.why && <span style={{ opacity: 0.75 }}>（{taskInfo.pendingQuestion.why}）</span>}
+              <span className="ask-hint">👇 保持「🎯 自动编排」直接回复答案，流水线将自动继续</span>
+            </div>
+          )}
+
           <div className="chat-input-bar" style={{ padding: '10px 14px' }}>
             <select className="form-input" style={{ width: 130, padding: '6px 8px', flexShrink: 0 }}
               value={addressee} onChange={e => setAddressee(e.target.value)} disabled={!activeTaskId}>
@@ -348,7 +385,9 @@ export default function E2ETest() {
             </select>
             <textarea className="chat-input" rows={2}
               placeholder={activeTaskId
-                ? (addressee === 'auto' ? '输入测试指令启动流水线…（Enter 发送）' : `直接对 ${roleOf(addressee).label} 说话…（Enter 发送）`)
+                ? (taskInfo?.pendingQuestion
+                  ? '⏸ 回答上面的提问，发送后流水线自动继续…（Enter 发送）'
+                  : (addressee === 'auto' ? '输入测试指令启动流水线…（Enter 发送）' : `直接对 ${roleOf(addressee).label} 说话…（Enter 发送）`))
                 : '请先创建/选择任务'}
               value={input} disabled={!activeTaskId || !connected}
               onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown} />
@@ -362,6 +401,7 @@ export default function E2ETest() {
           <div className="card pipeline-side" style={{ marginBottom: 0 }}>
             <StageStepper pipeline={pipeline} />
             {pipeline?.cases?.length > 0 && <CaseGrid cases={pipeline.cases} rounds={pipeline.rounds} />}
+            {pipeline?.rounds?.length > 0 && <RoundHistory rounds={pipeline.rounds} />}
           </div>
         )}
       </div>
@@ -404,6 +444,7 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
   const [requirement, setRequirement] = useState('')
   const [autoFix, setAutoFix] = useState(true)
   const [maxRounds, setMaxRounds] = useState(3)
+  const [commMode, setCommMode] = useState('filesystem')
   const [creating, setCreating] = useState(false)
 
   const enabled = instances.filter(i => i.enabled)
@@ -450,7 +491,7 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
         .map(([role, id]) => ({ instanceId: Number(id), role }))
       const res = await fetch('/api/e2e/tasks', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ members, requirement: requirement.trim(), autoFix, maxRounds }),
+        body: JSON.stringify({ members, requirement: requirement.trim(), autoFix, maxRounds, commMode }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || '创建失败')
@@ -484,6 +525,32 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
         <textarea className="form-input" rows={2} style={{ resize: 'vertical' }}
           placeholder="例如：实现了飞书机器人的多实例状态功能，管理面板显示每个实例的实时状态徽章"
           value={requirement} onChange={e => setRequirement(e.target.value)} />
+      </div>
+      <div className="form-group" style={{ marginTop: 12 }}>
+        <label className="form-label" style={{ fontSize: 13 }}>成员通信方式</label>
+        <div style={{ display: 'flex', gap: 18, fontSize: 13, flexWrap: 'wrap' }}>
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 6, cursor: 'pointer', maxWidth: 340 }}>
+            <input type="radio" style={{ marginTop: 3 }} checked={commMode === 'filesystem'}
+              onChange={() => setCommMode('filesystem')} />
+            <span>
+              📁 <b>共享文件系统</b>（黑板模式）
+              <span style={{ display: 'block', fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.6 }}>
+                成员在同一工作目录经 .e2e/任务ID/ 文件交换大内容（改动说明/用例/报告），群聊只留精简摘要。需成员目录相同才发挥全部效果。
+              </span>
+            </span>
+          </label>
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 6, cursor: 'not-allowed', maxWidth: 340, opacity: 0.55 }}
+            title="A2A 通信模式开发中">
+            <input type="radio" style={{ marginTop: 3 }} disabled checked={commMode === 'a2a'}
+              onChange={() => setCommMode('a2a')} />
+            <span>
+              🔗 <b>A2A</b>（Agent2Agent 协议）<span className="hook-badge dim" style={{ marginLeft: 4 }}>🚧 开发中</span>
+              <span style={{ display: 'block', fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.6 }}>
+                Agent 间直连通信（Agent Card 发现 + 任务/消息协议），不依赖共享目录。敬请期待。
+              </span>
+            </span>
+          </label>
+        </div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
         <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13 }}>
@@ -570,6 +637,44 @@ function CaseGrid({ cases, rounds }) {
   )
 }
 
+/** 各轮执行痕迹：第 N 轮跑了哪些用例、各自结果如何，按时间往下排 */
+function RoundHistory({ rounds }) {
+  const fmtClock = ms => {
+    if (!ms) return ''
+    const d = new Date(ms)
+    return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  }
+  return (
+    <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px dashed var(--border, #e5e7eb)' }}>
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>📜 各轮执行记录</div>
+      {rounds.map(r => (
+        <div key={r.round} className="round-block">
+          <div className="round-block-head">
+            <b>第 {r.round} 轮</b>
+            <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}>{fmtClock(r.atMs)}</span>
+            <span style={{ marginLeft: 'auto', color: r.failed + r.blocked === 0 ? 'var(--success)' : 'var(--error)' }}>
+              {r.passed}/{r.total} 通过
+            </span>
+          </div>
+          {(r.results || []).map(c => {
+            const st = CASE_STATUS[c.status] || CASE_STATUS.pending
+            const note = c.status !== 'pass' ? (c.failReason || c.evidence || '') : ''
+            return (
+              <div key={c.id} className="round-case-row" title={note ? `${c.id}: ${note}` : c.id}>
+                <span>{st.icon}</span>
+                <b style={{ fontSize: 11 }}>{c.id}</b>
+                <span className="rc-title">{c.title}</span>
+              </div>
+            )
+          })}
+          {(r.results || []).length === 0 && <div className="round-case-row" style={{ color: 'var(--text-dim)' }}>（本轮无逐用例明细）</div>}
+          {r.fixSummary && <div className="round-fix" title={r.fixSummary}>🔧 修复: {truncate(r.fixSummary, 60)}</div>}
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function CaseCard({ c }) {
   const [open, setOpen] = useState(false)
   const st = CASE_STATUS[c.status] || CASE_STATUS.pending
@@ -601,9 +706,16 @@ function GroupMessage({ turn, live }) {
     return <div className="group-system"><span>{turn.userText}</span></div>
   }
   if (turn.kind === 'user') {
+    const addr = turn.addressedTo
+    const role = addr && addr !== 'auto' ? roleOf(addr) : null
     return (
       <div className="msg-user">
-        <div className="bubble-user">{turn.userText}</div>
+        <div className="bubble-user">
+          <span className={'addr-chip' + (role ? '' : ' auto')}>
+            {role ? `@${role.emoji} ${role.label}` : '🎯 自动编排'}
+          </span>
+          {turn.userText}
+        </div>
       </div>
     )
   }

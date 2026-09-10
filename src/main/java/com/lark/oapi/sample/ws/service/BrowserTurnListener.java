@@ -93,6 +93,7 @@ public class BrowserTurnListener implements TurnListener {
         }
         e.add("result", r);
         service.broadcast(task.id, e);
+        service.persistTurn(task, rec);   // 终态回填落库（重启可读档）
         log.info("[E2E] 轮次完成: task={}, turn={}, {}字", task.id, turnIndex,
                 result.text != null ? result.text.length() : 0);
     }
@@ -105,6 +106,7 @@ public class BrowserTurnListener implements TurnListener {
         e.addProperty("message", message != null ? message : "未知错误");
         e.addProperty("aborted", aborted);
         service.broadcast(task.id, e);
+        service.persistTurn(task, rec);   // 终态回填落库
         log.warn("[E2E] 轮次异常: task={}, turn={}, error={}, aborted={}", task.id, turnIndex, message, aborted);
     }
 

@@ -4,6 +4,7 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.lark.oapi.sample.ws.config.E2EWebSocketHandler;
+import com.lark.oapi.sample.ws.service.E2EOrchestrator;
 import com.lark.oapi.sample.ws.service.E2ETaskService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,9 +26,11 @@ public class E2EController {
     private static final Logger log = LoggerFactory.getLogger(E2EController.class);
 
     private final E2ETaskService taskService;
+    private final E2EOrchestrator orchestrator;
 
-    public E2EController(E2ETaskService taskService) {
+    public E2EController(E2ETaskService taskService, E2EOrchestrator orchestrator) {
         this.taskService = taskService;
+        this.orchestrator = orchestrator;
     }
 
     /**
@@ -54,8 +57,10 @@ public class E2EController {
             String requirement = body.has("requirement") ? body.get("requirement").getAsString() : "";
             boolean autoFix = !body.has("autoFix") || body.get("autoFix").getAsBoolean();
             int maxRounds = body.has("maxRounds") ? body.get("maxRounds").getAsInt() : 3;
+            String commMode = body.has("commMode") && !body.get("commMode").isJsonNull()
+                    ? body.get("commMode").getAsString() : "filesystem";
 
-            E2ETaskService.E2ETask task = taskService.createTask(members, requirement, autoFix, maxRounds);
+            E2ETaskService.E2ETask task = taskService.createTask(members, requirement, autoFix, maxRounds, commMode);
             return ResponseEntity.ok(E2EWebSocketHandler.taskJson(task).toString());
         } catch (IllegalArgumentException | IllegalStateException e) {
             return badRequest(e.getMessage());
@@ -98,6 +103,15 @@ public class E2EController {
     public ResponseEntity<String> delete(@PathVariable String id) {
         if (taskService.getTask(id) == null) return ResponseEntity.notFound().build();
         taskService.destroyTask(id);
+        return ResponseEntity.ok("{\"ok\":true}");
+    }
+
+    /** 断点续跑（应用重启打断流水线后） */
+    @PostMapping(value = "/tasks/{id}/resume", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> resume(@PathVariable String id) {
+        E2ETaskService.E2ETask task = taskService.getTask(id);
+        if (task == null) return ResponseEntity.notFound().build();
+        orchestrator.resumePipeline(task);
         return ResponseEntity.ok("{\"ok\":true}");
     }
 

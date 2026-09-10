@@ -143,10 +143,28 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
         t.addProperty("autoFix", task.autoFix);
         t.addProperty("maxRounds", task.maxRounds);
         t.addProperty("sharedDir", task.sharedDir != null ? task.sharedDir : "");
+        t.addProperty("commMode", task.commMode != null ? task.commMode : "filesystem");
         t.addProperty("createdAt", task.createdAt);
         t.addProperty("busy", task.busy);
+        // active = 整条流水线进行中（含阶段间隙/成员长执行），黄点闪到 DONE/FAILED 为止
+        t.addProperty("active", task.busy || (task.pipelineStarted && !task.pipelineDone && !task.cancelled));
         t.addProperty("pipelineStarted", task.pipelineStarted);
         t.addProperty("pipelineDone", task.pipelineDone);
+        t.addProperty("interrupted", task.interrupted);   // 应用重启打断，前端显示"继续执行"按钮
+        // 流水线暂停中：成员在等玩家回答（前端渲染提问横幅）
+        E2ETaskService.PendingQuestion pq = task.pendingQuestion;
+        if (pq != null) {
+            E2ETaskService.Member asker = task.memberByRole(pq.role);
+            JsonObject pqo = new JsonObject();
+            pqo.addProperty("role", pq.role);
+            pqo.addProperty("roleLabel", asker != null ? asker.roleLabel() : pq.role);
+            pqo.addProperty("roleEmoji", asker != null ? asker.roleEmoji() : "🤖");
+            pqo.addProperty("memberName", asker != null ? asker.name : "");
+            pqo.addProperty("question", pq.question);
+            pqo.addProperty("why", pq.why);
+            pqo.addProperty("sinceMs", pq.sinceMs);
+            t.add("pendingQuestion", pqo);
+        }
 
         JsonArray members = new JsonArray();
         for (E2ETaskService.Member m : task.members) {
@@ -180,7 +198,18 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
             ro.addProperty("blocked", r.blocked);
             ro.addProperty("total", r.total);
             ro.addProperty("atMs", r.atMs);
-            ro.addProperty("fixSummary", r.fixSummary);
+            ro.addProperty("fixSummary", r.fixSummary != null ? r.fixSummary : "");
+            JsonArray results = new JsonArray();
+            for (E2ETaskService.CaseResult cr : r.results) {
+                JsonObject co = new JsonObject();
+                co.addProperty("id", cr.id);
+                co.addProperty("title", cr.title);
+                co.addProperty("status", cr.status);
+                co.addProperty("evidence", cr.evidence != null ? cr.evidence : "");
+                co.addProperty("failReason", cr.failReason != null ? cr.failReason : "");
+                results.add(co);
+            }
+            ro.add("results", results);
             rounds.add(ro);
         }
         p.add("rounds", rounds);
@@ -194,6 +223,7 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
         t.addProperty("kind", rec.kind);
         t.addProperty("author", rec.author);
         t.addProperty("authorName", rec.authorName);
+        t.addProperty("addressedTo", rec.addressedTo != null ? rec.addressedTo : "");
         t.addProperty("userText", rec.userText);
         t.addProperty("startMs", rec.startMs);
         synchronized (rec) {

@@ -720,3 +720,89 @@ body {
 .hook-summary {
   max-width: 420px; word-break: break-word; color: var(--text);
 }
+
+/* ===== 供应商接入工作台 ===== */
+.job-card { transition: all 0.15s; }
+.job-card:hover { border-color: var(--accent); box-shadow: 0 2px 12px rgba(59,130,246,0.1); }
+
+.mode-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.mode-card {
+  border: 2px solid var(--border, #e5e7eb); border-radius: 12px;
+  padding: 22px 20px; text-align: center; cursor: pointer; transition: all 0.15s;
+}
+.mode-card:hover:not(.disabled) { border-color: var(--accent); }
+.mode-card.selected { border-color: var(--accent); background: var(--accent-glow); box-shadow: 0 0 0 3px var(--accent-glow); }
+.mode-card.disabled { opacity: 0.45; cursor: not-allowed; }
+
+.game-hint {
+  margin-top: 10px; padding: 8px 14px; border-radius: 8px; font-size: 12.5px;
+  background: var(--accent-glow); color: var(--accent); line-height: 1.7;
+}
+
+/* 右侧工作流竖排节点线 */
+.workflow-rail {
+  width: 290px; flex-shrink: 0; padding: 14px 14px;
+  position: sticky; top: 0; max-height: calc(100vh - 100px); overflow-y: auto;
+}
+.wf-row { display: flex; gap: 8px; }
+.wf-line-col { display: flex; flex-direction: column; align-items: center; width: 22px; flex-shrink: 0; }
+.wf-dot {
+  width: 20px; height: 20px; border-radius: 50%; color: #fff; font-size: 10px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 2px;
+}
+.wf-dot.pulse { animation: status-pulse 1.4s ease-in-out infinite; }
+.wf-line { width: 2px; flex: 1; min-height: 16px; background: var(--border, #e5e7eb); }
+.wf-node {
+  flex: 1; padding: 4px 8px; border-radius: 8px; cursor: pointer;
+  border: 1px solid transparent; margin-bottom: 6px; min-width: 0;
+}
+.wf-node:hover { background: rgba(0,0,0,0.03); }
+.wf-node.sel { border-color: var(--accent); background: var(--accent-glow); }
+
+.artifact-box {
+  border: 1px solid var(--border, #e5e7eb); border-radius: 8px;
+  padding: 12px 16px; background: rgba(0,0,0,0.015);
+  max-height: 52vh; overflow-y: auto; font-size: 13px;
+}
+
+.wf-editor-row {
+  display: flex; align-items: center; gap: 8px; padding: 7px 10px;
+  border: 1px solid var(--border, #e5e7eb); border-radius: 8px; margin-bottom: 6px;
+}
+
+/* ===== E2E 主动提问横幅 & 收件人徽章 ===== */
+.ask-banner {
+  margin: 0 14px 8px; padding: 10px 14px; border-radius: 10px; font-size: 13px;
+  background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.45); color: #92400e;
+  line-height: 1.7; animation: status-glow 2s ease-in-out infinite;
+}
+.ask-hint { display: block; font-size: 11.5px; opacity: 0.75; margin-top: 2px; }
+.addr-chip {
+  display: inline-block; font-size: 10.5px; font-weight: 700; padding: 0 7px;
+  border-radius: 999px; background: rgba(255,255,255,0.28);
+  margin-right: 6px; vertical-align: 1px; white-space: nowrap;
+}
+.addr-chip.auto { background: rgba(255,255,255,0.16); font-weight: 500; }
+
+/* ===== E2E 各轮执行记录 ===== */
+.round-block {
+  border: 1px solid var(--border, #e5e7eb); border-radius: 8px;
+  padding: 8px 10px; margin-bottom: 8px; background: rgba(0,0,0,0.015);
+}
+.round-block-head {
+  display: flex; align-items: center; gap: 8px; font-size: 12px;
+  padding-bottom: 6px; margin-bottom: 4px; border-bottom: 1px dashed var(--border, #e5e7eb);
+}
+.round-case-row {
+  display: flex; align-items: center; gap: 6px; font-size: 11.5px;
+  padding: 2px 0; min-width: 0;
+}
+.round-case-row .rc-title {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text-dim);
+}
+.round-fix {
+  margin-top: 6px; padding-top: 6px; border-top: 1px dashed var(--border, #e5e7eb);
+  font-size: 11px; color: #0891b2; line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
