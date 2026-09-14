@@ -12,6 +12,7 @@ public record BotInstanceDTO(
     String claudeWorkingDir,
     String claudeModel,
     boolean enabled,
+    int sandboxLevel,
     String createdAt,
     String updatedAt
 ) {
@@ -30,6 +31,7 @@ public record BotInstanceDTO(
             e.getClaudeWorkingDir(),
             e.getClaudeModel(),
             e.isEnabled(),
+            e.getSandboxLevel(),
             e.getCreatedAt() != null ? e.getCreatedAt().toString() : "",
             e.getUpdatedAt() != null ? e.getUpdatedAt().toString() : ""
         );

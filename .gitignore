@@ -32,3 +32,6 @@ Thumbs.db
 
 # 日志
 *.log
+
+# agent 测试时产生的临时文件
+*.tmp.json

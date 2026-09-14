@@ -118,6 +118,9 @@ export default function Hooks() {
                   <span className="hook-badge">{TRIGGER_LABEL[h.triggerType] || h.triggerType}</span>
                   {h.triggerType === 'CRON' && <span className="hook-badge dim">🕐 {cronHuman(h.cronExpr)}</span>}
                   {!h.enabled && <span className="hook-badge dim">已停用</span>}
+                  {h.creatorEmployeeId
+                    ? <span className="hook-badge" title={`由数字员工「${h.creatorEmployeeName || h.creatorEmployeeId}」创建`}>👔 {h.creatorEmployeeName || `员工#${h.creatorEmployeeId}`}</span>
+                    : <span className="hook-badge dim" title="由管理员在面板创建">👑 admin</span>}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 6, lineHeight: 1.8 }}>
                   <div>👁 监控: {(h.instanceIds || '').split(',').filter(Boolean).map(id => (
@@ -237,6 +240,17 @@ function HookForm({ hook, instances, onClose, onSaved, showToast }) {
     enabled: hook ? hook.enabled : true,
   }))
   const [saving, setSaving] = useState(false)
+  // 实例独占绑定：被数字员工绑定的实例不能再新分配给 Hook（服务端也会拦；已勾选的存量不强制移除）
+  const [occupied, setOccupied] = useState({})
+  useEffect(() => {
+    fetch('/api/employees').then(r => r.json()).then(emps => {
+      const map = {}
+      ;(emps || []).forEach(emp => (emp.instances || []).forEach(i => {
+        map[String(i.id)] = `${emp.emoji || '👔'} ${emp.name}`
+      }))
+      setOccupied(map)
+    }).catch(() => {})
+  }, [])
 
   function toggleInst(id) {
     setForm(f => ({
@@ -292,12 +306,24 @@ function HookForm({ hook, instances, onClose, onSaved, showToast }) {
           <div className="form-group">
             <label className="form-label">监控的实例 *（这些实例的飞书对话会被分析）</label>
             <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap' }}>
-              {instances.filter(i => i.enabled).map(i => (
-                <label key={i.id} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, cursor: 'pointer' }}>
-                  <input type="checkbox" checked={form.instanceIds.includes(String(i.id))} onChange={() => toggleInst(i.id)} />
-                  {i.name || `#${i.id}`}
-                </label>
-              ))}
+              {instances.filter(i => i.enabled).map(i => {
+                const occ = occupied[String(i.id)]
+                const checked = form.instanceIds.includes(String(i.id))
+                return (
+                  <label key={i.id} style={{
+                    display: 'flex', alignItems: 'center', gap: 6, fontSize: 13,
+                    cursor: occ && !checked ? 'not-allowed' : 'pointer', opacity: occ && !checked ? 0.55 : 1,
+                  }}>
+                    <input type="checkbox" disabled={!!occ && !checked} checked={checked} onChange={() => toggleInst(i.id)} />
+                    {i.name || `#${i.id}`}
+                    {occ && (
+                      <span style={{ fontSize: 10.5, color: checked ? 'var(--text-dim)' : '#d97706' }}>
+                        👔 {occ}{checked ? ' 绑定（存量保留）' : ' 独占，需先解绑'}
+                      </span>
+                    )}
+                  </label>
+                )
+              })}
             </div>
           </div>
 
@@ -307,9 +333,17 @@ function HookForm({ hook, instances, onClose, onSaved, showToast }) {
               <select className="form-input" value={form.maintainerInstanceId}
                 onChange={e => setForm(f => ({ ...f, maintainerInstanceId: e.target.value }))}>
                 <option value="">选择实例…</option>
-                {instances.filter(i => i.enabled).map(i => (
-                  <option key={i.id} value={i.id}>{i.name || `#${i.id}`}{i.claudeModel ? ` (${i.claudeModel})` : ''}</option>
-                ))}
+                {instances.filter(i => i.enabled).map(i => {
+                  const occ = occupied[String(i.id)]
+                  const isCurrent = String(form.maintainerInstanceId) === String(i.id)
+                  return (
+                    <option key={i.id} value={i.id} disabled={!!occ && !isCurrent}>
+                      {occ && !isCurrent
+                        ? `🔒 ${i.name || `#${i.id}`}（已被员工 ${occ} 独占绑定）`
+                        : `${i.name || `#${i.id}`}${i.claudeModel ? ` (${i.claudeModel})` : ''}`}
+                    </option>
+                  )
+                })}
               </select>
             </div>
             <div className="form-group">

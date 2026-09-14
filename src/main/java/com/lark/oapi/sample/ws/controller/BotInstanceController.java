@@ -206,6 +206,10 @@ public class BotInstanceController {
         if (dto.shellWorkingDir() != null) instance.setShellWorkingDir(dto.shellWorkingDir());
         if (dto.claudeWorkingDir() != null) instance.setClaudeWorkingDir(dto.claudeWorkingDir());
         if (dto.claudeModel() != null) instance.setClaudeModel(dto.claudeModel());
+        // 沙箱档位：仅接受合法值（0/1/2），非法值 fail-closed 保持原值
+        if (com.lark.oapi.sample.ws.service.SandboxPolicy.isValidLevel(dto.sandboxLevel())) {
+            instance.setSandboxLevel(dto.sandboxLevel());
+        }
         instance.setEnabled(dto.enabled());
     }
 }

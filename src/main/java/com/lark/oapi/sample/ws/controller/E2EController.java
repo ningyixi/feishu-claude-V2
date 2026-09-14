@@ -27,10 +27,13 @@ public class E2EController {
 
     private final E2ETaskService taskService;
     private final E2EOrchestrator orchestrator;
+    private final com.lark.oapi.sample.ws.service.EmployeeService employeeService;
 
-    public E2EController(E2ETaskService taskService, E2EOrchestrator orchestrator) {
+    public E2EController(E2ETaskService taskService, E2EOrchestrator orchestrator,
+                         com.lark.oapi.sample.ws.service.EmployeeService employeeService) {
         this.taskService = taskService;
         this.orchestrator = orchestrator;
+        this.employeeService = employeeService;
     }
 
     /**
@@ -59,8 +62,22 @@ public class E2EController {
             int maxRounds = body.has("maxRounds") ? body.get("maxRounds").getAsInt() : 3;
             String commMode = body.has("commMode") && !body.get("commMode").isJsonNull()
                     ? body.get("commMode").getAsString() : "filesystem";
+            // 创建者：数字员工（校验 e2e 权限）或管理员用户（缺省）
+            Long creatorEmployeeId = body.has("creatorEmployeeId") && !body.get("creatorEmployeeId").isJsonNull()
+                    ? body.get("creatorEmployeeId").getAsLong() : null;
+            String creatorName = null;
+            if (creatorEmployeeId != null) {
+                creatorName = employeeService.requirePermission(creatorEmployeeId, "e2e").getName();
+            }
+            // 实例独占绑定闸门：admin 不能用员工已绑定的实例；员工只能用自己绑定的实例
+            List<Long> memberIds = new java.util.ArrayList<>();
+            for (E2ETaskService.MemberSpec s : members) {
+                if (!memberIds.contains(s.instanceId)) memberIds.add(s.instanceId);
+            }
+            employeeService.assertInstancesUsable(memberIds, creatorEmployeeId);
 
-            E2ETaskService.E2ETask task = taskService.createTask(members, requirement, autoFix, maxRounds, commMode);
+            E2ETaskService.E2ETask task = taskService.createTask(members, requirement, autoFix, maxRounds, commMode,
+                    creatorEmployeeId, creatorName);
             return ResponseEntity.ok(E2EWebSocketHandler.taskJson(task).toString());
         } catch (IllegalArgumentException | IllegalStateException e) {
             return badRequest(e.getMessage());
@@ -113,6 +130,72 @@ public class E2EController {
         if (task == null) return ResponseEntity.notFound().build();
         orchestrator.resumePipeline(task);
         return ResponseEntity.ok("{\"ok\":true}");
+    }
+
+    /**
+     * 启动流水线（幂等）——纯 API 触发，无需前端连 WS。
+     * 数字员工调用（带 creatorEmployeeId）时：需 e2e 权限，且只能启动自己创建的任务。
+     */
+    @PostMapping(value = "/tasks/{id}/start", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> start(@PathVariable String id, @RequestBody(required = false) String rawBody) {
+        E2ETaskService.E2ETask task = taskService.getTask(id);
+        if (task == null) return ResponseEntity.notFound().build();
+        try {
+            Long empId = parseCreator(rawBody);
+            if (empId != null) {
+                employeeService.requirePermission(empId, "e2e");
+                assertTaskCreator(task, empId);
+            }
+        } catch (IllegalArgumentException e) {
+            return badRequest(e.getMessage());
+        }
+        orchestrator.start(task);
+        return ResponseEntity.ok("{\"ok\":true}");
+    }
+
+    /**
+     * 群聊发言（与前端输入框等价）：to=auto 驱动流水线/回答提问，to=角色 则单聊该成员。
+     * 数字员工发言带 creatorEmployeeId（需 e2e 权限 + 只能操作自己创建的任务），群聊里显示 👔 员工身份。
+     */
+    @PostMapping(value = "/tasks/{id}/message", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> message(@PathVariable String id, @RequestBody String rawBody) {
+        E2ETaskService.E2ETask task = taskService.getTask(id);
+        if (task == null) return ResponseEntity.notFound().build();
+        try {
+            JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            String text = body.has("text") && !body.get("text").isJsonNull() ? body.get("text").getAsString() : "";
+            if (text.isBlank()) return badRequest("消息内容不能为空");
+            String to = body.has("to") && !body.get("to").isJsonNull() ? body.get("to").getAsString() : "auto";
+            String authorName = "用户";
+            Long empId = body.has("creatorEmployeeId") && !body.get("creatorEmployeeId").isJsonNull()
+                    ? body.get("creatorEmployeeId").getAsLong() : null;
+            if (empId != null) {
+                var emp = employeeService.requirePermission(empId, "e2e");
+                assertTaskCreator(task, empId);
+                authorName = emp.getEmoji() + " " + emp.getName() + "（数字员工）";
+            }
+            orchestrator.postUserMessage(task, text, to, authorName);
+            return ResponseEntity.ok("{\"ok\":true}");
+        } catch (IllegalArgumentException e) {
+            return badRequest(e.getMessage());
+        }
+    }
+
+    private Long parseCreator(String rawBody) {
+        if (rawBody == null || rawBody.isBlank()) return null;
+        try {
+            JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            return body.has("creatorEmployeeId") && !body.get("creatorEmployeeId").isJsonNull()
+                    ? body.get("creatorEmployeeId").getAsLong() : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private void assertTaskCreator(E2ETaskService.E2ETask task, Long empId) {
+        if (task.creatorEmployeeId == null || !task.creatorEmployeeId.equals(empId)) {
+            throw new IllegalArgumentException("数字员工只能操作自己创建的 E2E 任务");
+        }
     }
 
     /** 目标实例的背景简报预览（git 变更 + 最近对话） */

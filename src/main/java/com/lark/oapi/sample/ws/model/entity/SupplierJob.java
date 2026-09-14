@@ -56,6 +56,14 @@ public class SupplierJob {
     /** ACTIVE | COMPLETED */
     private String status = "ACTIVE";
 
+    /** 创建者：数字员工 id（null = 管理员用户在面板创建） */
+    @Column(name = "created_by_employee_id")
+    private Long createdByEmployeeId;
+
+    /** 创建者姓名快照（员工被删/改名后标签仍可展示） */
+    @Column(name = "created_by_employee_name")
+    private String createdByEmployeeName;
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 
@@ -92,6 +100,10 @@ public class SupplierJob {
     public void setCurrentNodeId(String currentNodeId) { this.currentNodeId = currentNodeId; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
+    public Long getCreatedByEmployeeId() { return createdByEmployeeId; }
+    public void setCreatedByEmployeeId(Long createdByEmployeeId) { this.createdByEmployeeId = createdByEmployeeId; }
+    public String getCreatedByEmployeeName() { return createdByEmployeeName; }
+    public void setCreatedByEmployeeName(String createdByEmployeeName) { this.createdByEmployeeName = createdByEmployeeName; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }

@@ -56,15 +56,18 @@ public class E2ETaskService {
     private final ChatMessageRepository chatMessageRepo;
     private final E2ETaskEntityRepository taskEntityRepo;
     private final E2ETurnEntityRepository turnEntityRepo;
+    private final com.lark.oapi.sample.ws.a2a.A2ATaskRegistry a2aRegistry;
     private final Map<String, E2ETask> tasks = new ConcurrentHashMap<>();
     private volatile Broadcaster broadcaster;
 
     public E2ETaskService(BotInstanceRepository instanceRepo, ChatMessageRepository chatMessageRepo,
-                          E2ETaskEntityRepository taskEntityRepo, E2ETurnEntityRepository turnEntityRepo) {
+                          E2ETaskEntityRepository taskEntityRepo, E2ETurnEntityRepository turnEntityRepo,
+                          com.lark.oapi.sample.ws.a2a.A2ATaskRegistry a2aRegistry) {
         this.instanceRepo = instanceRepo;
         this.chatMessageRepo = chatMessageRepo;
         this.taskEntityRepo = taskEntityRepo;
         this.turnEntityRepo = turnEntityRepo;
+        this.a2aRegistry = a2aRegistry;
     }
 
     public void setBroadcaster(Broadcaster b) {
@@ -96,13 +99,19 @@ public class E2ETaskService {
      * @param members 角色分配：role ∈ programmer/designer/executor，允许同一实例兼任多个角色
      */
     public E2ETask createTask(List<MemberSpec> members, String requirement, boolean autoFix, int maxRounds) throws Exception {
-        return createTask(members, requirement, autoFix, maxRounds, "filesystem");
+        return createTask(members, requirement, autoFix, maxRounds, "filesystem", null, null);
     }
 
     public E2ETask createTask(List<MemberSpec> members, String requirement, boolean autoFix, int maxRounds, String commMode) throws Exception {
-        if ("a2a".equalsIgnoreCase(commMode)) {
-            throw new IllegalArgumentException("A2A（Agent2Agent 协议）通信模式开发中，敬请期待；当前请使用共享文件系统模式");
-        }
+        return createTask(members, requirement, autoFix, maxRounds, commMode, null, null);
+    }
+
+    /**
+     * @param creatorEmployeeId 创建者数字员工 id（null = 管理员用户创建）；权限校验由调用方（控制器）完成
+     * @param creatorEmployeeName 创建者姓名快照（员工删除/改名后标签仍可展示）
+     */
+    public E2ETask createTask(List<MemberSpec> members, String requirement, boolean autoFix, int maxRounds,
+                              String commMode, Long creatorEmployeeId, String creatorEmployeeName) throws Exception {
         if (members == null || members.isEmpty()) throw new IllegalArgumentException("至少需要一个成员实例");
         if (requirement == null || requirement.isBlank()) throw new IllegalArgumentException("请填写要测试的需求描述");
 
@@ -110,7 +119,13 @@ public class E2ETaskService {
         task.requirement = requirement.trim();
         task.autoFix = autoFix;
         task.maxRounds = Math.max(1, Math.min(maxRounds, 5));
-        task.commMode = commMode != null && !commMode.isBlank() ? commMode : "filesystem";
+        String mode = commMode != null && !commMode.isBlank() ? commMode.toLowerCase() : "filesystem";
+        if (!mode.equals("filesystem") && !mode.equals("a2a")) {
+            throw new IllegalArgumentException("未知通信方式: " + commMode + "（可选 filesystem / a2a）");
+        }
+        task.commMode = mode;
+        task.creatorEmployeeId = creatorEmployeeId;
+        task.creatorEmployeeName = creatorEmployeeName != null ? creatorEmployeeName : "";
 
         Set<String> dirs = new LinkedHashSet<>();
         for (MemberSpec spec : members) {
@@ -145,6 +160,8 @@ public class E2ETaskService {
         if (task != null) {
             task.cancelled = true;
             if (task.answerFuture != null) task.answerFuture.complete("（任务已删除）");
+            // A2A 注册表联动清理（该任务派发的全部信封），防内存泄漏
+            try { a2aRegistry.purgeByPrefix("a2a-" + taskId + "-"); } catch (Exception ignored) {}
             // 用户点 × = 彻底删除：任务 + 流水线状态 + 全部群聊记录
             try {
                 turnEntityRepo.deleteByTaskId(taskId);
@@ -173,7 +190,9 @@ public class E2ETaskService {
             e.setMaxRounds(task.maxRounds);
             e.setSharedDir(task.sharedDir);
             e.setCommMode(task.commMode);
-            e.setPipelineJson(pipelineToJson(task.pipeline));
+            e.setCreatedByEmployeeId(task.creatorEmployeeId);
+            e.setCreatedByEmployeeName(task.creatorEmployeeName);
+            e.setPipelineJson(pipelineToJson(task));
             e.setPipelineStarted(task.pipelineStarted);
             e.setPipelineDone(task.pipelineDone);
             e.setUpdatedAt(System.currentTimeMillis());
@@ -192,6 +211,7 @@ public class E2ETaskService {
                 synchronized (rec) {
                     e.setThinking(rec.thinking.toString());
                     e.setAnswer(rec.answer.toString());
+                    e.setA2aJson(rec.a2a != null ? rec.a2a.toString() : null);
                 }
                 e.setToolsJson(toolsToJson(rec.tools));
                 e.setResultJson(resultToJson(rec.result));
@@ -216,10 +236,12 @@ public class E2ETaskService {
                 task.maxRounds = e.getMaxRounds();
                 task.sharedDir = e.getSharedDir();
                 task.commMode = e.getCommMode() != null ? e.getCommMode() : "filesystem";
+                task.creatorEmployeeId = e.getCreatedByEmployeeId();
+                task.creatorEmployeeName = e.getCreatedByEmployeeName() != null ? e.getCreatedByEmployeeName() : "";
                 task.pipelineStarted = e.isPipelineStarted();
                 task.pipelineDone = e.isPipelineDone();
                 membersFromJson(e.getMembersJson(), task);
-                pipelineFromJson(e.getPipelineJson(), task.pipeline);
+                pipelineFromJson(e.getPipelineJson(), task);
                 // 重启前流水线在跑 → 标记中断（前端显示续跑按钮）
                 task.interrupted = task.pipelineStarted && !task.pipelineDone;
 
@@ -236,6 +258,16 @@ public class E2ETaskService {
                     }
                     toolsFromJson(te.getToolsJson(), rec.tools);
                     rec.result = resultFromJson(te.getResultJson());
+                    rec.a2a = a2aFromJson(te.getA2aJson());
+                    // 信封停留在 Pending/Running = 重启前任务未跑完 → 翻转 Failed（防止前端永久蓝闪）
+                    if (rec.a2a != null) {
+                        String st = rec.a2a.has("status") && !rec.a2a.get("status").isJsonNull()
+                                ? rec.a2a.get("status").getAsString() : "";
+                        if ("Pending".equals(st) || "Running".equals(st)) {
+                            rec.a2a.addProperty("status", "Failed");
+                            rec.a2a.addProperty("error", "应用重启中断");
+                        }
+                    }
                     rec.errorMessage = te.getErrorMessage();
                     rec.aborted = te.isAborted();
                     if ("agent".equals(rec.kind) && rec.result == null && rec.errorMessage == null) {
@@ -286,12 +318,26 @@ public class E2ETaskService {
         } catch (Exception ignored) {}
     }
 
-    private String pipelineToJson(PipelineState ps) {
+    /** 流水线整体落库：{current: 当前轮, history: [已归档轮次...]}（群聊续派任务时历史保留） */
+    private String pipelineToJson(E2ETask task) {
+        JsonObject root = new JsonObject();
+        root.add("current", runToJson(task.pipeline));
+        JsonArray hist = new JsonArray();
+        for (PipelineState p : task.runsHistory) hist.add(runToJson(p));
+        root.add("history", hist);
+        return root.toString();
+    }
+
+    private JsonObject runToJson(PipelineState ps) {
         JsonObject o = new JsonObject();
         o.addProperty("stage", ps.stage);
         o.addProperty("stageDetail", ps.stageDetail);
         o.addProperty("round", ps.round);
         o.addProperty("failReason", ps.failReason);
+        o.addProperty("runIndex", ps.runIndex);
+        o.addProperty("requirement", ps.requirement != null ? ps.requirement : "");
+        o.addProperty("startedAt", ps.startedAt);
+        o.addProperty("endedAt", ps.endedAt);
         JsonArray cases = new JsonArray();
         for (TestCase c : ps.cases) {
             JsonObject co = new JsonObject();
@@ -331,58 +377,77 @@ public class E2ETaskService {
             rounds.add(ro);
         }
         o.add("rounds", rounds);
-        return o.toString();
+        return o;
     }
 
-    private void pipelineFromJson(String json, PipelineState ps) {
+    private void pipelineFromJson(String json, E2ETask task) {
         try {
-            JsonObject o = JsonParser.parseString(json != null && !json.isBlank() ? json : "{}").getAsJsonObject();
-            if (o.has("stage") && !o.get("stage").isJsonNull()) ps.stage = o.get("stage").getAsString();
-            if (o.has("stageDetail") && !o.get("stageDetail").isJsonNull()) ps.stageDetail = o.get("stageDetail").getAsString();
-            if (o.has("round")) ps.round = o.get("round").getAsInt();
-            if (o.has("failReason") && !o.get("failReason").isJsonNull()) ps.failReason = o.get("failReason").getAsString();
-            if (o.has("cases")) {
-                for (JsonElement el : o.getAsJsonArray("cases")) {
-                    JsonObject co = el.getAsJsonObject();
-                    TestCase c = new TestCase();
-                    c.id = co.has("id") ? co.get("id").getAsString() : "";
-                    c.title = co.has("title") ? co.get("title").getAsString() : "";
-                    c.steps = co.has("steps") ? co.get("steps").getAsString() : "";
-                    c.expected = co.has("expected") ? co.get("expected").getAsString() : "";
-                    c.priority = co.has("priority") ? co.get("priority").getAsString() : "medium";
-                    c.status = co.has("status") ? co.get("status").getAsString() : "pending";
-                    c.evidence = co.has("evidence") ? co.get("evidence").getAsString() : "";
-                    c.failReason = co.has("failReason") ? co.get("failReason").getAsString() : "";
-                    c.lastRound = co.has("lastRound") ? co.get("lastRound").getAsInt() : 0;
-                    ps.cases.add(c);
-                }
-            }
-            if (o.has("rounds")) {
-                for (JsonElement el : o.getAsJsonArray("rounds")) {
-                    JsonObject ro = el.getAsJsonObject();
-                    RoundReport r = new RoundReport();
-                    r.round = ro.get("round").getAsInt();
-                    r.passed = ro.get("passed").getAsInt();
-                    r.failed = ro.get("failed").getAsInt();
-                    r.blocked = ro.get("blocked").getAsInt();
-                    r.total = ro.get("total").getAsInt();
-                    r.atMs = ro.has("atMs") ? ro.get("atMs").getAsLong() : 0;
-                    r.fixSummary = ro.has("fixSummary") && !ro.get("fixSummary").isJsonNull() ? ro.get("fixSummary").getAsString() : "";
-                    if (ro.has("results")) {
-                        for (JsonElement re : ro.getAsJsonArray("results")) {
-                            JsonObject cro = re.getAsJsonObject();
-                            r.results.add(new CaseResult(
-                                    cro.has("id") ? cro.get("id").getAsString() : "",
-                                    cro.has("title") ? cro.get("title").getAsString() : "",
-                                    cro.has("status") ? cro.get("status").getAsString() : "",
-                                    cro.has("evidence") ? cro.get("evidence").getAsString() : "",
-                                    cro.has("failReason") ? cro.get("failReason").getAsString() : ""));
-                        }
-                    }
-                    ps.rounds.add(r);
+            JsonObject root = JsonParser.parseString(json != null && !json.isBlank() ? json : "{}").getAsJsonObject();
+            // 向后兼容：旧档没有 current 包装（单轮时代），根对象就是当前轮
+            JsonObject cur = root.has("current") && root.get("current").isJsonObject()
+                    ? root.getAsJsonObject("current") : root;
+            runFromJson(cur, task.pipeline);
+            if (root.has("history") && root.get("history").isJsonArray()) {
+                for (JsonElement el : root.getAsJsonArray("history")) {
+                    if (!el.isJsonObject()) continue;
+                    PipelineState p = new PipelineState();
+                    runFromJson(el.getAsJsonObject(), p);
+                    task.runsHistory.add(p);
                 }
             }
         } catch (Exception ignored) {}
+    }
+
+    private void runFromJson(JsonObject o, PipelineState ps) {
+        if (o.has("stage") && !o.get("stage").isJsonNull()) ps.stage = o.get("stage").getAsString();
+        if (o.has("stageDetail") && !o.get("stageDetail").isJsonNull()) ps.stageDetail = o.get("stageDetail").getAsString();
+        if (o.has("round")) ps.round = o.get("round").getAsInt();
+        if (o.has("failReason") && !o.get("failReason").isJsonNull()) ps.failReason = o.get("failReason").getAsString();
+        if (o.has("runIndex")) ps.runIndex = o.get("runIndex").getAsInt();
+        if (o.has("requirement") && !o.get("requirement").isJsonNull()) ps.requirement = o.get("requirement").getAsString();
+        if (o.has("startedAt")) ps.startedAt = o.get("startedAt").getAsLong();
+        if (o.has("endedAt")) ps.endedAt = o.get("endedAt").getAsLong();
+        if (o.has("cases")) {
+            for (JsonElement el : o.getAsJsonArray("cases")) {
+                JsonObject co = el.getAsJsonObject();
+                TestCase c = new TestCase();
+                c.id = co.has("id") ? co.get("id").getAsString() : "";
+                c.title = co.has("title") ? co.get("title").getAsString() : "";
+                c.steps = co.has("steps") ? co.get("steps").getAsString() : "";
+                c.expected = co.has("expected") ? co.get("expected").getAsString() : "";
+                c.priority = co.has("priority") ? co.get("priority").getAsString() : "medium";
+                c.status = co.has("status") ? co.get("status").getAsString() : "pending";
+                c.evidence = co.has("evidence") ? co.get("evidence").getAsString() : "";
+                c.failReason = co.has("failReason") ? co.get("failReason").getAsString() : "";
+                c.lastRound = co.has("lastRound") ? co.get("lastRound").getAsInt() : 0;
+                ps.cases.add(c);
+            }
+        }
+        if (o.has("rounds")) {
+            for (JsonElement el : o.getAsJsonArray("rounds")) {
+                JsonObject ro = el.getAsJsonObject();
+                RoundReport r = new RoundReport();
+                r.round = ro.get("round").getAsInt();
+                r.passed = ro.get("passed").getAsInt();
+                r.failed = ro.get("failed").getAsInt();
+                r.blocked = ro.get("blocked").getAsInt();
+                r.total = ro.get("total").getAsInt();
+                r.atMs = ro.has("atMs") ? ro.get("atMs").getAsLong() : 0;
+                r.fixSummary = ro.has("fixSummary") && !ro.get("fixSummary").isJsonNull() ? ro.get("fixSummary").getAsString() : "";
+                if (ro.has("results")) {
+                    for (JsonElement re : ro.getAsJsonArray("results")) {
+                        JsonObject cro = re.getAsJsonObject();
+                        r.results.add(new CaseResult(
+                                cro.has("id") ? cro.get("id").getAsString() : "",
+                                cro.has("title") ? cro.get("title").getAsString() : "",
+                                cro.has("status") ? cro.get("status").getAsString() : "",
+                                cro.has("evidence") ? cro.get("evidence").getAsString() : "",
+                                cro.has("failReason") ? cro.get("failReason").getAsString() : ""));
+                    }
+                }
+                ps.rounds.add(r);
+            }
+        }
     }
 
     private String toolsToJson(List<ToolStep> tools) {
@@ -426,8 +491,16 @@ public class E2ETaskService {
         return o.toString();
     }
 
-    private TurnResult resultFromJson(String json) {
+    private JsonObject a2aFromJson(String json) {
         if (json == null || json.isBlank()) return null;
+        try {
+            return JsonParser.parseString(json).getAsJsonObject();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private TurnResult resultFromJson(String json) {        if (json == null || json.isBlank()) return null;
         try {
             JsonObject o = JsonParser.parseString(json).getAsJsonObject();
             TurnResult r = new TurnResult();
@@ -651,10 +724,15 @@ public class E2ETaskService {
         public volatile String sharedDir;
         /**
          * 成员间通信方式：
-         * filesystem = 共享文件系统（黑板模式 Blackboard Pattern：同工作目录经 .e2e/<taskId>/ 文件中转，当前实现）
-         * a2a        = Agent2Agent 协议（agent 直连通信，开发中，创建时明确拒绝防止静默降级）
+         * filesystem = 共享文件系统（黑板模式 Blackboard Pattern：同工作目录经 .e2e/&lt;taskId&gt;/ 文件中转）
+         * a2a        = Agent2Agent 协议（移植自 axocoatl：工件作为任务信封载荷在成员间直传，
+         *              经 {@link com.lark.oapi.sample.ws.a2a.A2ATaskDispatcher} 派发，跨目录可用）
          */
         public volatile String commMode = "filesystem";
+        /** 创建者：数字员工 id（null = 管理员用户创建，前端显示 👑 admin） */
+        public volatile Long creatorEmployeeId;
+        /** 创建者姓名快照 */
+        public volatile String creatorEmployeeName = "";
         public volatile boolean busy;
         public volatile boolean cancelled;
         public volatile boolean pipelineStarted;
@@ -662,12 +740,17 @@ public class E2ETaskService {
         /** 应用重启导致的流水线中断（读档时计算；续跑/终局后清除） */
         public volatile boolean interrupted;
         volatile TurnRecord activeTurn;
-        public final PipelineState pipeline = new PipelineState();
+        /** 当前（最新一轮）流水线状态；群聊续派任务时旧轮归档进 runsHistory 并整体换新 */
+        public volatile PipelineState pipeline = new PipelineState();
+        /** 已归档的历史轮次（群聊记录与右侧执行记录都保留，新任务向下递增） */
+        public final List<PipelineState> runsHistory = new CopyOnWriteArrayList<>();
 
         /** 流水线暂停中：某成员在等玩家回答问题（非空=等待中） */
         public volatile PendingQuestion pendingQuestion;
         /** 玩家答案投递口 — postUserMessage(auto) 完成它即恢复流水线 */
         public volatile java.util.concurrent.CompletableFuture<String> answerFuture;
+        /** A2A 任务序号（commMode=a2a 时信封 id = "a2a-<taskId>-<seq>"；内存态，重启后从头计数无碍） */
+        public final java.util.concurrent.atomic.AtomicInteger a2aSeq = new java.util.concurrent.atomic.AtomicInteger();
 
         E2ETask(String id) { this.id = id; }
 
@@ -701,6 +784,12 @@ public class E2ETaskService {
         public volatile String stageDetail = "";
         public volatile int round;
         public volatile String failReason;
+        /** 第几轮任务（同群续派递增；右侧执行记录按轮归档保留） */
+        public volatile int runIndex = 1;
+        /** 本轮任务的需求文本 */
+        public volatile String requirement = "";
+        public volatile long startedAt;
+        public volatile long endedAt;
         public final List<TestCase> cases = new CopyOnWriteArrayList<>();
         public final List<RoundReport> rounds = new CopyOnWriteArrayList<>();
     }
@@ -755,6 +844,12 @@ public class E2ETaskService {
         public volatile String authorName = "";          // 实例名
         public volatile String addressedTo = "";         // user 消息的收件人: auto|programmer|designer|executor
         public volatile Long dbId;                       // e2e_turn 表主键（持久化用）
+        /**
+         * A2A 任务信封（commMode=a2a 时由编排器填充，随轮次落库恢复）：
+         * {taskId, senderRole, senderName, receiverRole, receiverName, status, atMs, durationMs, outputExcerpt, error}
+         * 信封骑在 agent 轮次上——a2a 模式下"一个成员轮次 == 一个 A2A 任务"严格一一对应。
+         */
+        public volatile JsonObject a2a;
         public final StringBuilder thinking = new StringBuilder();
         public final StringBuilder answer = new StringBuilder();
         public final List<ToolStep> tools = new CopyOnWriteArrayList<>();

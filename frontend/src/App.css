@@ -806,3 +806,210 @@ body {
   font-size: 11px; color: #0891b2; line-height: 1.5;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+
+/* ===== E2E A2A 任务信封条 ===== */
+.a2a-strip {
+  display: flex; align-items: center; gap: 7px; flex-wrap: wrap;
+  font-size: 11px; color: var(--text-dim);
+  padding: 4px 9px; margin: 0 0 7px; border-radius: 7px;
+  background: linear-gradient(90deg, rgba(37,99,235,0.07), rgba(139,92,246,0.05));
+  border: 1px dashed rgba(37,99,235,0.35);
+}
+.a2a-strip b { color: #2563eb; font-size: 11px; letter-spacing: 0.3px; }
+.a2a-id {
+  font-size: 10px; padding: 0 5px; border-radius: 5px;
+  background: rgba(0,0,0,0.05); color: var(--text-dim);
+}
+.a2a-route { font-weight: 600; color: var(--text, #111827); }
+.a2a-status {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-weight: 700; font-size: 10.5px; padding: 1px 8px; border-radius: 999px;
+}
+.a2a-dur { font-size: 10.5px; }
+.a2a-err { font-size: 10.5px; color: #dc2626; font-weight: 600; }
+.a2a-details { font-size: 10.5px; }
+.a2a-details summary { cursor: pointer; color: #2563eb; user-select: none; }
+.a2a-excerpt {
+  margin-top: 4px; padding: 6px 8px; border-radius: 6px; max-width: 520px;
+  background: rgba(0,0,0,0.04); white-space: pre-wrap; word-break: break-all;
+  color: var(--text, #111827); line-height: 1.55;
+}
+
+/* ===== 供应商工作台模块 tab（供应商接入 | 数字员工） ===== */
+.module-tabs {
+  display: flex; gap: 8px; margin-bottom: 14px;
+}
+.module-tab {
+  padding: 8px 20px; border-radius: 10px 10px 0 0; font-size: 14px; font-weight: 600;
+  border: 1px solid var(--border, #e5e7eb); border-bottom: none;
+  background: rgba(0,0,0,0.03); color: var(--text-dim); cursor: pointer; user-select: none;
+}
+.module-tab.active {
+  background: var(--card-bg, #fff); color: var(--text, #111827);
+  box-shadow: inset 0 2px 0 #2563eb;
+}
+
+/* ===== 数字员工 ===== */
+.emp-card {
+  border: 1px solid var(--border, #e5e7eb); border-radius: 12px; padding: 14px 16px;
+  background: var(--card-bg, #fff); cursor: pointer; transition: box-shadow 0.15s, transform 0.15s;
+}
+.emp-card:hover { box-shadow: 0 4px 14px rgba(0,0,0,0.08); transform: translateY(-1px); }
+.emp-avatar {
+  width: 44px; height: 44px; border-radius: 12px; font-size: 24px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, rgba(37,99,235,0.12), rgba(139,92,246,0.12));
+}
+.emp-stat {
+  display: inline-flex; align-items: center; gap: 3px; font-size: 11px; font-weight: 700;
+  padding: 1px 8px; border-radius: 999px;
+}
+.emp-station {
+  display: flex; align-items: flex-start; gap: 10px; padding: 9px 12px;
+  border: 1px solid var(--border, #e5e7eb); border-radius: 10px; margin-bottom: 8px;
+  background: rgba(0,0,0,0.015);
+}
+.emp-station.busy { border-color: rgba(37,99,235,0.4); background: rgba(37,99,235,0.04); }
+.progress-box {
+  flex: 1; min-width: 0; font-size: 12px; line-height: 1.6;
+}
+.progress-tools {
+  display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px;
+}
+.progress-tail {
+  margin-top: 5px; padding: 5px 8px; border-radius: 6px; font-size: 11px;
+  background: rgba(0,0,0,0.04); color: var(--text-dim);
+  max-height: 52px; overflow: hidden; white-space: pre-wrap; word-break: break-all;
+}
+.demand-row {
+  border: 1px solid var(--border, #e5e7eb); border-radius: 9px; margin-bottom: 6px;
+  background: var(--card-bg, #fff); overflow: hidden;
+}
+.demand-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  font-size: 12.5px; cursor: pointer; user-select: none;
+}
+.demand-head:hover { background: rgba(0,0,0,0.025); }
+.demand-body {
+  padding: 10px 14px; border-top: 1px dashed var(--border, #e5e7eb);
+  font-size: 12.5px; line-height: 1.7;
+}
+.demand-status {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 10.5px; font-weight: 700; padding: 1px 8px; border-radius: 999px; white-space: nowrap;
+}
+.emoji-pick {
+  display: flex; gap: 6px; flex-wrap: wrap;
+}
+.emoji-opt {
+  width: 34px; height: 34px; font-size: 19px; border-radius: 9px; cursor: pointer;
+  border: 1.5px solid var(--border, #e5e7eb); background: var(--card-bg, #fff);
+  display: flex; align-items: center; justify-content: center;
+}
+.emoji-opt.active { border-color: #2563eb; background: rgba(37,99,235,0.08); }
+
+/* ===== 数字员工主动上报：红点角标 + 聊天框 ===== */
+.nav-icon { position: relative; }
+
+/* ===== 实例页紧凑卡片 ===== */
+.inst-card {
+  transition: box-shadow 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+}
+.inst-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.10);
+  border-color: var(--accent, #2563eb);
+}
+.inst-rows { margin-top: 7px; display: flex; flex-direction: column; gap: 3px; }
+.inst-row { display: flex; gap: 6px; font-size: 11px; line-height: 1.5; min-width: 0; }
+.inst-k {
+  color: var(--text-dim); flex-shrink: 0; width: 66px;
+  font-family: var(--font-mono); overflow: hidden; white-space: nowrap;
+}
+.inst-v {
+  font-family: var(--font-mono); min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.inst-detail {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  max-width: 100%;
+}
+.nav-badge {
+  position: absolute; top: -5px; right: -9px;
+  min-width: 16px; height: 16px; padding: 0 4px; box-sizing: border-box;
+  border-radius: 999px; background: #f5222d; color: #fff;
+  font-size: 10px; font-weight: 700; line-height: 16px; text-align: center;
+  box-shadow: 0 0 0 1.5px var(--card-bg, #fff);
+  animation: badge-pop 0.25s ease;
+}
+@keyframes badge-pop { from { transform: scale(0.4); } to { transform: scale(1); } }
+.unread-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-width: 17px; height: 17px; padding: 0 5px;
+  border-radius: 999px; background: #f5222d; color: #fff;
+  font-size: 10.5px; font-weight: 700; flex-shrink: 0;
+  animation: status-glow 2s ease-in-out infinite;
+}
+.emp-msgs {
+  max-height: 320px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 8px;
+  padding-right: 4px;
+}
+.emp-msg { display: flex; gap: 8px; align-items: flex-start; }
+.emp-msg-avatar {
+  width: 30px; height: 30px; border-radius: 9px; flex-shrink: 0; font-size: 16px;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, rgba(37,99,235,0.12), rgba(139,92,246,0.12));
+}
+.emp-msg-bubble {
+  flex: 1; min-width: 0; padding: 7px 11px; border-radius: 9px;
+  border: 1px solid var(--border, #e5e7eb); border-left: 3px solid #6b7280;
+  background: var(--card-bg, #fff); font-size: 12.5px;
+}
+.emp-msg.unread .emp-msg-bubble { background: rgba(245,34,45,0.04); }
+.emp-msg-head {
+  display: flex; align-items: center; gap: 8px; font-size: 11px;
+  color: var(--text-dim); margin-bottom: 3px;
+}
+.emp-msg-content { white-space: pre-wrap; word-break: break-word; line-height: 1.65; }
+
+/* 老板消息气泡（右侧蓝底）+ 聊天输入栏 */
+.emp-msg.boss { flex-direction: row-reverse; }
+.emp-msg-bubble.boss-bubble { background: #2563eb; color: #fff; border: none; border-radius: 9px; }
+.emp-msg-bubble.boss-bubble .emp-msg-head { color: rgba(255,255,255,0.75); }
+.emp-msg-bubble.boss-bubble .emp-msg-content { color: #fff; }
+.emp-chat-input {
+  margin-top: 10px; padding-top: 10px;
+  border-top: 1px dashed var(--border, #e5e7eb);
+}
+.reply-chip {
+  display: inline-flex; align-items: center;
+  font-size: 11px; color: #2563eb; background: rgba(37,99,235,0.08);
+  border-radius: 999px; padding: 2px 10px; margin-bottom: 6px;
+}
+.emp-row-label {
+  font-size: 10.5px; color: var(--text-dim); font-weight: 700;
+  flex-shrink: 0; width: 30px;
+}
+
+/* E2E 同群续派：历史轮次归档块 + 用户气泡上的员工身份 */
+.run-block {
+  border: 1px solid var(--border, #e5e7eb); border-radius: 9px;
+  margin-bottom: 8px; background: rgba(0,0,0,0.015); overflow: hidden;
+}
+.run-block-head {
+  display: flex; align-items: center; gap: 6px; padding: 7px 10px;
+  font-size: 12px; cursor: pointer; user-select: none;
+}
+.run-block-head:hover { background: rgba(0,0,0,0.03); }
+.run-req {
+  color: var(--text-dim); font-size: 11px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 110px;
+}
+.run-block-body { padding: 8px 10px; border-top: 1px dashed var(--border, #e5e7eb); }
+.run-current-head {
+  font-size: 12px; font-weight: 700; color: #2563eb;
+  margin: 10px 0 6px; padding-top: 8px;
+  border-top: 1px dashed var(--border, #e5e7eb);
+}
+.user-sender { font-size: 10.5px; opacity: 0.85; margin-bottom: 2px; }

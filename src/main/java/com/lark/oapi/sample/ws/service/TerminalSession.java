@@ -49,6 +49,7 @@ public class TerminalSession {
     private final String sessionKey;   // 会话标识（用于日志）
     private final String workingDir;
     private final String model;
+    private final int sandboxLevel;    // 沙箱档位（SandboxPolicy.LEVEL_*），进程启动旗标的一部分
 
     private volatile Process process;
     private volatile BufferedWriter writer;
@@ -78,10 +79,18 @@ public class TerminalSession {
     });
 
     public TerminalSession(String sessionKey, String workingDir, String model) {
+        this(sessionKey, workingDir, model, SandboxPolicy.LEVEL_FULL);
+    }
+
+    /** @param sandboxLevel 沙箱档位（SandboxPolicy.LEVEL_*）——决定 start() 拼哪些权限旗标 */
+    public TerminalSession(String sessionKey, String workingDir, String model, int sandboxLevel) {
         this.sessionKey = sessionKey;
         this.workingDir = workingDir != null ? workingDir : "";
         this.model = model != null ? model : "";
+        this.sandboxLevel = sandboxLevel;
     }
+
+    public int getSandboxLevel() { return sandboxLevel; }
 
     // ===== 生命周期 =====
 
@@ -102,6 +111,12 @@ public class TerminalSession {
             }
         }
         pb.redirectErrorStream(false);
+
+        // 严格沙箱档（--restricted）会忽略 user/project/local settings 文件（防供应链提权），
+        // 网关凭证（ANTHROPIC_AUTH_TOKEN/BASE_URL 等，通常配在 ~/.claude/settings.json 的 env 块）
+        // 会随之丢失 → CLI 报 "Invalid API key · Please run /login"。
+        // 进程环境变量不受 restricted 影响：这里把 settings 的 env 块显式注入子进程环境兜底（所有档位统一注入）。
+        injectClaudeEnv(pb);
 
         try {
             process = pb.start();
@@ -324,6 +339,37 @@ public class TerminalSession {
 
     // ===== 内部：构建启动命令 =====
 
+    /**
+     * 把 ~/.claude/settings.json 的 env 块注入 CLI 子进程环境。
+     * <p>
+     * 背景：--restricted（严格沙箱档）忽略 settings 文件，而本网关的认证恰好配置在
+     * settings 的 env 块里（ANTHROPIC_AUTH_TOKEN/ANTHROPIC_BASE_URL/...），不注入则严格档必然认证失败。
+     * 规则：已存在的进程环境变量优先（putIfAbsent 不覆盖 OS 级配置）；文件缺失/解析失败静默跳过；
+     * 只记数量不打值（凭证不落日志）。
+     */
+    private static void injectClaudeEnv(ProcessBuilder pb) {
+        try {
+            java.nio.file.Path settings = java.nio.file.Path.of(
+                    System.getProperty("user.home"), ".claude", "settings.json");
+            if (!java.nio.file.Files.exists(settings)) return;
+            String json = java.nio.file.Files.readString(settings, java.nio.charset.StandardCharsets.UTF_8);
+            com.google.gson.JsonObject root = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
+            if (!root.has("env") || !root.get("env").isJsonObject()) return;
+            int n = 0;
+            for (var e : root.getAsJsonObject("env").entrySet()) {
+                if (e.getValue().isJsonPrimitive()
+                        && pb.environment().putIfAbsent(e.getKey(), e.getValue().getAsString()) == null) {
+                    n++;
+                }
+            }
+            if (n > 0) {
+                log.info("[Terminal] 已注入 settings.json env 块 {} 个环境变量到 CLI 进程（值不落日志）", n);
+            }
+        } catch (Exception ex) {
+            log.warn("[Terminal] settings.json env 注入失败（CLI 将按自身认证逻辑运行）: {}", ex.getMessage());
+        }
+    }
+
     private List<String> buildCommand() {
         List<String> cmd = new ArrayList<>();
         String os = System.getProperty("os.name", "").toLowerCase();
@@ -344,10 +390,10 @@ public class TerminalSession {
         cmd.add("--output-format"); cmd.add("stream-json");
         cmd.add("--include-partial-messages");   // ★ token 级增量流（text_delta / thinking_delta）
         cmd.add("--verbose");
-        // bypassPermissions：无头(-p)模式下没有交互界面，acceptEdits 只放行文件编辑，
-        // Bash 命令（git/curl 等）仍会弹审批 → 无人可批 → 被拦截。
-        // 本机个人工作台场景直接放行全部工具（安全边界=本机+飞书白名单，见安全立项）。
-        cmd.add("--permission-mode"); cmd.add("bypassPermissions");
+        // 权限旗标按沙箱档位拼装（L1 策略沙箱，旗标组合经真实 CLI 实测验证）：
+        // 0=全权限 bypassPermissions（现状默认）；1=宽松（白名单+自动拒绝）；2=严格（--restricted 结构圈禁）。
+        // 详见 SandboxPolicy 与 docs/沙箱方案与威胁模型.md。
+        SandboxPolicy.appendFlags(cmd, sandboxLevel);
         if (!model.isBlank()) {
             cmd.add("--model");
             cmd.add(model);

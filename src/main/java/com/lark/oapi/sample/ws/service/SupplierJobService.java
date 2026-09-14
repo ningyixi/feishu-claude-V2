@@ -169,6 +169,9 @@ public class SupplierJobService {
         job.setSkillsJson(draft.getSkillsJson() != null ? draft.getSkillsJson() : "[]");
         job.setInstanceId(draft.getInstanceId());
         job.setStatus("ACTIVE");
+        // 创建者标签（数字员工或 admin）——由控制器校验权限后填入 draft
+        job.setCreatedByEmployeeId(draft.getCreatedByEmployeeId());
+        job.setCreatedByEmployeeName(draft.getCreatedByEmployeeName());
         jobRepo.save(job);
 
         // 模板节点 → 存档节点快照

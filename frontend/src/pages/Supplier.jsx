@@ -94,6 +94,7 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                 <span style={{ fontSize: 15, fontWeight: 700, flex: 1 }}>{done ? '🏆' : '🎮'} {j.name}</span>
                 <span className="hook-badge">{j.mode === 'API' ? 'API 供应商' : 'CM 供应商'}</span>
+                <CreatorBadge id={j.createdByEmployeeId} name={j.createdByEmployeeName} dim />
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 8, lineHeight: 1.9 }}>
                 <div>供应商: {j.supplierName || '—'}{j.supplierCode ? ` (ID: ${j.supplierCode})` : ''}</div>
@@ -114,6 +115,7 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
 // ===== 新建工作（选模式 → 填"角色卡"） =====
 
 function CreateJob({ onBack, onCreated, showToast }) {
+  const occupied = useOccupied()
   const [step, setStep] = useState(1)
   const [mode, setMode] = useState('API')
   const [templates, setTemplates] = useState([])
@@ -245,9 +247,16 @@ function CreateJob({ onBack, onCreated, showToast }) {
               <select className="form-input" value={form.instanceId}
                 onChange={e => setForm(f => ({ ...f, instanceId: e.target.value }))}>
                 <option value="">（稍后绑定）</option>
-                {instances.filter(i => i.enabled).map(i => (
-                  <option key={i.id} value={i.id}>{i.name || `#${i.id}`}{i.claudeModel ? ` (${i.claudeModel})` : ''}</option>
-                ))}
+                {instances.filter(i => i.enabled).map(i => {
+                  const occ = occupied[String(i.id)]
+                  return (
+                    <option key={i.id} value={i.id} disabled={!!occ}>
+                      {occ
+                        ? `🔒 ${i.name || `#${i.id}`}（已被员工 ${occ.label} 独占绑定）`
+                        : `${i.name || `#${i.id}`}${i.claudeModel ? ` (${i.claudeModel})` : ''}`}
+                    </option>
+                  )
+                })}
               </select>
             </div>
             <div className="form-group">
@@ -282,6 +291,7 @@ function safeParseNodes(json) {
 // ===== 游戏视图 =====
 
 function GameView({ jobId, onBack, showToast }) {
+  const occupied = useOccupied()
   const [job, setJob] = useState(null)
   const [selected, setSelected] = useState(null)     // nodeId
   const [instances, setInstances] = useState([])
@@ -352,6 +362,7 @@ function GameView({ jobId, onBack, showToast }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <button className="btn" style={{ fontSize: 12, padding: '4px 12px' }} onClick={onBack}>← 工作台</button>
           <span style={{ fontSize: 16, fontWeight: 700 }}>{job.status === 'COMPLETED' ? '🏆' : '🎮'} {job.name}</span>
+          {job.createdByEmployeeId && <CreatorBadge id={job.createdByEmployeeId} name={job.createdByEmployeeName} />}
           <span className="hook-badge">{job.mode === 'API' ? 'API 供应商' : 'CM 供应商'}</span>
           {job.status === 'COMPLETED' && <span className="hook-badge" style={{ background: 'rgba(22,163,74,.1)', color: '#16a34a', borderColor: 'rgba(22,163,74,.3)' }}>已通关 🎉</span>}
           <div style={{ flex: 1 }} />
@@ -362,7 +373,21 @@ function GameView({ jobId, onBack, showToast }) {
             <select className="form-input" style={{ width: 170, padding: '4px 8px', fontSize: 12 }}
               value={job.instanceId || ''} onChange={e => switchInstance(e.target.value)}>
               <option value="">（未绑定）</option>
-              {instances.filter(i => i.enabled).map(i => <option key={i.id} value={i.id}>{i.name || `#${i.id}`}</option>)}
+              {instances.filter(i => i.enabled).map(i => {
+                const occ = occupied[String(i.id)]
+                const isCurrent = String(job.instanceId || '') === String(i.id)
+                const byEmp = job.createdByEmployeeId != null
+                // 员工创建的工作只能用该员工绑定的实例；admin 的不能用被员工独占的实例
+                const allowed = byEmp ? !!(occ && occ.empId === job.createdByEmployeeId) : !occ
+                const forbidden = !allowed && !isCurrent
+                return (
+                  <option key={i.id} value={i.id} disabled={forbidden}>
+                    {forbidden
+                      ? `🔒 ${i.name || `#${i.id}`}${byEmp ? '（非该员工绑定实例）' : `（已被员工 ${occ.label} 独占绑定）`}`
+                      : (i.name || `#${i.id}`)}
+                  </option>
+                )
+              })}
             </select>
           </label>
         </div>
@@ -672,3 +697,28 @@ function WorkflowEditor({ onBack, showToast }) {
     </div>
   )
 }
+
+// ===== 共享小工具（供应商模块使用；数字员工已拆分为独立页面 pages/Employees.jsx） =====
+
+/** 创建者标签：数字员工（👔 名字）或管理员（👑 admin） */
+function CreatorBadge({ id, name, dim = false }) {
+  return id
+    ? <span className={'hook-badge' + (dim ? ' dim' : '')} title={`由数字员工「${name || id}」创建`}>👔 {name || `员工#${id}`}</span>
+    : <span className="hook-badge dim" title="由管理员在面板创建">👑 admin</span>
+}
+
+/** 实例独占绑定映射：String(instId) → {empId, label}（被数字员工绑定的实例不可再分配给他人） */
+function useOccupied() {
+  const [occupied, setOccupied] = useState({})
+  useEffect(() => {
+    fetch('/api/employees').then(r => r.json()).then(emps => {
+      const map = {}
+      ;(emps || []).forEach(emp => (emp.instances || []).forEach(i => {
+        map[String(i.id)] = { empId: emp.id, label: `${emp.emoji || '👔'} ${emp.name}` }
+      }))
+      setOccupied(map)
+    }).catch(() => {})
+  }, [])
+  return occupied
+}
+

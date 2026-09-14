@@ -4,6 +4,8 @@ import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
+import com.lark.oapi.sample.ws.a2a.A2AProtocol;
+import com.lark.oapi.sample.ws.a2a.A2ATaskDispatcher;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -28,8 +30,13 @@ import java.util.regex.Pattern;
  * 每个成员的发言都是其<b>飞书同款常驻会话</b>上的一轮（ClaudeCodeService 终端池复用），
  * 上下文天然延续，且群聊发言经 BrowserTurnListener 实时广播到浏览器。
  * <p>
- * 同目录模式（sharedDir 非空）：大内容走 {@code <sharedDir>/.e2e/<taskId>/} 文件交换，
- * 群聊只留精简摘要；跨目录模式：关键内容全文进群聊消息（互相看不到对方文件）。
+ * 通信方式（commMode）决定工件交接通道：
+ * <ul>
+ *   <li>filesystem 同目录（sharedDir 非空）：大内容走 {@code <sharedDir>/.e2e/<taskId>/} 文件交换，群聊只留精简摘要</li>
+ *   <li>filesystem 跨目录：关键内容全文进群聊消息（互相看不到对方文件）</li>
+ *   <li>a2a（移植自 axocoatl）：成员轮次包成 A2A 任务信封经 {@link A2ATaskDispatcher} 派发，
+ *       发言全文即任务载荷直接传给下游成员，跨目录天然可用；信封状态流转广播到群聊并随轮次落库</li>
+ * </ul>
  */
 @Service
 public class E2EOrchestrator {
@@ -40,23 +47,82 @@ public class E2EOrchestrator {
     private final E2ETaskService taskService;
     private final ClaudeCodeService claudeCodeService;
     private final FeishuBotService feishuBotService;
+    private final A2ATaskDispatcher a2aDispatcher;
+    private final EmployeeService employeeService;
 
     public E2EOrchestrator(E2ETaskService taskService,
                            ClaudeCodeService claudeCodeService,
-                           FeishuBotService feishuBotService) {
+                           FeishuBotService feishuBotService,
+                           A2ATaskDispatcher a2aDispatcher,
+                           EmployeeService employeeService) {
         this.taskService = taskService;
         this.claudeCodeService = claudeCodeService;
         this.feishuBotService = feishuBotService;
+        this.a2aDispatcher = a2aDispatcher;
+        this.employeeService = employeeService;
     }
 
     // ===== 入口 =====
 
-    /** 启动流水线（幂等：只启动一次） */
+    /** 启动流水线（幂等：只启动一次；首轮任务在此登记轮次元信息） */
     public void start(E2ETaskService.E2ETask task) {
         if (task.pipelineStarted) return;
         task.pipelineStarted = true;
+        E2ETaskService.PipelineState ps = task.pipeline;
+        if (ps.runIndex < 1) ps.runIndex = 1;
+        if (ps.requirement == null || ps.requirement.isBlank()) ps.requirement = task.requirement;
+        if (ps.startedAt == 0) ps.startedAt = System.currentTimeMillis();
         taskService.persistTask(task);
         Thread.ofVirtual().name("e2e-orch-" + task.id).start(() -> runPipeline(task, false));
+    }
+
+    /**
+     * 同一群聊续派下一个任务：当前轮归档进 runsHistory（群聊记录与右侧执行记录全部保留、向下递增），
+     * 换全新 PipelineState 并立即开跑。"开始/start"等简短启动语 = 按上一轮需求原样重跑。
+     */
+    public void startNewRun(E2ETaskService.E2ETask task, String text) {
+        if (task.busy) {
+            taskService.postSystem(task, "ℹ️ 上一轮还在收尾，请稍候再发。");
+            return;
+        }
+        E2ETaskService.PipelineState old = task.pipeline;
+        String t = text != null ? text.trim() : "";
+        boolean plainStart = t.equals("开始") || t.equalsIgnoreCase("start") || t.length() <= 6;
+        String newReq = plainStart && old.requirement != null && !old.requirement.isBlank()
+                ? old.requirement : t;
+
+        // 归档旧轮
+        if (old.endedAt == 0) old.endedAt = System.currentTimeMillis();
+        task.runsHistory.add(old);
+
+        // 开新轮
+        E2ETaskService.PipelineState fresh = new E2ETaskService.PipelineState();
+        fresh.runIndex = old.runIndex + 1;
+        fresh.requirement = newReq;
+        fresh.startedAt = System.currentTimeMillis();
+        task.pipeline = fresh;
+        task.requirement = newReq;            // tab/列表展示最新任务
+        task.pipelineDone = false;
+        task.cancelled = false;
+        task.interrupted = false;
+        taskService.persistTask(task);
+        broadcastPipelineReset(task);
+        taskService.postSystem(task, String.format(
+                "🔁 第 %d 轮任务开始 | 需求「%s」 | 成员: %s | 自动修复: %s（最多%d轮）｜历史记录已保留，执行记录在右侧向下递增",
+                fresh.runIndex, E2ETaskService.truncate(newReq, 60), memberRoster(task),
+                task.autoFix ? "开" : "关", task.maxRounds));
+        log.info("[E2E] 同群续派第 {} 轮任务: task={}, 需求「{}」", fresh.runIndex, task.id, E2ETaskService.truncate(newReq, 40));
+        Thread.ofVirtual().name("e2e-orch-" + task.id + "-r" + fresh.runIndex).start(() -> runPipeline(task, false));
+    }
+
+    /** 续派新轮：把完整流水线结构（含 history）推给前端整体替换 */
+    private void broadcastPipelineReset(E2ETaskService.E2ETask task) {
+        JsonObject e = new JsonObject();
+        e.addProperty("type", "pipeline_reset");
+        e.add("pipeline", com.lark.oapi.sample.ws.config.E2EWebSocketHandler.pipelineJsonOf(task));
+        e.addProperty("pipelineDone", task.pipelineDone);
+        e.addProperty("interrupted", task.interrupted);
+        taskService.broadcast(task.id, e);
     }
 
     /** 断点续跑（应用重启打断后由前端"继续执行"按钮触发）：有用例则跳过汇报/设计直接进执行阶段 */
@@ -70,10 +136,15 @@ public class E2EOrchestrator {
 
     /**
      * 用户在群里发言。
-     * @param to "auto"（驱动流水线/回答提问）或角色 programmer/designer/executor（直接单聊该成员）
+     * @param to "auto"（驱动流水线/回答提问/完结后续派新任务）或角色 programmer/designer/executor（直接单聊该成员）
      */
     public void postUserMessage(E2ETaskService.E2ETask task, String text, String to) {
-        E2ETaskService.TurnRecord rec = taskService.beginTurn(task, text, "user", "user", "用户");
+        postUserMessage(task, text, to, "用户");
+    }
+
+    /** @param authorName 发言者显示名："用户"（面板/管理员）或 👔 数字员工身份（API 带 creatorEmployeeId 发言） */
+    public void postUserMessage(E2ETaskService.E2ETask task, String text, String to, String authorName) {
+        E2ETaskService.TurnRecord rec = taskService.beginTurn(task, text, "user", "user", authorName);
         rec.addressedTo = (to == null || to.isBlank()) ? "auto" : to;
         taskService.persistTurn(task, rec);   // 回填收件人
         JsonObject e = new JsonObject();
@@ -81,6 +152,7 @@ public class E2EOrchestrator {
         e.addProperty("turnIndex", task.transcript.indexOf(rec));
         e.addProperty("text", text);
         e.addProperty("to", rec.addressedTo);
+        e.addProperty("authorName", authorName != null ? authorName : "用户");
         taskService.broadcast(task.id, e);
 
         if (to == null || to.isBlank() || "auto".equals(to)) {
@@ -103,7 +175,8 @@ public class E2EOrchestrator {
             } else if (!task.pipelineDone) {
                 taskService.postSystem(task, "ℹ️ 流水线执行中。要给某个成员单独发消息，请用 @程序员 / @测试设计师 / @执行者。");
             } else {
-                taskService.postSystem(task, "ℹ️ 本次任务已结束。可以 @成员 继续单聊追问，或新建任务。");
+                // 已完结 → 本条就是下一个任务：同群续派新一轮编排（群聊记录与右侧执行记录全部保留、递增）
+                startNewRun(task, text);
             }
             return;
         }
@@ -130,14 +203,16 @@ public class E2EOrchestrator {
             E2ETaskService.Member designer = task.memberByRole("designer");
             E2ETaskService.Member executor = task.memberByRole("executor");
 
-            if (!resume) {
+            if (!resume && ps.runIndex <= 1) {
+                // 首轮开场横幅（续派轮的 🔁 横幅由 startNewRun 发，避免双横幅）
                 taskService.postSystem(task, String.format(
                         "🎬 任务开始 | 需求「%s」 | 成员: %s | 模式: %s | 自动修复: %s（最多%d轮）",
                         E2ETaskService.truncate(task.requirement, 60),
                         memberRoster(task),
-                        task.sharedDir != null ? "共享目录（文件中转，群聊精简）" : "跨目录（群聊全文传递）",
+                        isA2A(task) ? "🔗 A2A 协议（任务信封传递工件，跨目录可用）"
+                                : task.sharedDir != null ? "共享目录（文件中转，群聊精简）" : "跨目录（群聊全文传递）",
                         task.autoFix ? "开" : "关", task.maxRounds));
-            } else {
+            } else if (resume) {
                 taskService.postSystem(task, "▶ 应用重启后读档续跑（历史对话与用例已恢复）");
             }
 
@@ -229,16 +304,91 @@ public class E2EOrchestrator {
         }
     }
 
-    /** 成员单轮发言：复用它自己的飞书常驻会话（终端池），发言流入群聊 */
+    /** 成员单轮发言：复用它自己的飞书常驻会话（终端池），发言流入群聊；a2a 模式包任务信封 */
     public String runMemberTurn(E2ETaskService.E2ETask task, E2ETaskService.Member m, String prompt, String displayText) {
         E2ETaskService.TurnRecord rec = taskService.beginTurn(task, displayText, "agent", m.role, m.name);
         BrowserTurnListener listener = new BrowserTurnListener(taskService, task, rec, m.role);
         try {
+            if (isA2A(task)) {
+                return runA2ATurn(task, m, prompt, rec, listener);
+            }
             String reply = claudeCodeService.chat(m.instanceId, "e2e-" + task.id, prompt, null, m.workingDir, m.model, listener);
             return reply != null ? reply : "";
         } finally {
             taskService.endTurn(task);
         }
+    }
+
+    /**
+     * a2a 模式的成员轮次 — 同一个 chat 调用包上 A2A 任务信封（dispatcher 是终端 Claude 的 wrapper）：
+     * 信封状态 Pending→Running→终态 全程回调更新 rec.a2a、落库并广播群聊 a2a_task 事件；
+     * 成员发言照常经 BrowserTurnListener 流进群聊气泡。
+     * <p>
+     * 一次"提问-回答"= 两个 A2A 任务（原始 + 玩家回答续跑腿），信封耗时不含玩家思考时间——
+     * ask 等待发生在两次 runMemberTurn 之间，语义诚实。
+     */
+    private String runA2ATurn(E2ETaskService.E2ETask task, E2ETaskService.Member m, String prompt,
+                              E2ETaskService.TurnRecord rec, BrowserTurnListener listener) {
+        String a2aId = "a2a-" + task.id + "-" + task.a2aSeq.incrementAndGet();
+        A2AProtocol.A2ATask a2aTask = A2AProtocol.textTask(a2aId, "orchestrator", String.valueOf(m.instanceId),
+                prompt, "e2e-" + task.id, m.workingDir, m.model);
+        rec.a2a = envelopeJson(a2aId, m, "Pending", null, null, null);
+        broadcastA2A(task, rec);
+        A2AProtocol.A2ATaskResult result = a2aDispatcher.dispatch(a2aTask, listener, ev -> {
+            synchronized (rec) {   // rec.a2a 会被 WS 快照线程并发 deepCopy，变更需同步
+                JsonObject env = rec.a2a;
+                if (env == null) return;
+                env.addProperty("status", ev.status.wire());
+                env.addProperty("atMs", ev.atMs);
+                if (ev.durationMs != null) env.addProperty("durationMs", ev.durationMs);
+                if (ev.outputExcerpt != null) env.addProperty("outputExcerpt", ev.outputExcerpt);
+                if (ev.error != null) env.addProperty("error", ev.error);
+            }
+            taskService.persistTurn(task, rec);
+            broadcastA2A(task, rec);
+        });
+        if (result.status == A2AProtocol.TaskStatus.COMPLETED
+                && result.output != null && result.output.has("content")) {
+            return result.output.get("content").getAsString();
+        }
+        // Failed：群聊气泡里已有成员发言/错误展示；返回值走既有容错路径（解析不出 JSON → 重试/终止）
+        return result.error != null ? "❌ A2A 任务失败: " + result.error : "";
+    }
+
+    private JsonObject envelopeJson(String taskId, E2ETaskService.Member m, String status,
+                                    Long durationMs, String outputExcerpt, String error) {
+        JsonObject o = new JsonObject();
+        o.addProperty("taskId", taskId);
+        o.addProperty("senderRole", "orchestrator");
+        o.addProperty("senderName", "编排器");
+        o.addProperty("receiverRole", m.role);
+        o.addProperty("receiverName", m.name);
+        o.addProperty("status", status);
+        o.addProperty("atMs", System.currentTimeMillis());
+        if (durationMs != null) o.addProperty("durationMs", durationMs);
+        if (outputExcerpt != null) o.addProperty("outputExcerpt", outputExcerpt);
+        if (error != null) o.addProperty("error", error);
+        return o;
+    }
+
+    private void broadcastA2A(E2ETaskService.E2ETask task, E2ETaskService.TurnRecord rec) {
+        JsonObject e = new JsonObject();
+        e.addProperty("type", "a2a_task");
+        e.addProperty("turnIndex", task.transcript.indexOf(rec));
+        synchronized (rec) {
+            if (rec.a2a != null) e.add("a2a", rec.a2a.deepCopy());
+        }
+        taskService.broadcast(task.id, e);
+    }
+
+    /** 是否 A2A 通信模式 */
+    static boolean isA2A(E2ETaskService.E2ETask task) {
+        return "a2a".equalsIgnoreCase(task.commMode);
+    }
+
+    /** 文件黑板交换是否启用：仅 filesystem 模式且全员同目录（a2a 模式工件走任务载荷，不写文件） */
+    private boolean useFiles(E2ETaskService.E2ETask task) {
+        return !isA2A(task) && task.sharedDir != null;
     }
 
     /** 单个阶段内最多允许的提问轮数（防止 ask 死循环） */
@@ -337,7 +487,13 @@ public class E2EOrchestrator {
             + "```ask\n{\"question\":\"要问玩家的问题（一句话，具体）\",\"why\":\"缺了它会影响什么\"}\n```\n"
             + "系统会暂停流水线把问题转给玩家，拿到回答后会让你继续。一次只问最关键的一个问题。";
 
-    private String sharedNote(E2ETaskService.E2ETask task) {
+    /** 通信方式说明（拼进所有成员 prompt）：a2a / filesystem 同目录 / filesystem 跨目录 三分支 */
+    private String commNote(E2ETaskService.E2ETask task) {
+        if (isA2A(task)) {
+            return "成员间通过 A2A 协议（Agent2Agent 任务信封）交换工件：你的发言全文会作为任务结果直接传递给下一个成员，"
+                    + "不依赖共享目录（各成员工作目录可以不同），也无需写交换文件。\n"
+                    + "约定：群聊展示的是精简卡片，但**完整内容必须写在你的发言里**（发言全文即任务载荷）。\n";
+        }
         if (task.sharedDir != null) {
             return "所有成员共享工作目录: " + task.sharedDir + "\n"
                     + "约定：大篇幅内容通过文件交换——任务文件目录为 " + task.exchangeDirName()
@@ -364,33 +520,40 @@ public class E2EOrchestrator {
                 + (designer != null ? "🧪 测试设计师「" + designer.name + "」、" : "")
                 + (executor != null ? "⚙️ 测试执行者「" + executor.name + "」" : "")
                 + "。设计师将独立设计用例，执行者会真实运行它们来验收你的代码。\n"
-                + sharedNote(task)
+                + commNote(task)
                 + "\n请向群里汇报你针对上述需求最近完成的代码改动：\n"
                 + "1. 改动摘要（做了什么、为什么这样做）\n"
                 + "2. 关键文件清单\n"
                 + "3. 如何运行/验证（启动命令、入口、端口等）\n"
-                + (task.sharedDir != null
+                + (useFiles(task)
                     ? "4. 同时把详细改动说明写入 " + task.exchangeDirName() + "/changes.md，供成员直接查阅\n" : "")
-                + "群聊汇报请精炼，500 字以内。如果你没有做过相关改动，如实说明现状即可。"
+                + (isA2A(task)
+                    ? "4. 你的发言全文将作为 A2A 任务结果直接传递给测试设计师——请把详细改动说明完整写进发言（摘要在前、细节在后，不受字数限制）\n" : "")
+                + (isA2A(task) ? "" : "群聊汇报请精炼，500 字以内。")
+                + "如果你没有做过相关改动，如实说明现状即可。"
                 + ASK_CONTRACT;
     }
 
     private String buildDesignerPrompt(E2ETaskService.E2ETask task, String changesSummary) {
         E2ETaskService.Member designer = task.memberByRole("designer");
-        String dir = designer != null ? designer.workingDir : task.members.get(0).workingDir;
+        E2ETaskService.Member programmer = task.memberByRole("programmer");
+        // git 事实取被测代码所在目录（程序员优先）——a2a 跨目录模式下设计师自己的目录可能没有被测代码
+        String dir = programmer != null ? programmer.workingDir
+                : designer != null ? designer.workingDir : task.members.get(0).workingDir;
         return "【E2E 测试群聊 · 用例设计】\n"
                 + "被测需求: " + task.requirement + "\n"
                 + "你是本群的 🧪 测试设计师。**独立性原则**：只根据【需求描述】和下面的【git 变更事实】设计用例，"
                 + "不迎合程序员的实现方式和自述，不给代码放水——你的用例将由执行者真实运行。\n\n"
                 + "== 程序员的群聊汇报（仅供参考，不可尽信） ==\n"
-                + E2ETaskService.truncate(changesSummary, 4000) + "\n\n"
+                + E2ETaskService.truncate(changesSummary, isA2A(task) ? 12000 : 4000) + "\n\n"
                 + "== 被测目录的 git 变更事实 ==\n" + taskService.gitSection(dir) + "\n"
-                + sharedNote(task)
-                + (task.sharedDir != null ? "程序员的详细改动说明在 " + task.exchangeDirName() + "/changes.md（如存在），也可直接查看共享目录代码。\n" : "")
+                + commNote(task)
+                + (useFiles(task) ? "程序员的详细改动说明在 " + task.exchangeDirName() + "/changes.md（如存在），也可直接查看共享目录代码。\n" : "")
                 + "\n设计要求：\n"
                 + "- 用例 3~10 条，必须覆盖：正常路径 ≥1、边界条件 ≥1、异常/错误处理 ≥1\n"
                 + "- steps 必须是可真实执行的操作（命令 / HTTP 请求 / 文件检查 / 服务启动），expected 必须可客观判定\n"
-                + (task.sharedDir != null ? "- 完整用例集写入 " + task.exchangeDirName() + "/testcases.md\n" : "")
+                + (useFiles(task) ? "- 完整用例集写入 " + task.exchangeDirName() + "/testcases.md\n" : "")
+                + (isA2A(task) ? "- 你的发言全文（含 ```json 代码块）将作为 A2A 任务结果直接传给执行者，用例必须完整输出\n" : "")
                 + "- 群聊汇报：用例总数 + 每条一行标题，300 字以内\n"
                 + "- 发言最后必须输出一个 ```json 代码块，格式：\n"
                 + "[{\"id\":\"TC-1\",\"title\":\"...\",\"steps\":\"...\",\"expected\":\"...\",\"priority\":\"high|medium|low\"}]"
@@ -413,10 +576,11 @@ public class E2EOrchestrator {
                 + "无法执行的用例标 blocked 并说明原因。\n"
                 + (retest ? "本轮为复测，只执行上次未通过的用例（程序员已修复）：\n" : "请逐条真实执行以下用例（跑命令/起服务/发请求/查文件）：\n")
                 + arr + "\n"
-                + sharedNote(task)
-                + (task.sharedDir != null ? "完整用例见 " + task.exchangeDirName() + "/testcases.md。\n" : "")
+                + commNote(task)
+                + (useFiles(task) ? "完整用例见 " + task.exchangeDirName() + "/testcases.md。\n" : "")
                 + "\n执行完成后：\n"
-                + (task.sharedDir != null ? "- 完整报告写入 " + task.exchangeDirName() + "/report-r" + round + ".md（每条用例的命令、输出摘录、结论）\n" : "")
+                + (useFiles(task) ? "- 完整报告写入 " + task.exchangeDirName() + "/report-r" + round + ".md（每条用例的命令、输出摘录、结论）\n" : "")
+                + (isA2A(task) ? "- 你的发言全文（含 ```json 判定）将作为 A2A 任务结果直接回传编排器，每条用例的判定与证据必须完整输出\n" : "")
                 + "- 群聊汇报：通过/失败/受阻数量 + 每条失败的原因与关键证据，400 字以内\n"
                 + "- 发言最后必须输出一个 ```json 代码块，格式：\n"
                 + "[{\"id\":\"TC-1\",\"status\":\"pass|fail|blocked\",\"evidence\":\"关键证据（输出摘录/响应码）\",\"failReason\":\"若失败：具体现象与定位线索\"}]"
@@ -435,7 +599,7 @@ public class E2EOrchestrator {
         return "【E2E 测试群聊 · 第 " + round + " 轮问题修复】\n"
                 + "你是本群的 👨‍💻 程序员。执行者对你的「" + E2ETaskService.truncate(task.requirement, 50) + "」实测发现以下问题：\n"
                 + failed + "\n"
-                + (task.sharedDir != null ? "完整报告: " + task.exchangeDirName() + "/report-r" + round + ".md\n" : "")
+                + (useFiles(task) ? "完整报告: " + task.exchangeDirName() + "/report-r" + round + ".md\n" : "")
                 + "请逐一修复，修复后必须自验（运行相关命令/测试确认生效），然后在群里汇报：改了什么、怎么验证的，500 字以内。"
                 + ASK_CONTRACT;
     }
@@ -603,6 +767,7 @@ public class E2EOrchestrator {
         task.interrupted = false;
         E2ETaskService.PipelineState ps = task.pipeline;
         ps.stage = "DONE";
+        ps.endedAt = System.currentTimeMillis();
         long passed = ps.cases.stream().filter(c -> "pass".equals(c.status)).count();
         String summary = String.format("%s 端到端测试%s | 需求「%s」 | 第 %d 轮 | 用例 %d/%d 通过%s",
                 allPass ? "✅" : "⚠️", allPass ? "全部通过" : "结束（仍有未通过项）",
@@ -627,17 +792,35 @@ public class E2EOrchestrator {
                 log.warn("[E2E] 飞书终报推送失败: {}", e.getMessage());
             }
         }
+        notifyCreatorEmployee(task, summary);
     }
 
     private void fail(E2ETaskService.E2ETask task, String reason) {
         task.pipelineDone = true;
         task.interrupted = false;
         task.pipeline.stage = "FAILED";
+        task.pipeline.endedAt = System.currentTimeMillis();
         task.pipeline.failReason = reason;
         task.pipeline.stageDetail = reason;
         taskService.postSystem(task, "❌ 流水线终止：" + reason);
         broadcastStage(task);
         taskService.persistTask(task);
+        notifyCreatorEmployee(task, "❌ E2E 流水线终止（任务 " + task.id + "）：" + reason);
+    }
+
+    /** 数字员工创建的任务 → 终局结果同步走员工通道（聊天框红点 + 飞书推送），与成员实例的飞书终报双通道 */
+    private void notifyCreatorEmployee(E2ETaskService.E2ETask task, String summary) {
+        if (task.creatorEmployeeId == null) return;
+        try {
+            var emp = employeeService.getEmployee(task.creatorEmployeeId);
+            if (emp == null) return;
+            employeeService.postMessage(emp, "E2E",
+                    "🧪 你创建的 E2E 测试任务出结果了（任务 " + task.id + "，第 " + task.pipeline.runIndex + " 轮）：\n"
+                    + summary + "\n\n可到面板查看群聊详情，或在员工聊天框继续对话。",
+                    null, null);
+        } catch (Exception e) {
+            log.warn("[E2E] 创建者员工结果推送失败: {}", e.getMessage());
+        }
     }
 
     // ===== 广播 =====

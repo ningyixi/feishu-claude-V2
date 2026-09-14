@@ -24,6 +24,12 @@ public class ClaudeCodeService {
     /** instanceId → 常驻终端会话 */
     private final Map<Long, TerminalSession> sessions = new ConcurrentHashMap<>();
 
+    private final com.lark.oapi.sample.ws.repository.BotInstanceRepository instanceRepo;
+
+    public ClaudeCodeService(com.lark.oapi.sample.ws.repository.BotInstanceRepository instanceRepo) {
+        this.instanceRepo = instanceRepo;
+    }
+
     /**
      * 与 Claude 对话 — 路由到对应实例的常驻终端。
      * 如果终端不存在则自动创建，如果终端已崩溃则自动重启。
@@ -79,16 +85,22 @@ public class ClaudeCodeService {
      * 如果会话已存在且进程存活且配置未变，直接复用；否则创建新的。
      */
     private TerminalSession getOrCreate(Long instanceId, String workingDir, String model) throws IOException {
+        // 沙箱档位是进程旗标的一部分：从实例配置读取，变更时随 dir/model 一起触发会话重建
+        int sandboxLevel = instanceRepo.findById(instanceId)
+                .map(com.lark.oapi.sample.ws.model.entity.BotInstance::getSandboxLevel)
+                .orElse(SandboxPolicy.LEVEL_FULL);
         TerminalSession session = sessions.get(instanceId);
         if (session != null && session.isAlive()) {
-            // 检测配置是否变更（工作目录或模型）
+            // 检测配置是否变更（工作目录、模型或沙箱档位）
             boolean configChanged = !nullSafeEquals(session.getWorkingDir(), workingDir)
-                    || !nullSafeEquals(session.getModel(), model);
+                    || !nullSafeEquals(session.getModel(), model)
+                    || session.getSandboxLevel() != sandboxLevel;
             if (!configChanged) {
                 return session;
             }
-            log.info("[ClaudeCode] 配置变更，重建终端: instanceId={}, dir: {} -> {}, model: {} -> {}",
-                    instanceId, session.getWorkingDir(), workingDir, session.getModel(), model);
+            log.info("[ClaudeCode] 配置变更，重建终端: instanceId={}, dir: {} -> {}, model: {} -> {}, 沙箱: {} -> {}",
+                    instanceId, session.getWorkingDir(), workingDir, session.getModel(), model,
+                    SandboxPolicy.label(session.getSandboxLevel()), SandboxPolicy.label(sandboxLevel));
             session.destroy();
         }
 
@@ -98,10 +110,10 @@ public class ClaudeCodeService {
         }
 
         String sessionKey = instanceId + ":" + (workingDir != null ? workingDir : "");
-        session = new TerminalSession(sessionKey, workingDir, model);
+        session = new TerminalSession(sessionKey, workingDir, model, sandboxLevel);
         session.start();
         sessions.put(instanceId, session);
-        log.info("[ClaudeCode] 创建新终端: instanceId={}, dir={}", instanceId, workingDir);
+        log.info("[ClaudeCode] 创建新终端: instanceId={}, dir={}, 沙箱={}", instanceId, workingDir, SandboxPolicy.label(sandboxLevel));
         return session;
     }
 

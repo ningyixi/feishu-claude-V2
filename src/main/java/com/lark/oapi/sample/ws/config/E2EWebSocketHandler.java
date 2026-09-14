@@ -144,6 +144,9 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
         t.addProperty("maxRounds", task.maxRounds);
         t.addProperty("sharedDir", task.sharedDir != null ? task.sharedDir : "");
         t.addProperty("commMode", task.commMode != null ? task.commMode : "filesystem");
+        // 创建者标签：数字员工（👔 名字）或管理员（👑 admin）
+        if (task.creatorEmployeeId != null) t.addProperty("creatorEmployeeId", task.creatorEmployeeId);
+        t.addProperty("creatorEmployeeName", task.creatorEmployeeName != null ? task.creatorEmployeeName : "");
         t.addProperty("createdAt", task.createdAt);
         t.addProperty("busy", task.busy);
         // active = 整条流水线进行中（含阶段间隙/成员长执行），黄点闪到 DONE/FAILED 为止
@@ -180,12 +183,32 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
         }
         t.add("members", members);
 
-        E2ETaskService.PipelineState ps = task.pipeline;
+        t.add("pipeline", pipelineJsonOf(task));
+        return t;
+    }
+
+    /**
+     * 流水线 JSON（taskJson 与编排器的 pipeline_reset 广播共用）：
+     * 当前轮全量字段 + history[]（同群续派任务时旧轮归档，右侧执行记录向下递增保留）。
+     */
+    public static JsonObject pipelineJsonOf(E2ETaskService.E2ETask task) {
+        JsonObject p = runJson(task.pipeline);
+        JsonArray history = new JsonArray();
+        for (E2ETaskService.PipelineState h : task.runsHistory) history.add(runJson(h));
+        p.add("history", history);
+        return p;
+    }
+
+    private static JsonObject runJson(E2ETaskService.PipelineState ps) {
         JsonObject p = new JsonObject();
         p.addProperty("stage", ps.stage);
         p.addProperty("stageDetail", ps.stageDetail);
         p.addProperty("round", ps.round);
         p.addProperty("failReason", ps.failReason != null ? ps.failReason : "");
+        p.addProperty("runIndex", ps.runIndex);
+        p.addProperty("requirement", ps.requirement != null ? ps.requirement : "");
+        p.addProperty("startedAt", ps.startedAt);
+        p.addProperty("endedAt", ps.endedAt);
         JsonArray cases = new JsonArray();
         for (E2ETaskService.TestCase c : ps.cases) cases.add(E2EOrchestrator.caseJson(c));
         p.add("cases", cases);
@@ -213,8 +236,7 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
             rounds.add(ro);
         }
         p.add("rounds", rounds);
-        t.add("pipeline", p);
-        return t;
+        return p;
     }
 
     /** 单条群聊记录 → JSON（与实时事件字段对齐，前端共用渲染逻辑） */
@@ -229,6 +251,8 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
         synchronized (rec) {
             t.addProperty("thinking", rec.thinking.toString());
             t.addProperty("answer", rec.answer.toString());
+            // A2A 任务信封（commMode=a2a 的 agent 轮次；快照/读档后原样恢复）
+            if (rec.a2a != null) t.add("a2a", rec.a2a.deepCopy());
         }
         JsonArray tools = new JsonArray();
         for (ToolStep s : rec.tools) {

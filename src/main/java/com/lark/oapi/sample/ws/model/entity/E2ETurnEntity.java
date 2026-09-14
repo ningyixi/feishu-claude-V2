@@ -51,6 +51,11 @@ public class E2ETurnEntity {
     @Column(name = "result_json")
     private String resultJson;
 
+    /** A2A 任务信封 JSON（commMode=a2a 的 agent 轮次；随轮次恢复，见 TurnRecord.a2a） */
+    @Lob
+    @Column(name = "a2a_json")
+    private String a2aJson;
+
     @Column(name = "error_message", length = 1000)
     private String errorMessage;
 
@@ -83,6 +88,8 @@ public class E2ETurnEntity {
     public void setToolsJson(String toolsJson) { this.toolsJson = toolsJson; }
     public String getResultJson() { return resultJson; }
     public void setResultJson(String resultJson) { this.resultJson = resultJson; }
+    public String getA2aJson() { return a2aJson; }
+    public void setA2aJson(String a2aJson) { this.a2aJson = a2aJson; }
     public String getErrorMessage() { return errorMessage; }
     public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
     public boolean isAborted() { return aborted; }

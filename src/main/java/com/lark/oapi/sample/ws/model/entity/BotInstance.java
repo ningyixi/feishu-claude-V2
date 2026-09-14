@@ -34,6 +34,16 @@ public class BotInstance {
 
     private boolean enabled = true;
 
+    /**
+     * 沙箱档位（见 SandboxPolicy）：0=🔓全权限(bypassPermissions,默认) | 1=🛡宽松策略沙箱 | 2=🔒严格策略沙箱。
+     * 实例被数字员工绑定时自动切到 2，解绑自动回 0（仅 0↔2 自动切换，手动设置的 1 不动）。
+     * <p>
+     * 用包装类型：ddl-auto=update 给已有数据的表加列时存量行为 NULL，
+     * 原始 int 会让 Hibernate 装载旧行直接崩（"Can not set int field to null value"）；getter 归一为 0。
+     */
+    @Column(name = "sandbox_level")
+    private Integer sandboxLevel = 0;
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 
@@ -74,6 +84,9 @@ public class BotInstance {
 
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    /** 空值归一：存量行 sandbox_level 为 NULL 时按 0（全权限，与升级前行为一致） */
+    public int getSandboxLevel() { return sandboxLevel != null ? sandboxLevel : 0; }
+    public void setSandboxLevel(int sandboxLevel) { this.sandboxLevel = sandboxLevel; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }

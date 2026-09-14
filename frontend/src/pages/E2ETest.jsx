@@ -141,6 +141,7 @@ export default function E2ETest() {
             addressedTo: t.addressedTo || '', userText: t.userText || '', thinking: t.thinking || '', answer: t.answer || '',
             tools: t.tools || [], result: t.result || null,
             error: t.errorMessage || null, aborted: !!t.aborted,
+            a2a: t.a2a || null,
           }
         })
         setTurns(arr)
@@ -150,7 +151,7 @@ export default function E2ETest() {
       case 'user_message':
         setTurns(prev => {
           const arr = [...prev]
-          arr[e.turnIndex] = { kind: 'user', author: 'user', authorName: '', addressedTo: e.to || 'auto', userText: e.text, thinking: '', answer: '', tools: [], result: null }
+          arr[e.turnIndex] = { kind: 'user', author: 'user', authorName: e.authorName || '用户', addressedTo: e.to || 'auto', userText: e.text, thinking: '', answer: '', tools: [], result: null }
           return arr
         })
         break
@@ -174,13 +175,30 @@ export default function E2ETest() {
         setTaskInfo(prev => prev ? { ...prev, busy: true } : prev)
         setTurns(prev => {
           const arr = [...prev]
+          const prevTurn = arr[e.turnIndex]
           arr[e.turnIndex] = {
+            // 保留先到的 a2a 信封（a2a_task Pending 事件先于 turn_start 到达，整对象替换会冲掉它）
+            ...(prevTurn || {}),
             kind: 'agent', author: e.author || 'user', authorName: e.authorName || '',
             userText: e.userText || '', thinking: '', answer: '', tools: [], result: null,
           }
           return arr
         })
         break
+      case 'a2a_task': {
+        // A2A 任务信封状态流转（Pending→Running→终态）：骑在该成员轮次的气泡上
+        const i = e.turnIndex
+        setTurns(prev => {
+          const arr = [...prev]
+          const base = arr[i] || {
+            kind: 'agent', author: e.a2a?.receiverRole || 'agent', authorName: e.a2a?.receiverName || '',
+            userText: '', thinking: '', answer: '', tools: [], result: null,
+          }
+          arr[i] = { ...base, a2a: e.a2a || null }
+          return arr
+        })
+        break
+      }
       case 'queued':
         showToast('⏳ 该实例正在处理其他消息，本条已排队', 'info')
         break
@@ -239,6 +257,17 @@ export default function E2ETest() {
           return { ...prev, pipeline: { ...prev.pipeline, rounds: rounds.sort((a, b) => a.round - b.round) } }
         })
         break
+      case 'pipeline_reset':
+        // 同群续派新任务：整棵流水线树（含 history 归档）整体替换
+        setTaskInfo(prev => prev ? {
+          ...prev,
+          pipeline: e.pipeline,
+          pipelineDone: !!e.pipelineDone,
+          interrupted: !!e.interrupted,
+          busy: false,
+        } : prev)
+        loadTasks()
+        break
       default: break
     }
   }
@@ -291,10 +320,13 @@ export default function E2ETest() {
               {tasks.map(t => (
                 <span key={t.id} onClick={() => setActiveTaskId(t.id)}
                   className={'task-tab' + (t.id === activeTaskId ? ' active' : '')}
-                  title={`需求: ${t.requirement}\n成员: ${t.members.map(m => m.roleEmoji + m.name).join(' / ')}\n${t.sharedDir ? '共享目录: ' + t.sharedDir : '成员目录不同（群聊全文模式）'}`}>
+                  title={`需求: ${t.requirement}\n成员: ${t.members.map(m => m.roleEmoji + m.name).join(' / ')}\n${t.commMode === 'a2a' ? '🔗 A2A 任务信封（跨目录可用）' : t.sharedDir ? '共享目录: ' + t.sharedDir : '成员目录不同（群聊全文模式）'}\n创建者: ${t.creatorEmployeeId ? '👔 数字员工「' + (t.creatorEmployeeName || t.creatorEmployeeId) + '」' : '👑 admin'}`}>
                   {t.pendingQuestion
                     ? <span title="流水线暂停，等你回答提问">⏸</span>
                     : (t.busy || t.active) && <span className="task-dot" />}
+                  {t.creatorEmployeeId
+                    ? <span title={`由数字员工「${t.creatorEmployeeName || t.creatorEmployeeId}」创建`}>👔</span>
+                    : <span title="由管理员创建">👑</span>}
                   {t.members.map(m => m.roleEmoji).join('')} {truncate(t.requirement, 14)}
                   {t.pipeline?.stage === 'DONE' && <span style={{ color: '#16a34a' }}>✓</span>}
                   {t.pipeline?.stage === 'FAILED' && <span style={{ color: '#dc2626' }}>✗</span>}
@@ -317,10 +349,17 @@ export default function E2ETest() {
             {taskInfo ? (
               <>
                 <span>💬 <code>{taskInfo.id}</code></span>
+                {taskInfo.creatorEmployeeId
+                  ? <span className="hook-badge" title="由数字员工创建">👔 {taskInfo.creatorEmployeeName || `员工#${taskInfo.creatorEmployeeId}`}</span>
+                  : <span className="hook-badge dim" title="由管理员创建">👑 admin</span>}
                 <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
                   {taskInfo.members.map(m => `${m.roleEmoji}${m.name}`).join(' · ')}
-                  {taskInfo.sharedDir ? ' · 📁 同目录文件中转' : ' · 📨 群聊全文传递'}
+                  {taskInfo.commMode === 'a2a' ? ' · 🔗 A2A 任务信封'
+                    : taskInfo.sharedDir ? ' · 📁 同目录文件中转' : ' · 📨 群聊全文传递'}
                 </span>
+                {(taskInfo.pipeline?.runIndex || 1) > 1 && (
+                  <span style={{ color: '#2563eb', fontSize: 12, fontWeight: 700 }} title="同群续派的第 N 轮任务">🔁 第 {taskInfo.pipeline.runIndex} 轮</span>
+                )}
                 {(taskInfo.busy || (taskInfo.pipelineStarted && !taskInfo.pipelineDone)) && <span className="spinner" title="流水线执行中" />}
                 <span className={'conn-badge ' + (connected ? 'on' : 'off')}>{connected ? '● 已连接' : '○ 未连接'}</span>
               </>
@@ -387,7 +426,9 @@ export default function E2ETest() {
               placeholder={activeTaskId
                 ? (taskInfo?.pendingQuestion
                   ? '⏸ 回答上面的提问，发送后流水线自动继续…（Enter 发送）'
-                  : (addressee === 'auto' ? '输入测试指令启动流水线…（Enter 发送）' : `直接对 ${roleOf(addressee).label} 说话…（Enter 发送）`))
+                  : taskInfo?.pipelineDone
+                    ? '输入下一个任务需求，发送即续派新一轮编排（历史记录保留、右侧递增）…（Enter 发送）'
+                    : (addressee === 'auto' ? '输入测试指令启动流水线…（Enter 发送）' : `直接对 ${roleOf(addressee).label} 说话…（Enter 发送）`))
                 : '请先创建/选择任务'}
               value={input} disabled={!activeTaskId || !connected}
               onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown} />
@@ -396,9 +437,16 @@ export default function E2ETest() {
           </div>
         </div>
 
-        {/* 右侧流水线状态栏（独立滚动，不占聊天高度） */}
+        {/* 右侧流水线状态栏（独立滚动，不占聊天高度；历史轮次归档在上、当前轮在下递增） */}
         {taskInfo && (
           <div className="card pipeline-side" style={{ marginBottom: 0 }}>
+            {(pipeline?.history || []).map(h => <RunBlock key={h.runIndex} run={h} />)}
+            {(pipeline?.history?.length || 0) > 0 && (
+              <div className="run-current-head">
+                🚀 第 {pipeline?.runIndex || 1} 轮任务
+                {pipeline?.stage === 'DONE' ? '（已完成）' : pipeline?.stage === 'FAILED' ? '（失败）' : '（进行中）'}
+              </div>
+            )}
             <StageStepper pipeline={pipeline} />
             {pipeline?.cases?.length > 0 && <CaseGrid cases={pipeline.cases} rounds={pipeline.rounds} />}
             {pipeline?.rounds?.length > 0 && <RoundHistory rounds={pipeline.rounds} />}
@@ -446,6 +494,17 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
   const [maxRounds, setMaxRounds] = useState(3)
   const [commMode, setCommMode] = useState('filesystem')
   const [creating, setCreating] = useState(false)
+  // 实例独占绑定：被数字员工绑定的实例不能再圈进群聊（服务端也会拦）
+  const [occupied, setOccupied] = useState({})
+  useEffect(() => {
+    fetch('/api/employees').then(r => r.json()).then(emps => {
+      const map = {}
+      ;(emps || []).forEach(emp => (emp.instances || []).forEach(i => {
+        map[String(i.id)] = `${emp.emoji || '👔'} ${emp.name}`
+      }))
+      setOccupied(map)
+    }).catch(() => {})
+  }, [])
 
   const enabled = instances.filter(i => i.enabled)
   const instById = id => instances.find(i => String(i.id) === String(id))
@@ -461,7 +520,8 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
   function handleCreate() {
     if (!validate()) return
     const dirs = [...new Set(Object.values(pick).filter(Boolean).map(dirOf).filter(Boolean))]
-    if (dirs.length > 1) {
+    // A2A 模式工件走任务载荷，跨目录零损耗——不需要目录一致性提醒
+    if (dirs.length > 1 && commMode !== 'a2a') {
       setModal({
         title: '⚠️ 成员实例的工作目录不同',
         confirmLabel: '仍要继续创建',
@@ -515,7 +575,14 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
             <select className="form-input" style={{ padding: '6px 8px' }}
               value={pick[r.key]} onChange={e => setPick(p => ({ ...p, [r.key]: e.target.value }))}>
               <option value="">（不指定）</option>
-              {enabled.map(i => <option key={i.id} value={i.id}>{i.name || `#${i.id}`}</option>)}
+              {enabled.map(i => {
+                const occ = occupied[String(i.id)]
+                return (
+                  <option key={i.id} value={i.id} disabled={!!occ}>
+                    {occ ? `🔒 ${i.name || `#${i.id}`}（已被员工 ${occ} 独占绑定）` : (i.name || `#${i.id}`)}
+                  </option>
+                )
+              })}
             </select>
           </div>
         ))}
@@ -539,14 +606,14 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
               </span>
             </span>
           </label>
-          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 6, cursor: 'not-allowed', maxWidth: 340, opacity: 0.55 }}
-            title="A2A 通信模式开发中">
-            <input type="radio" style={{ marginTop: 3 }} disabled checked={commMode === 'a2a'}
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 6, cursor: 'pointer', maxWidth: 340 }}>
+            <input type="radio" style={{ marginTop: 3 }} checked={commMode === 'a2a'}
               onChange={() => setCommMode('a2a')} />
             <span>
-              🔗 <b>A2A</b>（Agent2Agent 协议）<span className="hook-badge dim" style={{ marginLeft: 4 }}>🚧 开发中</span>
+              🔗 <b>A2A</b>（Agent2Agent 协议）
               <span style={{ display: 'block', fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.6 }}>
-                Agent 间直连通信（Agent Card 发现 + 任务/消息协议），不依赖共享目录。敬请期待。
+                工件作为任务信封载荷在成员间直传（编排器派发，状态全程追踪：待执行→执行中→完成/失败），
+                不依赖共享目录，<b>跨目录成员可用</b>。移植自开源项目 axocoatl 的 A2A 方案。
               </span>
             </span>
           </label>
@@ -575,6 +642,33 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
 }
 
 // ===== 流水线状态 =====
+
+/** 已归档的历史轮次（同群续派任务时右侧向下递增保留；点击展开该轮完整执行情况） */
+function RunBlock({ run }) {
+  const [open, setOpen] = useState(false)
+  const done = run.stage === 'DONE'
+  const failed = run.stage === 'FAILED'
+  const passed = (run.cases || []).filter(c => c.status === 'pass').length
+  return (
+    <div className="run-block">
+      <div className="run-block-head" onClick={() => setOpen(v => !v)}>
+        <span>{done ? '✅' : failed ? '❌' : '⏸'} 第 {run.runIndex} 轮任务</span>
+        <span className="run-req" title={run.requirement}>{truncate(run.requirement, 16)}</span>
+        <span style={{ marginLeft: 'auto', fontSize: 11, color: done ? 'var(--success, #16a34a)' : failed ? 'var(--error)' : 'var(--text-dim)' }}>
+          {passed}/{(run.cases || []).length}
+        </span>
+        <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{open ? '▲' : '▼'}</span>
+      </div>
+      {open && (
+        <div className="run-block-body">
+          <StageStepper pipeline={run} />
+          {(run.cases || []).length > 0 && <CaseGrid cases={run.cases} rounds={run.rounds} />}
+          {(run.rounds || []).length > 0 && <RoundHistory rounds={run.rounds} />}
+        </div>
+      )}
+    </div>
+  )
+}
 
 function StageStepper({ pipeline }) {
   if (!pipeline || pipeline.stage === 'IDLE') {
@@ -708,9 +802,11 @@ function GroupMessage({ turn, live }) {
   if (turn.kind === 'user') {
     const addr = turn.addressedTo
     const role = addr && addr !== 'auto' ? roleOf(addr) : null
+    const isEmployee = turn.authorName && turn.authorName !== '用户'
     return (
       <div className="msg-user">
         <div className="bubble-user">
+          {isEmployee && <div className="user-sender">👔 {turn.authorName}</div>}
           <span className={'addr-chip' + (role ? '' : ' auto')}>
             {role ? `@${role.emoji} ${role.label}` : '🎯 自动编排'}
           </span>
@@ -726,12 +822,48 @@ function GroupMessage({ turn, live }) {
         {role.emoji}
       </div>
       <div className="bubble-bot" style={{ borderLeft: `3px solid ${role.color}` }}>
+        {turn.a2a && <A2AStrip a2a={turn.a2a} />}
         <div className="msg-author" style={{ color: role.color }}>
           {role.label}{turn.authorName && <span style={{ color: 'var(--text-dim)', fontWeight: 400 }}> · {turn.authorName}</span>}
           {turn.userText && <span className="msg-action">（{turn.userText}）</span>}
         </div>
         <AgentTurnBody turn={turn} live={live} />
       </div>
+    </div>
+  )
+}
+
+// ===== A2A 任务信封 =====
+
+const A2A_STATUS = {
+  Pending: { label: '待执行', color: '#6b7280', bg: 'rgba(107,114,128,0.10)' },
+  Running: { label: '执行中', color: '#2563eb', bg: 'rgba(37,99,235,0.10)' },
+  Completed: { label: '已完成', color: '#16a34a', bg: 'rgba(22,163,74,0.10)' },
+  Failed: { label: '失败', color: '#dc2626', bg: 'rgba(220,38,38,0.10)' },
+  Cancelled: { label: '已取消', color: '#d97706', bg: 'rgba(217,119,6,0.10)' },
+}
+
+/** 信封条：骑在 agent 气泡顶部的 A2A 任务元数据（状态流转/耗时/输出摘录），读档后原样恢复 */
+function A2AStrip({ a2a }) {
+  const st = A2A_STATUS[a2a.status] || A2A_STATUS.Pending
+  return (
+    <div className="a2a-strip">
+      <span title="A2A 任务信封">📨</span>
+      <b>A2A</b>
+      <code className="a2a-id">{a2a.taskId}</code>
+      <span className="a2a-route">{a2a.senderName || '编排器'} → {roleOf(a2a.receiverRole).emoji} {a2a.receiverName || ''}</span>
+      <span className="a2a-status" style={{ color: st.color, background: st.bg }}>
+        {a2a.status === 'Running' && <span className="spinner" style={{ width: 9, height: 9 }} />}
+        {st.label}
+      </span>
+      {a2a.durationMs > 0 && <span className="a2a-dur">耗时 {fmtElapsed(a2a.durationMs)}</span>}
+      {a2a.error && <span className="a2a-err" title={a2a.error}>⚠ {truncate(a2a.error, 40)}</span>}
+      {a2a.outputExcerpt && (
+        <details className="a2a-details">
+          <summary>输出摘录</summary>
+          <div className="a2a-excerpt">{a2a.outputExcerpt}</div>
+        </details>
+      )}
     </div>
   )
 }

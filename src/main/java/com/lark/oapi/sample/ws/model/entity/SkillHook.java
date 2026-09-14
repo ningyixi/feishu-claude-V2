@@ -40,6 +40,14 @@ public class SkillHook {
 
     private boolean enabled = true;
 
+    /** 创建者：数字员工 id（null = 管理员用户在面板创建） */
+    @Column(name = "created_by_employee_id")
+    private Long createdByEmployeeId;
+
+    /** 创建者姓名快照（员工被删/改名后标签仍可展示） */
+    @Column(name = "created_by_employee_name")
+    private String createdByEmployeeName;
+
     /** 上次实际执行维护的时间（窗口起点） */
     @Column(name = "last_run_at")
     private LocalDateTime lastRunAt;
@@ -72,6 +80,10 @@ public class SkillHook {
     public void setCronExpr(String cronExpr) { this.cronExpr = cronExpr; }
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
+    public Long getCreatedByEmployeeId() { return createdByEmployeeId; }
+    public void setCreatedByEmployeeId(Long createdByEmployeeId) { this.createdByEmployeeId = createdByEmployeeId; }
+    public String getCreatedByEmployeeName() { return createdByEmployeeName; }
+    public void setCreatedByEmployeeName(String createdByEmployeeName) { this.createdByEmployeeName = createdByEmployeeName; }
     public LocalDateTime getLastRunAt() { return lastRunAt; }
     public void setLastRunAt(LocalDateTime lastRunAt) { this.lastRunAt = lastRunAt; }
     public LocalDateTime getCreatedAt() { return createdAt; }

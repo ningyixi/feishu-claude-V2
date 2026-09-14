@@ -26,10 +26,13 @@ public class SupplierJobController {
 
     private final SupplierJobService jobService;
     private final WorkflowTemplateRepository templateRepo;
+    private final com.lark.oapi.sample.ws.service.EmployeeService employeeService;
 
-    public SupplierJobController(SupplierJobService jobService, WorkflowTemplateRepository templateRepo) {
+    public SupplierJobController(SupplierJobService jobService, WorkflowTemplateRepository templateRepo,
+                                 com.lark.oapi.sample.ws.service.EmployeeService employeeService) {
         this.jobService = jobService;
         this.templateRepo = templateRepo;
+        this.employeeService = employeeService;
     }
 
     // ===== 工作（存档） =====
@@ -55,6 +58,16 @@ public class SupplierJobController {
             }
             if (body.has("instanceId") && !body.get("instanceId").isJsonNull()) {
                 draft.setInstanceId(body.get("instanceId").getAsLong());
+            }
+            // 创建者：数字员工（校验 supplier 权限）或管理员用户（缺省）
+            if (body.has("creatorEmployeeId") && !body.get("creatorEmployeeId").isJsonNull()) {
+                var emp = employeeService.requirePermission(body.get("creatorEmployeeId").getAsLong(), "supplier");
+                draft.setCreatedByEmployeeId(emp.getId());
+                draft.setCreatedByEmployeeName(emp.getName());
+            }
+            // 实例独占绑定闸门：admin 不能占用员工已绑定的实例；员工只能用自己绑定的实例
+            if (draft.getInstanceId() != null) {
+                employeeService.assertInstancesUsable(List.of(draft.getInstanceId()), draft.getCreatedByEmployeeId());
             }
             SupplierJob job = jobService.createJob(draft);
             return ResponseEntity.ok(detailJson(job));
@@ -87,6 +100,12 @@ public class SupplierJobController {
             if (body.has("skills")) patch.setSkillsJson(body.get("skills").toString());
             if (body.has("instanceId") && !body.get("instanceId").isJsonNull()) {
                 patch.setInstanceId(body.get("instanceId").getAsLong());
+            }
+            // 切换执行实例也过独占闸门（沿用该工作创建者视角）
+            if (patch.getInstanceId() != null) {
+                SupplierJob existing = jobService.getJob(id)
+                        .orElseThrow(() -> new IllegalArgumentException("工作不存在: " + id));
+                employeeService.assertInstancesUsable(List.of(patch.getInstanceId()), existing.getCreatedByEmployeeId());
             }
             SupplierJob job = jobService.updateJob(id, patch);
             return ResponseEntity.ok(detailJson(job));
@@ -221,6 +240,10 @@ public class SupplierJobController {
         if (job.getInstanceId() != null) o.addProperty("instanceId", job.getInstanceId());
         o.addProperty("currentNodeId", job.getCurrentNodeId());
         o.addProperty("status", job.getStatus());
+        if (job.getCreatedByEmployeeId() != null) {
+            o.addProperty("createdByEmployeeId", job.getCreatedByEmployeeId());
+            o.addProperty("createdByEmployeeName", job.getCreatedByEmployeeName() != null ? job.getCreatedByEmployeeName() : "");
+        }
         o.addProperty("createdAt", String.valueOf(job.getCreatedAt()));
         o.addProperty("updatedAt", String.valueOf(job.getUpdatedAt()));
         // nodes 直接由 Jackson 混排不方便，这里手动拼

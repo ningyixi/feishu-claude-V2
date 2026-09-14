@@ -30,9 +30,17 @@ public class E2ETaskEntity {
     @Column(name = "shared_dir", length = 600)
     private String sharedDir;
 
-    /** 成员通信方式: filesystem(共享文件系统/黑板模式) | a2a(Agent2Agent,开发中) */
+    /** 成员通信方式: filesystem(共享文件系统/黑板模式) | a2a(Agent2Agent 任务信封,移植自 axocoatl) */
     @Column(name = "comm_mode")
     private String commMode = "filesystem";
+
+    /** 创建者：数字员工 id（null = 管理员用户在面板创建） */
+    @Column(name = "created_by_employee_id")
+    private Long createdByEmployeeId;
+
+    /** 创建者姓名快照（员工被删/改名后标签仍可展示） */
+    @Column(name = "created_by_employee_name")
+    private String createdByEmployeeName;
 
     /** 流水线状态 JSON: {stage,stageDetail,round,failReason,cases[],rounds[](含results[])} */
     @Lob
@@ -65,6 +73,10 @@ public class E2ETaskEntity {
     public void setSharedDir(String sharedDir) { this.sharedDir = sharedDir; }
     public String getCommMode() { return commMode; }
     public void setCommMode(String commMode) { this.commMode = commMode; }
+    public Long getCreatedByEmployeeId() { return createdByEmployeeId; }
+    public void setCreatedByEmployeeId(Long createdByEmployeeId) { this.createdByEmployeeId = createdByEmployeeId; }
+    public String getCreatedByEmployeeName() { return createdByEmployeeName; }
+    public void setCreatedByEmployeeName(String createdByEmployeeName) { this.createdByEmployeeName = createdByEmployeeName; }
     public String getPipelineJson() { return pipelineJson; }
     public void setPipelineJson(String pipelineJson) { this.pipelineJson = pipelineJson; }
     public boolean isPipelineStarted() { return pipelineStarted; }

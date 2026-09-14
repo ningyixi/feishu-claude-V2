@@ -29,13 +29,16 @@ public class SkillHookController {
     private final HookRunRepository runRepo;
     private final SkillFileChangeRepository changeRepo;
     private final SkillHookService hookService;
+    private final com.lark.oapi.sample.ws.service.EmployeeService employeeService;
 
     public SkillHookController(SkillHookRepository hookRepo, HookRunRepository runRepo,
-                               SkillFileChangeRepository changeRepo, SkillHookService hookService) {
+                               SkillFileChangeRepository changeRepo, SkillHookService hookService,
+                               com.lark.oapi.sample.ws.service.EmployeeService employeeService) {
         this.hookRepo = hookRepo;
         this.runRepo = runRepo;
         this.changeRepo = changeRepo;
         this.hookService = hookService;
+        this.employeeService = employeeService;
     }
 
     /** 列表（附带每个 hook 最近一次运行） */
@@ -56,13 +59,38 @@ public class SkillHookController {
     public ResponseEntity<?> create(@RequestBody SkillHook body) {
         try {
             validate(body);
+            // 创建者：数字员工（校验 hook 权限，Jackson 已把 creatorEmployeeId 绑进实体）或管理员用户
+            if (body.getCreatedByEmployeeId() != null) {
+                var emp = employeeService.requirePermission(body.getCreatedByEmployeeId(), "hook");
+                body.setCreatedByEmployeeName(emp.getName());
+            }
+            // 实例独占绑定闸门：监控实例 + 维护者实例都不能是员工已独占的（admin 视角/员工视角）
+            employeeService.assertInstancesUsable(hookInstanceIds(body), body.getCreatedByEmployeeId());
             body.setId(null);
             SkillHook saved = hookRepo.save(body);
-            log.info("[Hook] 创建: id={}, name={}, trigger={}", saved.getId(), saved.getName(), saved.getTriggerType());
+            log.info("[Hook] 创建: id={}, name={}, trigger={}, creator={}", saved.getId(), saved.getName(), saved.getTriggerType(),
+                    saved.getCreatedByEmployeeId() != null ? "员工#" + saved.getCreatedByEmployeeId() : "admin");
             return ResponseEntity.ok(hookMap(saved));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }
+    }
+
+    /** CSV instanceIds + maintainerInstanceId → 去重 id 列表 */
+    private static List<Long> hookInstanceIds(SkillHook h) {
+        List<Long> ids = new java.util.ArrayList<>();
+        if (h.getInstanceIds() != null) {
+            for (String s : h.getInstanceIds().split(",")) {
+                try {
+                    Long v = Long.parseLong(s.trim());
+                    if (!ids.contains(v)) ids.add(v);
+                } catch (NumberFormatException ignored) {}
+            }
+        }
+        if (h.getMaintainerInstanceId() != null && !ids.contains(h.getMaintainerInstanceId())) {
+            ids.add(h.getMaintainerInstanceId());
+        }
+        return ids;
     }
 
     @PutMapping("/{id}")
@@ -70,6 +98,10 @@ public class SkillHookController {
         return hookRepo.findById(id).map(h -> {
             try {
                 validate(body);
+                // 实例独占绑定闸门：只校验"新增"的实例（存量监控对象不强制清理，新分配必须未被员工独占）
+                List<Long> newIds = hookInstanceIds(body);
+                newIds.removeAll(hookInstanceIds(h));
+                employeeService.assertInstancesUsable(newIds, h.getCreatedByEmployeeId());
             } catch (IllegalArgumentException e) {
                 return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
             }
@@ -161,6 +193,8 @@ public class SkillHookController {
         m.put("triggerType", h.getTriggerType());
         m.put("cronExpr", h.getCronExpr());
         m.put("enabled", h.isEnabled());
+        m.put("creatorEmployeeId", h.getCreatedByEmployeeId());
+        m.put("creatorEmployeeName", h.getCreatedByEmployeeName());
         m.put("lastRunAt", h.getLastRunAt());
         m.put("createdAt", h.getCreatedAt());
         return m;
