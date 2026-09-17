@@ -32,6 +32,22 @@ public class DigitalEmployee {
     @Column(name = "role_desc")
     private String roleDesc = "";
 
+    /**
+     * 工作 SPEC — 老板为该员工定制的工作规范（自由文本，像 txt 一样编辑），
+     * 注入每次需求/聊天的 prompt，优先级高于系统内置默认流程（DEFAULT_SOP）。
+     */
+    @Lob
+    @Column(name = "work_spec")
+    private String workSpec = "";
+
+    /**
+     * E2E 任务完结后自动提交 PR（执行老板预置的全局 alias git qpr：自动带 reviewer + --assume-yes，
+     * 确定性 shell 执行，提取输出里的 Code Review 链接上报），聊天框+飞书以员工名义发送。
+     * 包装类型防存量行 NULL（见 BotInstance.sandboxLevel 教训）。
+     */
+    @Column(name = "auto_pr")
+    private Boolean autoPr = false;
+
     /** 绑定的实例 id 列表（CSV）— 员工能操作哪些实例 */
     @Column(name = "instance_ids")
     private String instanceIds = "";
@@ -52,6 +68,13 @@ public class DigitalEmployee {
     /** 上次定期汇报时间 */
     @Column(name = "last_report_at")
     private LocalDateTime lastReportAt;
+
+    /**
+     * 飞书通知实例 — 老板指定的、与老板飞书通信的实例（应从绑定实例中选）。
+     * 员工的所有上报/聊天回复优先经这个实例的机器人推送；空 = 自动选择（需求执行实例 > 绑定顺序）。
+     */
+    @Column(name = "notify_instance_id")
+    private Long notifyInstanceId;
 
     @Column(name = "created_at")
     private LocalDateTime createdAt;
@@ -125,6 +148,11 @@ public class DigitalEmployee {
     public void setEmoji(String emoji) { this.emoji = emoji; }
     public String getRoleDesc() { return roleDesc; }
     public void setRoleDesc(String roleDesc) { this.roleDesc = roleDesc; }
+    public String getWorkSpec() { return workSpec; }
+    public void setWorkSpec(String workSpec) { this.workSpec = workSpec; }
+    /** 空值归一：存量行 auto_pr 为 NULL 时按 false */
+    public boolean isAutoPr() { return autoPr != null && autoPr; }
+    public void setAutoPr(boolean autoPr) { this.autoPr = autoPr; }
     public String getInstanceIds() { return instanceIds; }
     public void setInstanceIds(String instanceIds) { this.instanceIds = instanceIds; }
     public String getPermissions() { return permissions; }
@@ -135,6 +163,8 @@ public class DigitalEmployee {
     public void setReportIntervalMin(int reportIntervalMin) { this.reportIntervalMin = reportIntervalMin; }
     public LocalDateTime getLastReportAt() { return lastReportAt; }
     public void setLastReportAt(LocalDateTime lastReportAt) { this.lastReportAt = lastReportAt; }
+    public Long getNotifyInstanceId() { return notifyInstanceId; }
+    public void setNotifyInstanceId(Long notifyInstanceId) { this.notifyInstanceId = notifyInstanceId; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }
 }

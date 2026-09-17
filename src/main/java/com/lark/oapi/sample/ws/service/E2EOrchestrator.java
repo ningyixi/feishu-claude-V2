@@ -779,20 +779,23 @@ public class E2EOrchestrator {
         taskService.postSystem(task, summary);
         broadcastStage(task);
         taskService.persistTask(task);
-
-        // 飞书推送终报（每个成员实例的授权用户，去重）
-        List<String> notified = new ArrayList<>();
-        for (E2ETaskService.Member m : task.members) {
-            if (m.authorizedOpenId.isBlank() || notified.contains(m.instanceId + ":" + m.authorizedOpenId)) continue;
-            notified.add(m.instanceId + ":" + m.authorizedOpenId);
+        // 飞书推送终报：只由「执行者」实例发一条（测试结论由执行测试的人汇报，不再每个成员实例都推）；
+        // 无执行者时回退到第一个配了授权用户的成员
+        E2ETaskService.Member notifier = task.memberByRole("executor");
+        if (notifier == null || notifier.authorizedOpenId.isBlank()) {
+            notifier = task.members.stream()
+                    .filter(m -> !m.authorizedOpenId.isBlank())
+                    .findFirst().orElse(null);
+        }
+        if (notifier != null) {
             try {
-                feishuBotService.notifyUser(m.instanceId, m.authorizedOpenId,
+                feishuBotService.notifyUser(notifier.instanceId, notifier.authorizedOpenId,
                         "🧪 E2E 测试群聊结果\n\n" + summary + "\n\n详情到管理面板「E2E 测试」页查看（任务 " + task.id + "）");
             } catch (Exception e) {
                 log.warn("[E2E] 飞书终报推送失败: {}", e.getMessage());
             }
         }
-        notifyCreatorEmployee(task, summary);
+        notifyCreatorEmployee(task, summary, true);
     }
 
     private void fail(E2ETaskService.E2ETask task, String reason) {
@@ -805,11 +808,16 @@ public class E2EOrchestrator {
         taskService.postSystem(task, "❌ 流水线终止：" + reason);
         broadcastStage(task);
         taskService.persistTask(task);
-        notifyCreatorEmployee(task, "❌ E2E 流水线终止（任务 " + task.id + "）：" + reason);
+        notifyCreatorEmployee(task, "❌ E2E 流水线终止（任务 " + task.id + "）：" + reason, false);
     }
 
-    /** 数字员工创建的任务 → 终局结果同步走员工通道（聊天框红点 + 飞书推送），与成员实例的飞书终报双通道 */
-    private void notifyCreatorEmployee(E2ETaskService.E2ETask task, String summary) {
+    /**
+     * 数字员工创建的任务 → 终局结果同步走员工通道（聊天框红点 + 飞书推送），与成员实例的飞书终报双通道。
+     *
+     * @param ranToCompletion true = 流水线完整跑完（finish，不论通过率）；false = 异常终止（fail）——
+     *                        自动 PR 只在前者触发（异常终止时代码改动状态未知，不适合自动提交评审）
+     */
+    private void notifyCreatorEmployee(E2ETaskService.E2ETask task, String summary, boolean ranToCompletion) {
         if (task.creatorEmployeeId == null) return;
         try {
             var emp = employeeService.getEmployee(task.creatorEmployeeId);
@@ -818,6 +826,22 @@ public class E2EOrchestrator {
                     "🧪 你创建的 E2E 测试任务出结果了（任务 " + task.id + "，第 " + task.pipeline.runIndex + " 轮）：\n"
                     + summary + "\n\n可到面板查看群聊详情，或在员工聊天框继续对话。",
                     null, null);
+            // 自动提 PR：E2E 完结 + 员工开启 autoPr → 在代码改动实例（programmer 优先）上确定性执行 git qpr
+            //（老板预置的全局 alias：repo upload --single --reviewers … --no-edit --assume-yes，reviewer 和确认全自动）
+            if (ranToCompletion && emp.isAutoPr()) {
+                E2ETaskService.Member coder = task.memberByRole("programmer");
+                if (coder == null && !task.members.isEmpty()) coder = task.members.get(0);
+                if (coder != null) {
+                    try {
+                        employeeService.runShell(emp.getId(), "git qpr", coder.instanceId, true);
+                        log.info("[E2E] 自动 PR 已触发: task={}, emp={}, instance={}", task.id, emp.getId(), coder.instanceId);
+                    } catch (Exception ex) {
+                        employeeService.postMessage(emp, "SHELL",
+                                "⚠️ E2E 完结后自动提交 PR 未执行：" + ex.getMessage()
+                                + "\n可到员工聊天框切 🖥 Shell 模式手动执行 git qpr", null, coder.instanceId);
+                    }
+                }
+            }
         } catch (Exception e) {
             log.warn("[E2E] 创建者员工结果推送失败: {}", e.getMessage());
         }

@@ -803,10 +803,29 @@ function GroupMessage({ turn, live }) {
     const addr = turn.addressedTo
     const role = addr && addr !== 'auto' ? roleOf(addr) : null
     const isEmployee = turn.authorName && turn.authorName !== '用户'
+    if (isEmployee) {
+      // 数字员工发言 — 飞书群聊视角："对方"的消息显示在左边（👔 蓝色身份）
+      const first = String(turn.authorName).split(' ')[0] || '👔'
+      return (
+        <div className="msg-bot">
+          <div className="msg-avatar" style={{ background: 'rgba(37,99,235,0.12)', color: '#2563eb' }} title={turn.authorName}>
+            {first.length <= 8 ? first : '👔'}
+          </div>
+          <div className="bubble-bot" style={{ borderLeft: '3px solid #2563eb' }}>
+            <div className="msg-author" style={{ color: '#2563eb' }}>{turn.authorName}</div>
+            <div style={{ whiteSpace: 'pre-wrap' }}>
+              <span className={'addr-chip emp' + (role ? '' : ' auto')}>
+                {role ? `@${role.emoji} ${role.label}` : '🎯 自动编排'}
+              </span>
+              {turn.userText}
+            </div>
+          </div>
+        </div>
+      )
+    }
     return (
       <div className="msg-user">
         <div className="bubble-user">
-          {isEmployee && <div className="user-sender">👔 {turn.authorName}</div>}
           <span className={'addr-chip' + (role ? '' : ' auto')}>
             {role ? `@${role.emoji} ${role.label}` : '🎯 自动编排'}
           </span>

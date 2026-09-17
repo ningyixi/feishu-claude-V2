@@ -102,7 +102,11 @@ public class EmployeeController {
                     opt(body, "name"), opt(body, "emoji"), opt(body, "roleDesc"),
                     longList(body, "instanceIds"), strList(body, "permissions"),
                     body.has("reportIntervalMin") && !body.get("reportIntervalMin").isJsonNull()
-                            ? body.get("reportIntervalMin").getAsInt() : null);
+                            ? body.get("reportIntervalMin").getAsInt() : null,
+                    body.has("workSpec") && !body.get("workSpec").isJsonNull() ? body.get("workSpec").getAsString() : null,
+                    body.has("autoPr") && !body.get("autoPr").isJsonNull() ? body.get("autoPr").getAsBoolean() : null,
+                    body.has("notifyInstanceId") && !body.get("notifyInstanceId").isJsonNull()
+                            ? body.get("notifyInstanceId").getAsLong() : null);
             return ResponseEntity.ok(employeeJson(e, instanceNames()).toString());
         } catch (IllegalArgumentException ex) {
             return badRequest(ex.getMessage());
@@ -155,6 +159,14 @@ public class EmployeeController {
             }
             out.add("chatProgress", chat);
         }
+        // 进行中的 shell 命令（"正在执行命令…"指示器）
+        JsonObject shell = employeeService.shellProgressJson(id);
+        if (shell != null) {
+            if (shell.has("instanceId") && !shell.get("instanceId").isJsonNull()) {
+                shell.addProperty("instanceName", instNames.getOrDefault(shell.get("instanceId").getAsLong(), ""));
+            }
+            out.add("shellProgress", shell);
+        }
         return ResponseEntity.ok(out.toString());
     }
 
@@ -166,6 +178,23 @@ public class EmployeeController {
             Long demandId = body.has("demandId") && !body.get("demandId").isJsonNull()
                     ? body.get("demandId").getAsLong() : null;
             employeeService.sendChat(id, opt(body, "text"), demandId);
+            return ResponseEntity.ok("{\"ok\":true}");
+        } catch (IllegalArgumentException ex) {
+            return badRequest(ex.getMessage());
+        }
+    }
+
+    /**
+     * Shell 模式：在员工绑定实例的工作目录直接执行命令（cmd /c，不经 Claude）。
+     * 交互提问自动答 y；结果（退出码/输出摘要/提取的 URL）以 SHELL 消息走聊天框+飞书双通道。
+     */
+    @PostMapping(value = "/{id}/shell", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> shell(@PathVariable Long id, @RequestBody String rawBody) {
+        try {
+            JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            Long instanceId = body.has("instanceId") && !body.get("instanceId").isJsonNull()
+                    ? body.get("instanceId").getAsLong() : null;
+            employeeService.runShell(id, opt(body, "command"), instanceId);
             return ResponseEntity.ok("{\"ok\":true}");
         } catch (IllegalArgumentException ex) {
             return badRequest(ex.getMessage());
@@ -199,7 +228,11 @@ public class EmployeeController {
                     body.has("instanceIds") ? longList(body, "instanceIds") : null,
                     body.has("permissions") ? strList(body, "permissions") : null,
                     body.has("reportIntervalMin") && !body.get("reportIntervalMin").isJsonNull()
-                            ? body.get("reportIntervalMin").getAsInt() : null);
+                            ? body.get("reportIntervalMin").getAsInt() : null,
+                    body.has("workSpec") && !body.get("workSpec").isJsonNull() ? body.get("workSpec").getAsString() : null,
+                    body.has("autoPr") && !body.get("autoPr").isJsonNull() ? body.get("autoPr").getAsBoolean() : null,
+                    body.has("notifyInstanceId") && !body.get("notifyInstanceId").isJsonNull()
+                            ? body.get("notifyInstanceId").getAsLong() : null);
             return ResponseEntity.ok(employeeJson(e, instanceNames()).toString());
         } catch (IllegalArgumentException ex) {
             return badRequest(ex.getMessage());
@@ -262,6 +295,9 @@ public class EmployeeController {
         o.addProperty("roleDesc", e.getRoleDesc());
         o.addProperty("enabled", e.isEnabled());
         o.addProperty("reportIntervalMin", e.getReportIntervalMin());
+        o.addProperty("workSpec", e.getWorkSpec() != null ? e.getWorkSpec() : "");
+        o.addProperty("autoPr", e.isAutoPr());
+        if (e.getNotifyInstanceId() != null) o.addProperty("notifyInstanceId", e.getNotifyInstanceId());
         JsonArray perms = new JsonArray();
         for (String p : e.permList()) perms.add(p);
         o.add("permissions", perms);

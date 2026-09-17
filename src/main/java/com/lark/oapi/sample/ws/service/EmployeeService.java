@@ -89,7 +89,8 @@ public class EmployeeService {
     }
 
     public DigitalEmployee createEmployee(String name, String emoji, String roleDesc, List<Long> instanceIds,
-                                          List<String> permissions, Integer reportIntervalMin) {
+                                          List<String> permissions, Integer reportIntervalMin,
+                                          String workSpec, Boolean autoPr, Long notifyInstanceId) {
         if (name == null || name.isBlank()) throw new IllegalArgumentException("请填写员工名称");
         assertInstancesUnbound(instanceIds, null);   // 独占绑定：不得抢其他员工已绑定的实例
         DigitalEmployee e = new DigitalEmployee();
@@ -99,15 +100,20 @@ public class EmployeeService {
         e.setInstanceIdList(instanceIds);
         e.setPermList(permissions);
         e.setReportIntervalMin(clampInterval(reportIntervalMin));
+        e.setWorkSpec(workSpec != null ? workSpec : "");
+        e.setAutoPr(autoPr != null && autoPr);
+        e.setNotifyInstanceId(notifyInstanceId != null && notifyInstanceId > 0 ? notifyInstanceId : null);
         employeeRepo.save(e);
         applySandboxOnBind(e.instanceIdList(), List.of());   // 绑定即上锁
-        log.info("[员工] 创建数字员工: id={}, name={}, 绑定实例={}, 权限={}, 定期汇报={}min",
-                e.getId(), e.getName(), e.getInstanceIds(), e.getPermissions(), e.getReportIntervalMin());
+        log.info("[员工] 创建数字员工: id={}, name={}, 绑定实例={}, 权限={}, 定期汇报={}min, autoPr={}, spec={}字",
+                e.getId(), e.getName(), e.getInstanceIds(), e.getPermissions(), e.getReportIntervalMin(),
+                e.isAutoPr(), e.getWorkSpec() != null ? e.getWorkSpec().length() : 0);
         return e;
     }
 
     public DigitalEmployee updateEmployee(Long id, String name, String emoji, String roleDesc, List<Long> instanceIds,
-                                          List<String> permissions, Integer reportIntervalMin) {
+                                          List<String> permissions, Integer reportIntervalMin,
+                                          String workSpec, Boolean autoPr, Long notifyInstanceId) {
         DigitalEmployee e = employeeRepo.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("员工不存在: " + id));
         if (name != null && !name.isBlank()) e.setName(name.trim());
@@ -115,6 +121,9 @@ public class EmployeeService {
         if (roleDesc != null) e.setRoleDesc(roleDesc.trim());
         if (permissions != null) e.setPermList(permissions);
         if (reportIntervalMin != null) e.setReportIntervalMin(clampInterval(reportIntervalMin));
+        if (workSpec != null) e.setWorkSpec(workSpec);
+        if (autoPr != null) e.setAutoPr(autoPr);
+        if (notifyInstanceId != null) e.setNotifyInstanceId(notifyInstanceId > 0 ? notifyInstanceId : null);   // 0 = 恢复自动选择
         if (instanceIds != null) {
             assertInstancesUnbound(instanceIds, id);   // 独占绑定：排除自己后不得占用其他员工的实例
             List<Long> oldIds = e.instanceIdList();
@@ -518,10 +527,11 @@ public class EmployeeService {
         return msg;
     }
 
-    /** 挑一个"配了授权用户 + 已连接"的飞书通道：优先需求执行实例，其次按绑定顺序 */
+    /** 挑一个"配了授权用户 + 已连接"的飞书通道：老板指定的通知实例最优先，其次需求执行实例，最后按绑定顺序 */
     private boolean pushFeishu(DigitalEmployee emp, String content, Long preferInstanceId) {
         List<Long> order = new ArrayList<>();
-        if (preferInstanceId != null) order.add(preferInstanceId);
+        if (emp.getNotifyInstanceId() != null) order.add(emp.getNotifyInstanceId());
+        if (preferInstanceId != null && !order.contains(preferInstanceId)) order.add(preferInstanceId);
         for (Long iid : emp.instanceIdList()) if (!order.contains(iid)) order.add(iid);
         for (Long iid : order) {
             BotInstance inst = instanceRepo.findById(iid).orElse(null);
@@ -620,12 +630,14 @@ public class EmployeeService {
         return bossMsg;
     }
 
-    /** 聊天 prompt：人设 + 可选需求上下文 + 对话式回应契约（比需求 prompt 轻，不强制四段汇报） */
+    /** 聊天 prompt：人设 + SOP/SPEC + 可选需求上下文 + 对话式回应契约（比需求 prompt 轻，不强制四段汇报） */
     private String chatPrompt(DigitalEmployee emp, String text, String demandTitle) {
         String role = emp.getRoleDesc() != null && !emp.getRoleDesc().isBlank()
                 ? "职责：" + emp.getRoleDesc().trim() + "。" : "";
         return "【数字员工聊天】\n"
                 + "你是数字员工 " + emp.getEmoji() + "「" + emp.getName() + "」。" + role + "\n"
+                + DEFAULT_SOP
+                + specSection(emp)
                 + (demandTitle != null ? "当前聊天带着需求《" + demandTitle + "》的上下文。\n" : "")
                 + "老板在聊天框里对你说：\n" + text + "\n\n"
                 + "请以对话方式回应（你的回复会直接显示在老板的聊天框里，支持 markdown，简洁自然，不要冗长套话）。"
@@ -642,6 +654,164 @@ public class EmployeeService {
             o.addProperty("instanceId", t.instanceId);
             if (t.demandId != null) o.addProperty("demandId", t.demandId);
         }
+        return o;
+    }
+
+    // ===== Shell 模式：admin 直通命令（不经 Claude，确定性执行） =====
+
+    /** shell 命令超时（秒）——git qpr 之类含 push 的脚本留足余量 */
+    private static final int SHELL_TIMEOUT_SEC = 120;
+    /** 输出保留上限（超出截尾，防大输出爆库） */
+    private static final int SHELL_OUTPUT_CAP = 60_000;
+    private static final java.util.regex.Pattern URL_PATTERN =
+            java.util.regex.Pattern.compile("https?://[^\\s\"'<>\\[\\]]+");
+
+    /** 进行中的 shell 命令（employeeId → 任务）；每员工同时只允许一条 */
+    private final Map<Long, ShellTask> shellTasks = new ConcurrentHashMap<>();
+
+    public static class ShellTask {
+        public final String command;
+        public final Long instanceId;
+        public final long startMs = System.currentTimeMillis();
+
+        ShellTask(String command, Long instanceId) {
+            this.command = command;
+            this.instanceId = instanceId;
+        }
+    }
+
+    /**
+     * 在员工绑定实例的工作目录直接执行命令（cmd.exe /c，admin 权限直通通道——
+     * 沙箱档位约束的是 Claude 模型，不约束老板本人的面板操作）。
+     * 交互提问自动答 y（stdin 预灌）；跑完提取输出中的 URL，
+     * 结果以 SHELL 消息走员工双通道（聊天框落库 + 飞书推送）。
+     *
+     * @param instanceId 可空；空 = 最近执行过需求的实例 > 第一个绑定实例
+     */
+    public void runShell(Long empId, String command, Long instanceId) {
+        runShell(empId, command, instanceId, false);
+    }
+
+    /**
+     * @param autoTriggered true = 系统自动流程触发（如 E2E 完结后自动 git qpr）：
+     *                      不记 BOSS 命令气泡（不是老板手发的），结果消息加【自动流程】前缀
+     */
+    public void runShell(Long empId, String command, Long instanceId, boolean autoTriggered) {
+        DigitalEmployee emp = employeeRepo.findById(empId)
+                .orElseThrow(() -> new IllegalArgumentException("员工不存在: " + empId));
+        if (command == null || command.isBlank()) throw new IllegalArgumentException("请输入要执行的命令");
+        if (shellTasks.containsKey(empId)) throw new IllegalArgumentException("上一条命令还在执行中，请稍候");
+
+        Long target = instanceId;
+        if (target == null) {
+            List<EmployeeDemand> ds = demandRepo.findByEmployeeIdOrderByCreatedAtAsc(empId);
+            for (int i = ds.size() - 1; i >= 0 && target == null; i--) target = ds.get(i).getInstanceId();
+        }
+        if (target == null || !instanceRepo.existsById(target)) {
+            target = emp.instanceIdList().stream().filter(instanceRepo::existsById).findFirst().orElse(null);
+        }
+        if (target == null) throw new IllegalArgumentException("该员工没有可用的绑定实例");
+
+        String cmd = command.trim();
+        if (!autoTriggered) {
+            // 老板手发命令：先以 BOSS 气泡进聊天框留档（前缀 🖥 $ 区分于对话）
+            postMessage(emp, "BOSS", "🖥 $ " + cmd, null, null, "boss");
+        }
+
+        final Long instId = target;
+        ShellTask task = new ShellTask(cmd, instId);
+        shellTasks.put(empId, task);
+        Thread.ofVirtual().name("emp-shell-" + empId).start(() -> {
+            try {
+                String result = execShell(task, instId);
+                if (autoTriggered) result = "🤖【自动流程 · E2E 完结触发】\n" + result;
+                postMessage(emp, "SHELL", result, null, instId);
+            } catch (Exception e) {
+                log.warn("[员工] shell 执行异常: emp={}, cmd={}, {}", empId, cmd, e.getMessage());
+                try {
+                    postMessage(emp, "SHELL", (autoTriggered ? "🤖【自动流程】" : "")
+                            + "❌ 命令执行异常: " + e.getMessage() + "\n命令: " + cmd, null, instId);
+                } catch (Exception ignored) {}
+            } finally {
+                shellTasks.remove(empId);
+            }
+        });
+    }
+
+    /** 真正执行：cmd /c + 自动答 y + 超时强杀 + 输出截断 + URL 提取，返回 SHELL 消息正文 */
+    private String execShell(ShellTask task, Long instId) throws Exception {
+        BotInstance inst = instanceRepo.findById(instId).orElseThrow();
+        String dir = firstNonBlank(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
+        ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", task.command);
+        if (!dir.isBlank()) pb.directory(new java.io.File(dir));
+        pb.redirectErrorStream(true);
+        long t0 = System.currentTimeMillis();
+        Process p = pb.start();
+
+        // 自动应答交互提问：预灌 10 行 y 后关闭 stdin（不读 stdin 的命令无副作用；写失败忽略）
+        try (var stdin = p.getOutputStream()) {
+            for (int i = 0; i < 10; i++) stdin.write("y\n".getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            stdin.flush();
+        } catch (Exception ignored) {}
+
+        // 输出读取放独立虚拟线程（default charset：中文 Windows cmd = GBK，git 输出 ASCII 兼容）
+        StringBuilder out = new StringBuilder();
+        Thread reader = Thread.ofVirtual().name("emp-shell-read").start(() -> {
+            try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(
+                    p.getInputStream(), java.nio.charset.Charset.defaultCharset()))) {
+                String line;
+                while ((line = r.readLine()) != null) {
+                    if (out.length() < SHELL_OUTPUT_CAP) out.append(line).append('\n');
+                }
+            } catch (Exception ignored) {}
+        });
+
+        boolean finished = p.waitFor(SHELL_TIMEOUT_SEC, java.util.concurrent.TimeUnit.SECONDS);
+        if (!finished) p.destroyForcibly();
+        reader.join(5_000);
+        long elapsed = (System.currentTimeMillis() - t0) / 1000;
+        String output = out.toString();
+        int exit = finished ? p.exitValue() : -1;
+
+        // URL 提取（去重、去尾部标点）
+        java.util.LinkedHashSet<String> urls = new java.util.LinkedHashSet<>();
+        java.util.regex.Matcher m = URL_PATTERN.matcher(output);
+        while (m.find()) {
+            String u = m.group();
+            while (!u.isEmpty() && ".,;:!?，。；".indexOf(u.charAt(u.length() - 1)) >= 0) u = u.substring(0, u.length() - 1);
+            if (!u.isEmpty()) urls.add(u);
+        }
+
+        StringBuilder sb = new StringBuilder();
+        if (!finished) {
+            sb.append("⏰ 命令超时（").append(SHELL_TIMEOUT_SEC).append("s），已强制终止：").append(task.command).append("\n");
+        } else {
+            sb.append(exit == 0 ? "✅ 命令执行成功：" : "❌ 命令退出码 " + exit + "：").append(task.command).append("\n");
+        }
+        sb.append("实例「").append(inst.getName()).append("」· 耗时 ").append(elapsed).append("s");
+        if (!urls.isEmpty()) {
+            sb.append("\n🔗 链接：\n");
+            for (String u : urls) sb.append(u).append("\n");
+        }
+        String body = output.trim();
+        if (!body.isEmpty()) {
+            // 头 400 + 尾 1200：URL/结论通常在尾部
+            String excerpt = body.length() > 1800
+                    ? body.substring(0, 400) + "\n…(中间省略 " + (body.length() - 1600) + " 字)...\n" + body.substring(body.length() - 1200)
+                    : body;
+            sb.append("\n--- 输出").append(finished ? "" : "（截断）").append(" ---\n").append(excerpt);
+        }
+        return sb.toString();
+    }
+
+    /** shell 执行进度（详情页轮询展示"正在执行命令…"）；无进行中命令返回 null */
+    public JsonObject shellProgressJson(Long employeeId) {
+        ShellTask t = shellTasks.get(employeeId);
+        if (t == null) return null;
+        JsonObject o = new JsonObject();
+        o.addProperty("command", t.command);
+        o.addProperty("instanceId", t.instanceId);
+        o.addProperty("elapsedMs", System.currentTimeMillis() - t.startMs);
         return o;
     }
 
@@ -778,13 +948,15 @@ public class EmployeeService {
 
     // ===== Prompt =====
 
-    /** 员工人设 + 权限契约 + 需求全文 + 异步汇报契约（v1 不做暂停提问，缺信息写进"需要老板支持"） */
+    /** 员工人设 + 权限契约 + 默认SOP + 自定义SPEC + 需求全文 + 异步汇报契约（v1 不做暂停提问，缺信息写进"需要老板支持"） */
     private String personaPrompt(DigitalEmployee emp, EmployeeDemand d) {
         String role = emp.getRoleDesc() != null && !emp.getRoleDesc().isBlank()
                 ? "职责：" + emp.getRoleDesc().trim() + "。" : "";
         return "【数字员工任务】\n"
                 + "你是数字员工 " + emp.getEmoji() + "「" + emp.getName() + "」（员工ID: " + emp.getId() + "）。" + role + "\n"
                 + permissionSection(emp)
+                + DEFAULT_SOP
+                + specSection(emp)
                 + "老板给你下发了如下需求，请在当前工作目录内完成：\n\n"
                 + "== 需求 ==\n" + d.getRequirement() + "\n\n"
                 + "【完成汇报契约】最后请按以下结构汇报：\n"
@@ -794,6 +966,30 @@ public class EmployeeService {
                 + "4. 需要老板支持（缺少的凭证/决策/资源等，没有写\"无\"）\n"
                 + "注意：这是异步下发的任务，没有人在线回答追问——缺少关键信息时不要空等，"
                 + "先完成能做的部分，把缺项明确写进「需要老板支持」。";
+    }
+
+    /** 系统内置默认工作 SOP — 注入每次需求/聊天 prompt；与员工自定义 workSpec 冲突时以 SPEC 为准 */
+    static final String DEFAULT_SOP =
+            "\n【默认工作规范】（系统内置；若与老板给你的自定义 SPEC 冲突，以 SPEC 为准）\n"
+            + "1. 链接处理：需求中出现的飞书链接（*.feishu.cn / *.larksuite.com 的文档、表格、多维表格、消息等），"
+            + "**禁止直接 curl 读取**（没有登录态，拿不到正文），必须用本机已安装的 lark-cli 相关技能"
+            + "（lark-doc / lark-sheet / lark-markdown / lark-im / lark-wiki 等）解析读取；其他公网 URL 可以 curl。\n"
+            + "2. 执行边界：所有代码/命令操作只在你绑定实例的工作目录内完成；创建 E2E/Hook/供应商工作等系统操作只能使用你自己绑定的实例（服务端强制校验）。\n"
+            + "3. 标准工作流：接到需求 → 完成开发并自验 → 若持有 E2E 权限：通过 API 创建 E2E 测试任务。"
+            + "**角色分配原则**：本次编写代码的实例担任 programmer；若你绑定了多个实例，designer（测试设计师）和 executor（执行者）"
+            + "应选用与写码实例不同的实例——设计用例和执行测试的不能是写代码的那个（独立性原则，防止给自己的代码放水），且 designer 与 executor 也尽量分开；"
+            + "只有绑定实例不够时才让一个实例兼任多角色。创建后 → 启动流水线 → 在群聊里发言说明本次改动了什么、要测什么、怎么判定，"
+            + "群聊里老板或成员 @ 你时配合回应 → 然后等待系统把 E2E 结果推送给你（不要阻塞轮询等待）。\n"
+            + "4. 提交 PR：统一用老板机器上预置的 git qpr（全局 alias，自动带 reviewer、自动确认、全程无需交互），"
+            + "执行完从输出里提取网络链接（Code Review URL）汇报给老板；"
+            + "若老板开启了「自动提交 PR」，E2E 完结后系统会自动执行 git qpr 并以你的名义上报链接，你无需自己执行。\n"
+            + "5. Git 纪律：提交前用 git status / git diff 确认改动内容，不提交无关文件、不修改 git 全局配置。\n";
+
+    /** 员工自定义工作 SPEC 段（老板手写的规范，优先级最高） */
+    private static String specSection(DigitalEmployee emp) {
+        if (emp.getWorkSpec() == null || emp.getWorkSpec().isBlank()) return "";
+        return "\n【你的工作 SPEC】（老板专门为你制定的工作规范，优先级最高，请逐条严格遵守）\n"
+                + emp.getWorkSpec().trim() + "\n";
     }
 
     /** 权限段：授权了哪些创建类 API（curl 调用契约 + creatorEmployeeId 必带），未授权明确禁止 */

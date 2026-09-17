@@ -54,6 +54,15 @@ const MSG_TYPE = {
   PERIODIC: { icon: '📊', label: '定期汇报', color: '#2563eb' },
   CHAT: { icon: '💬', label: '回复', color: '#2563eb' },
   E2E: { icon: '🧪', label: 'E2E 结果', color: '#0891b2' },
+  SHELL: { icon: '🖥', label: '命令执行', color: '#475569' },
+}
+
+/** 消息里的 URL 渲染成可点链接（SHELL 结果里的 PR 地址等） */
+function linkify(text) {
+  const parts = String(text || '').split(/(https?:\/\/[^\s"'<>]+)/g)
+  return parts.map((p, i) => p.startsWith('http')
+    ? <a key={i} href={p} target="_blank" rel="noreferrer">{p}</a>
+    : p)
 }
 
 function fmtDur(ms) {
@@ -131,6 +140,8 @@ function EmployeeList({ onOpen, showToast }) {
                   const pm = EMP_PERMS.find(x => x.key === p)
                   return <span key={p} className="hook-badge" title={`已授权：${pm?.label || p}`}>{pm?.icon || '🔓'} {pm ? pm.label.replace('创建 ', '') : p}</span>
                 })}
+                {!!e.workSpec && <span className="hook-badge" title={e.workSpec}>📜 SPEC</span>}
+                {!!e.autoPr && <span className="hook-badge" title="E2E 完结后自动执行 git qpr">🚀 自动PR</span>}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -163,6 +174,10 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
   const [bound, setBound] = useState((initial?.instanceIds || []).map(String))
   const [perms, setPerms] = useState(initial?.permissions || [])
   const [reportIntervalMin, setReportIntervalMin] = useState(initial?.reportIntervalMin || 0)
+  const [workSpec, setWorkSpec] = useState(initial?.workSpec || '')
+  const [autoPr, setAutoPr] = useState(!!initial?.autoPr)
+  const [notifyInstanceId, setNotifyInstanceId] = useState(initial?.notifyInstanceId || 0)
+  const [specEditing, setSpecEditing] = useState(false)   // SPEC 大白框（全屏编辑）
   const [instances, setInstances] = useState([])
   const [occupied, setOccupied] = useState({})   // String(instId) → 占用员工标签（编辑自己时排除自己）
   const [saving, setSaving] = useState(false)
@@ -196,7 +211,7 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
       const res = await fetch(initial ? `/api/employees/${initial.id}` : '/api/employees', {
         method: initial ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), emoji, roleDesc, instanceIds: bound.map(Number), permissions: perms, reportIntervalMin }),
+        body: JSON.stringify({ name: name.trim(), emoji, roleDesc, instanceIds: bound.map(Number), permissions: perms, reportIntervalMin, workSpec, autoPr, notifyInstanceId: Number(notifyInstanceId) || 0 }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || '保存失败')
@@ -257,6 +272,25 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
           </div>
         </div>
         <div className="form-group">
+          <label className="form-label">📣 飞书通知实例
+            <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>
+              员工的上报/聊天回复经哪个实例的飞书机器人推给你（从已绑定实例中选；该实例需配置「授权用户 Open ID」且保持连接）
+            </span>
+          </label>
+          <select className="form-input" value={String(notifyInstanceId || 0)}
+            onChange={e => setNotifyInstanceId(Number(e.target.value))}>
+            <option value={0}>🔄 自动（优先需求执行实例，其次按绑定顺序）</option>
+            {bound.map(id => {
+              const i = instances.find(x => String(x.id) === id)
+              return (
+                <option key={id} value={id}>
+                  📡 {i?.name || `#${id}`}{i && !i.authorizedOpenId ? '（⚠ 未配授权用户，选了也发不出）' : ''}
+                </option>
+              )
+            })}
+          </select>
+        </div>
+        <div className="form-group">
           <label className="form-label">系统权限 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>授权后员工执行需求时可在本系统创建对应对象（服务端强制校验，未授权会被拒绝）</span></label>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {EMP_PERMS.map(p => (
@@ -268,6 +302,17 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
           </div>
         </div>
         <div className="form-group">
+          <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer' }}>
+            <input type="checkbox" style={{ marginTop: 3 }} checked={autoPr} onChange={e => setAutoPr(e.target.checked)} />
+            <span>🚀 E2E 测试完结后自动提交 PR（<code>git qpr</code>）
+              <span style={{ display: 'block', fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.6 }}>
+                该员工创建的 E2E 任务跑完后，系统自动在代码实例上执行 git qpr（你预置的全局 alias：自动带 reviewer、--no-edit、--assume-yes，全程无需交互；确定性执行、不经 Claude），
+                等它跑完后提取终端输出里的 Code Review 链接，以该员工名义经聊天框 + 飞书发给你。
+              </span>
+            </span>
+          </label>
+        </div>
+        <div className="form-group">
           <label className="form-label">定期汇报 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>有进行中/排队的工作时，按间隔主动汇报进度（飞书 + 面板红点）；任务完成/失败/卡住时始终会立即上报</span></label>
           <select className="form-input" value={reportIntervalMin} onChange={e => setReportIntervalMin(Number(e.target.value))}>
             <option value={0}>关闭（只在完成/失败/卡住时上报）</option>
@@ -277,11 +322,45 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
             <option value={240}>每 4 小时</option>
           </select>
         </div>
+        <div className="form-group">
+          <label className="form-label">📜 工作 SPEC
+            <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>
+              （写代码要有 spec，员工干活也要有"干活的 spec"——用这份文档规范该员工的行为：飞书链接怎么处理、代码/提交规范、流程要求、汇报格式…
+              它会注入这个员工的每次任务与聊天，优先级高于系统默认流程）
+            </span>
+          </label>
+          <div className="spec-preview" onClick={() => setSpecEditing(true)} title="点击打开大白框编辑">
+            {workSpec || '（未填写——点击编辑，像写 txt 文档一样，把这个员工在你这里干活要遵守的规矩写下来）'}
+          </div>
+          <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <button className="btn" style={{ fontSize: 12, padding: '3px 12px' }} onClick={() => setSpecEditing(true)}>✏️ 编辑 SPEC</button>
+            {workSpec && <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{workSpec.length} 字 · 每次任务/聊天自动注入</span>}
+          </div>
+        </div>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
           <button className="btn" onClick={onCancel}>取消</button>
           <button className="btn btn-primary" onClick={save} disabled={saving}>{saving ? '保存中…' : '保存'}</button>
         </div>
       </div>
+
+      {/* SPEC 大白框：全屏级编辑弹层（嵌套在表单弹窗之上，像编辑一份 txt 工作规范） */}
+      {specEditing && (
+        <div className="modal-mask" onClick={e => { e.stopPropagation(); setSpecEditing(false) }}>
+          <div className="modal-box spec-modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">📜 {name || '员工'} 的工作 SPEC</div>
+            <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 8, lineHeight: 1.7 }}>
+              写代码要有 spec，员工干活也要有"干活的 spec"——这里写的每一条规范，它每次执行任务和聊天时都会严格遵守（优先级高于系统默认流程）。
+              写完点「完成」回到表单，再点「保存」生效。
+            </div>
+            <textarea className="spec-editor" value={workSpec} onChange={e => setWorkSpec(e.target.value)}
+              placeholder={'把这个员工在你这里干活要遵守的规矩写下来，例如：\n\n- 需求里的飞书链接（*.feishu.cn）必须用 lark-cli 解析，禁止直接 curl\n- 开发完成后必须创建 E2E 测试任务自测，并在群聊里发言说明测什么、怎么判定\n- 提交信息用 conventional commits 格式（feat: / fix: / ...）\n- 只允许修改 xx 模块的代码，跨模块改动先在汇报里说明\n- 汇报一律中文、分点、先结论后细节\n- 遇到不确定的业务规则，写进「需要老板支持」，不要自己拍板'} />
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
+              <span style={{ flex: 1, fontSize: 11, color: 'var(--text-dim)', alignSelf: 'center' }}>{workSpec.length} 字</span>
+              <button className="btn btn-primary" onClick={() => setSpecEditing(false)}>完成</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -337,6 +416,11 @@ function EmployeeDetail({ empId, onBack, showToast }) {
   const running = demands.filter(d => d.status === 'RUNNING')
   const queuedCount = demands.filter(d => d.status === 'QUEUED').length
   const sorted = [...demands].reverse()   // 后端按创建序 → 倒序最新在前
+  // Shell 模式默认执行实例：最近执行过需求的实例 > 第一个绑定实例
+  const defaultShellInstance = (() => {
+    for (let i = demands.length - 1; i >= 0; i--) if (demands[i].instanceId) return demands[i].instanceId
+    return emp.instances?.[0]?.id || ''
+  })()
 
   return (
     <div>
@@ -354,6 +438,13 @@ function EmployeeDetail({ empId, onBack, showToast }) {
             const pm = EMP_PERMS.find(x => x.key === p)
             return <span key={p} className="hook-badge" title={`已授权：${pm?.label || p}`}>{pm?.icon || '🔓'} {pm ? pm.label.replace('创建 ', '') : p}</span>
           })}
+          {!!emp.workSpec && <span className="hook-badge" title={emp.workSpec}>📜 SPEC {emp.workSpec.length}字</span>}
+          {!!emp.autoPr && <span className="hook-badge" title="E2E 完结后自动执行 git qpr 并上报 Code Review 链接">🚀 自动PR</span>}
+          {!!emp.notifyInstanceId && (
+            <span className="hook-badge dim" title="飞书通知实例：员工的消息经它的机器人推给你">
+              📣 {(emp.instances || []).find(i => i.id === emp.notifyInstanceId)?.name || `#${emp.notifyInstanceId}`}
+            </span>
+          )}
         </div>
         <div style={{ flex: 1 }} />
         <button className="btn" onClick={() => setEditing(true)}>✏️ 编辑</button>
@@ -361,9 +452,10 @@ function EmployeeDetail({ empId, onBack, showToast }) {
         <button className="btn btn-primary" onClick={() => setDispatching(true)}>📮 下发需求</button>
       </div>
 
-      {/* 💬 双向聊天框：员工上报 + 老板直接对话派活（打开即已读） */}
+      {/* 💬 双向聊天框：员工上报 + 老板直接对话派活 + 🖥 Shell 直通命令（打开即已读） */}
       <EmpMsgPanel empId={empId} messages={data.messages} unreadCount={data.unreadCount}
-        chatProgress={data.chatProgress} emp={emp} replyTo={replyTo}
+        chatProgress={data.chatProgress} shellProgress={data.shellProgress} emp={emp}
+        defaultShellInstance={defaultShellInstance} replyTo={replyTo}
         clearReplyTo={() => setReplyTo(null)} showToast={showToast} />
 
       {/* 实例工位：哪个实例正在做哪个需求 */}
@@ -472,37 +564,50 @@ function EmployeeDetail({ empId, onBack, showToast }) {
 }
 
 /** 💬 员工主动上报聊天框（新消息在下，自动滚到底；打开详情页即全部已读） */
-function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, emp, replyTo, clearReplyTo, showToast }) {
+function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress, emp, defaultShellInstance, replyTo, clearReplyTo, showToast }) {
   const boxRef = useRef(null)
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
+  const [mode, setMode] = useState('chat')            // chat | shell
+  const [shellInstance, setShellInstance] = useState('')
   useEffect(() => {
     if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight
-  }, [messages?.length, chatProgress?.phase, chatProgress?.answerTail])
+  }, [messages?.length, chatProgress?.phase, chatProgress?.answerTail, shellProgress?.elapsedMs])
 
   async function send() {
     const t = text.trim()
     if (!t || sending) return
     setSending(true)
     try {
-      const res = await fetch(`/api/employees/${empId}/chat`, {
+      const url = mode === 'shell' ? `/api/employees/${empId}/shell` : `/api/employees/${empId}/chat`
+      const payload = mode === 'shell'
+        ? { command: t, instanceId: Number(shellInstance || defaultShellInstance) || null }
+        : { text: t, demandId: replyTo?.demandId || null }
+      const res = await fetch(url, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: t, demandId: replyTo?.demandId || null }),
+        body: JSON.stringify(payload),
       })
       const d = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(d.error || '发送失败')
       setText('')
-      if (replyTo) clearReplyTo()
+      if (mode === 'chat' && replyTo) clearReplyTo()
     } catch (e) { showToast(e.message, 'error') } finally { setSending(false) }
   }
 
-  const busy = !!chatProgress
+  const busy = !!chatProgress || !!shellProgress
   return (
     <div className="card" style={{ padding: '14px 16px' }}>
-      <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>
-        💬 聊天框
-        <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontSize: 11.5, marginLeft: 8 }}>
-          可以直接对话派小活（正式大任务建议走 📮 下发需求，有状态跟踪）
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 13, fontWeight: 700 }}>💬 聊天框</span>
+        {/* 模式切换：对话（经 Claude，可干活）/ Shell（直通命令行，确定性执行） */}
+        <span className="mode-switch">
+          <span className={'mode-opt' + (mode === 'chat' ? ' active' : '')} onClick={() => setMode('chat')}>💬 对话</span>
+          <span className={'mode-opt' + (mode === 'shell' ? ' active' : '')} onClick={() => setMode('shell')}>🖥 Shell</span>
+        </span>
+        <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontSize: 11.5 }}>
+          {mode === 'shell'
+            ? '命令在实例工作目录直接执行（不经 Claude），交互提问自动答 y，输出里的 URL 自动提取'
+            : '可以直接对话派小活（正式大任务建议走 📮 下发需求，有状态跟踪）'}
           {(messages?.length || 0) > 0 && <> · {messages.length} 条{unreadCount > 0 ? ` · ${unreadCount} 条未读` : ''}</>}
         </span>
       </div>
@@ -511,7 +616,20 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, emp, replyTo,
           {[...(messages || [])].reverse().map(m => m.sender === 'boss'
             ? <BossBubble key={m.id} m={m} />
             : <MsgBubble key={m.id} m={m} emp={emp} />)}
-          {busy && (
+          {shellProgress && (
+            <div className="emp-msg">
+              <div className="emp-msg-avatar">🖥</div>
+              <div className="emp-msg-bubble" style={{ borderLeftColor: '#475569' }}>
+                <div className="emp-msg-head">
+                  <b style={{ color: '#475569' }}>⚙️ 正在执行命令…</b>
+                  {shellProgress.instanceName && <span>📡 {shellProgress.instanceName}</span>}
+                  <span>{fmtDur(shellProgress.elapsedMs)}</span>
+                </div>
+                <div className="emp-msg-content" style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>$ {shellProgress.command}</div>
+              </div>
+            </div>
+          )}
+          {!shellProgress && chatProgress && (
             <div className="emp-msg">
               <div className="emp-msg-avatar">{emp?.emoji || '👤'}</div>
               <div className="emp-msg-bubble" style={{ borderLeftColor: '#2563eb' }}>
@@ -531,20 +649,37 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, emp, replyTo,
         </div>
       )}
       <div className="emp-chat-input">
-        {replyTo && (
+        {mode === 'shell' && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>执行实例：</span>
+            <select className="form-input" style={{ width: 'auto', padding: '3px 8px', fontSize: 12 }}
+              value={shellInstance || String(defaultShellInstance || '')}
+              onChange={e => setShellInstance(e.target.value)}>
+              {(emp?.instances || []).map(i => <option key={i.id} value={i.id}>📡 {i.name}</option>)}
+            </select>
+            <span style={{ fontSize: 10.5, color: '#b45309' }} title="Shell 是面板管理员的直通通道，以服务端进程权限执行，不受 Claude 沙箱档位约束">
+              ⚠ admin 直通通道（不经沙箱）
+            </span>
+          </div>
+        )}
+        {replyTo && mode === 'chat' && (
           <div className="reply-chip">
             💬 追问需求「{replyTo.title}」
             <span onClick={clearReplyTo} style={{ cursor: 'pointer', marginLeft: 6, fontWeight: 700 }}>✕</span>
           </div>
         )}
         <div style={{ display: 'flex', gap: 8 }}>
-          <input className="form-input" style={{ flex: 1, padding: '7px 10px' }}
-            placeholder={busy ? '员工正在回复，稍候…' : '对员工说点什么，可以直接安排小事（Enter 发送）'}
+          <input className="form-input" style={{ flex: 1, padding: '7px 10px', fontFamily: mode === 'shell' ? 'var(--font-mono)' : undefined }}
+            placeholder={busy
+              ? (shellProgress ? '命令执行中，稍候…' : '员工正在回复，稍候…')
+              : (mode === 'shell'
+                ? '输入命令直接执行，如 git qpr（Enter 发送，120s 超时）'
+                : '对员工说点什么，可以直接安排小事（Enter 发送）')}
             value={text} disabled={busy || sending}
             onChange={e => setText(e.target.value)}
             onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
           <button className="btn btn-primary" onClick={send} disabled={!text.trim() || busy || sending}>
-            {sending ? '发送中…' : '发送'}
+            {sending ? '发送中…' : mode === 'shell' ? '▶ 执行' : '发送'}
           </button>
         </div>
       </div>
@@ -580,7 +715,7 @@ function MsgBubble({ m, emp }) {
             {m.feishuPushed ? '📱✓ 飞书已推' : '📱✗'}
           </span>
         </div>
-        <div className="emp-msg-content">{m.content}</div>
+        <div className="emp-msg-content">{linkify(m.content)}</div>
       </div>
     </div>
   )
