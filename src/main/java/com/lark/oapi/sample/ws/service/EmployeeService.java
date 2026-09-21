@@ -738,11 +738,15 @@ public class EmployeeService {
         });
     }
 
-    /** 真正执行：cmd /c + 自动答 y + 超时强杀 + 输出截断 + URL 提取，返回 SHELL 消息正文 */
+    /** 真正执行：系统 shell（Windows cmd /c，Linux/macOS bash -lc）+ 自动答 y + 超时强杀 + 输出截断 + URL 提取，返回 SHELL 消息正文 */
     private String execShell(ShellTask task, Long instId) throws Exception {
         BotInstance inst = instanceRepo.findById(instId).orElseThrow();
         String dir = firstNonBlank(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
-        ProcessBuilder pb = new ProcessBuilder("cmd.exe", "/c", task.command);
+        // 跨平台 shell：Windows 用 cmd /c；Linux/macOS 用 bash -lc（login shell 保证 nvm 等 PATH 生效）
+        String osName = System.getProperty("os.name", "").toLowerCase();
+        ProcessBuilder pb = osName.contains("win")
+                ? new ProcessBuilder("cmd.exe", "/c", task.command)
+                : new ProcessBuilder("bash", "-lc", task.command);
         if (!dir.isBlank()) pb.directory(new java.io.File(dir));
         pb.redirectErrorStream(true);
         long t0 = System.currentTimeMillis();

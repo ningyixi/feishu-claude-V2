@@ -8,7 +8,8 @@ spring:
     # "意外的网络错误"甚至损坏库文件（2026-09-07/08 两次实际发生）。
     # 不放 C: —— 系统盘空间紧张（用户要求）。
     # 旧库位置: <项目>/data/config.mv.db，迁移=停机后复制到 D:/feishu-claude-data/config.mv.db
-    url: jdbc:h2:file:D:/feishu-claude-data/config;WRITE_DELAY=2000
+    # 跨平台：Linux/macOS 部署时用环境变量覆盖，如 FEISHU_DB_PATH=/opt/feishu-claude-data/config
+    url: jdbc:h2:file:${FEISHU_DB_PATH:D:/feishu-claude-data/config};WRITE_DELAY=2000
     driver-class-name: org.h2.Driver
     username: sa
     password:

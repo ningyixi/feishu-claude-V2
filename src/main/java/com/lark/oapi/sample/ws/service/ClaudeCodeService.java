@@ -129,6 +129,15 @@ public class ClaudeCodeService {
     }
 
     /**
+     * 中途注入（steering）：把消息注入实例正在执行的轮次（下一个工具边界模型即可见，当场调整）。
+     * @return true=已注入；false=该实例当前没有进行中的轮次（调用方回退为常规排队消息）
+     */
+    public boolean steer(Long instanceId, String text) {
+        TerminalSession s = sessions.get(instanceId);
+        return s != null && s.steer(text);
+    }
+
+    /**
      * 销毁指定实例的终端
      */
     public void destroySession(Long instanceId) {

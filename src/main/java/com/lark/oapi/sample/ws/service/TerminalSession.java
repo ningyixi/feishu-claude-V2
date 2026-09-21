@@ -50,6 +50,8 @@ public class TerminalSession {
     private final String workingDir;
     private final String model;
     private final int sandboxLevel;    // 沙箱档位（SandboxPolicy.LEVEL_*），进程启动旗标的一部分
+    /** stdin 写入互斥：常规轮次写入 vs 中途注入（steer）——保证 NDJSON 行完整与顺序 */
+    private final Object stdinLock = new Object();
 
     private volatile Process process;
     private volatile BufferedWriter writer;
@@ -159,6 +161,44 @@ public class TerminalSession {
         log.info("[Terminal] 常驻进程已销毁: key={}", sessionKey);
     }
 
+    /**
+     * 中途注入（steering）— 把一条 user 消息直接写进<b>正在执行中的轮次</b>：
+     * CLI 会在下一个工具边界把它呈给模型，模型当场调整并并入同一个 result 回复。
+     * <p>
+     * 已实测验证（verify/steer/probe2.py，CLI 2.1.267）：Bash 工具飞行中注入，
+     * 注入指令出现在同一轮 result 里——与桌面交互式 Claude 的"排队消息中途送达"行为一致。
+     * <p>
+     * 不新建轮次、不经过 turnLock（正是为了绕开排队）；与常规写入共用 stdinLock 保证行完整。
+     *
+     * @return true=已注入进行中轮次；false=无活跃轮次/进程未就绪（调用方应回退排队 sendMessage）
+     */
+    public boolean steer(String text) {
+        if (text == null || text.isBlank()) return false;
+        synchronized (stdinLock) {
+            Turn t = currentTurn;
+            if (!isAlive() || t == null || t.future.isDone()) return false;
+            try {
+                JsonObject msg = new JsonObject();
+                msg.addProperty("type", "user");
+                msg.addProperty("session_id", "");
+                JsonObject messageObj = new JsonObject();
+                messageObj.addProperty("role", "user");
+                messageObj.addProperty("content", text);
+                msg.add("message", messageObj);
+                msg.add("parent_tool_use_id", JsonNull.INSTANCE);
+                writer.write(msg.toString());
+                writer.newLine();
+                writer.flush();
+                log.info("[Terminal] >> [steer 中途注入] {} ({}字)",
+                        text.substring(0, Math.min(80, text.length())), text.length());
+                return true;
+            } catch (Exception e) {
+                log.warn("[Terminal] steer 写入失败（调用方将回退排队）: {}", e.getMessage());
+                return false;
+            }
+        }
+    }
+
     /** 仅中止当前轮次（/new、/stop），不销毁进程。对照 openclaw-lark 的 abortCard 快路径。 */
     public void abortCurrentTurn() {
         Turn t = currentTurn;
@@ -255,7 +295,9 @@ public class TerminalSession {
                 }
             }
 
-            Turn turn = new Turn(listener);
+            // turn 装配 + stdin 写入 与 steer() 的检查+写入 用同一把锁互斥，保证消息顺序
+            final Turn turn = new Turn(listener);
+            synchronized (stdinLock) {
             currentTurn = turn;
             activityPhase = ActivityPhase.THINKING;
             currentToolName = null;
@@ -306,6 +348,7 @@ public class TerminalSession {
                 listener.onTurnError("发送失败: " + e.getMessage(), false);
                 return "❌ 发送失败: " + e.getMessage();
             }
+            }   // end synchronized (stdinLock)
 
             // 看门狗：仅兜底进程卡死/失控，不参与正常完成判定
             ScheduledFuture<?> wd = watchdog.scheduleAtFixedRate(

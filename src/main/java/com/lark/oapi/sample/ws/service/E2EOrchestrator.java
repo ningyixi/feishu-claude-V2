@@ -173,7 +173,17 @@ public class E2EOrchestrator {
                 }
                 start(task);
             } else if (!task.pipelineDone) {
-                taskService.postSystem(task, "ℹ️ 流水线执行中。要给某个成员单独发消息，请用 @程序员 / @测试设计师 / @执行者。");
+                // 流水线执行中：尝试把本条消息中途注入正在执行的成员轮次（即时纠偏，
+                // 例如"别构建 sqltool 了，sql 部分默认通过"）——实测 CLI 支持在工具执行中接收注入，
+                // 模型在下一个工具边界看到并当场调整，不必等整轮结束
+                E2ETaskService.TurnRecord at = task.activeTurn;
+                E2ETaskService.Member am = (at != null && "agent".equals(at.kind)) ? task.memberByRole(at.author) : null;
+                if (am != null && claudeCodeService.steer(am.instanceId, steerPrefix(text))) {
+                    taskService.postSystem(task, "⚡ 已中途注入 " + am.roleEmoji() + am.roleLabel()
+                            + " 正在执行的轮次——它会在下一个工具边界看到这条消息并当场调整（不用等本轮结束）。");
+                } else {
+                    taskService.postSystem(task, "ℹ️ 流水线执行中（当前时刻没有可注入的成员轮次，消息已记录进群聊）。要给某个成员单独发消息，请用 @程序员 / @测试设计师 / @执行者。");
+                }
             } else {
                 // 已完结 → 本条就是下一个任务：同群续派新一轮编排（群聊记录与右侧执行记录全部保留、递增）
                 startNewRun(task, text);
@@ -186,12 +196,25 @@ public class E2EOrchestrator {
             taskService.postSystem(task, "⚠️ 群里没有角色为 " + to + " 的成员。");
             return;
         }
-        // 直接单聊：成员自己的会话里没有别人的发言，附最近群聊摘要补上下文
+        // 直接单聊：优先中途注入（该成员正在执行本任务轮次时当场纠偏），否则排新轮次送达
         Thread.ofVirtual().name("e2e-direct-" + task.id).start(() -> {
+            E2ETaskService.TurnRecord at = task.activeTurn;
+            boolean myTurnRunning = at != null && "agent".equals(at.kind) && m.role.equals(at.author);
+            if (myTurnRunning && claudeCodeService.steer(m.instanceId, steerPrefix(text))) {
+                taskService.postSystem(task, "⚡ 已中途送达 " + m.roleEmoji() + m.roleLabel()
+                        + " 正在执行的轮次——它会在下一个工具边界看到这条消息并当场调整（不用等本轮结束）。");
+                return;
+            }
+            // 冷启动轮次：成员自己的会话里没有别人的发言，附最近群聊摘要补上下文
             String prompt = "【E2E 测试群聊 · 用户对你说话】\n" + text
                     + "\n\n== 群聊最近消息（背景补充） ==\n" + taskService.recentGroupDigest(task, 8, 300);
             runMemberTurn(task, m, prompt, text);
         });
+    }
+
+    /** 中途注入的消息头：表明来源、要求立即调整（比冷启动 prompt 短——执行中的轮次自带完整上下文） */
+    private static String steerPrefix(String text) {
+        return "【E2E 测试群聊 · 用户中途指示，请立即调整你当前的工作】\n" + text;
     }
 
     // ===== 流水线主体 =====
