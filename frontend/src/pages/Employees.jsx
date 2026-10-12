@@ -141,7 +141,7 @@ function EmployeeList({ onOpen, showToast }) {
                   return <span key={p} className="hook-badge" title={`已授权：${pm?.label || p}`}>{pm?.icon || '🔓'} {pm ? pm.label.replace('创建 ', '') : p}</span>
                 })}
                 {!!e.workSpec && <span className="hook-badge" title={e.workSpec}>📜 SPEC</span>}
-                {!!e.autoPr && <span className="hook-badge" title="E2E 完结后自动执行 git qpr">🚀 自动PR</span>}
+                {!!e.autoPr && <span className="hook-badge" title="任务完结后自动建分支并提交 PR">🚀 自动PR</span>}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -177,6 +177,7 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
   const [workSpec, setWorkSpec] = useState(initial?.workSpec || '')
   const [autoPr, setAutoPr] = useState(!!initial?.autoPr)
   const [notifyInstanceId, setNotifyInstanceId] = useState(initial?.notifyInstanceId || 0)
+  const [prBaseBranch, setPrBaseBranch] = useState(initial?.prBaseBranch || '')
   const [specEditing, setSpecEditing] = useState(false)   // SPEC 大白框（全屏编辑）
   const [instances, setInstances] = useState([])
   const [occupied, setOccupied] = useState({})   // String(instId) → 占用员工标签（编辑自己时排除自己）
@@ -211,7 +212,7 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
       const res = await fetch(initial ? `/api/employees/${initial.id}` : '/api/employees', {
         method: initial ? 'PUT' : 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: name.trim(), emoji, roleDesc, instanceIds: bound.map(Number), permissions: perms, reportIntervalMin, workSpec, autoPr, notifyInstanceId: Number(notifyInstanceId) || 0 }),
+        body: JSON.stringify({ name: name.trim(), emoji, roleDesc, instanceIds: bound.map(Number), permissions: perms, reportIntervalMin, workSpec, autoPr, prBaseBranch: prBaseBranch.trim(), notifyInstanceId: Number(notifyInstanceId) || 0 }),
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || '保存失败')
@@ -304,13 +305,19 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
         <div className="form-group">
           <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer' }}>
             <input type="checkbox" style={{ marginTop: 3 }} checked={autoPr} onChange={e => setAutoPr(e.target.checked)} />
-            <span>🚀 E2E 测试完结后自动提交 PR（<code>git qpr</code>）
+            <span>🚀 任务完结后自动提交 PR
               <span style={{ display: 'block', fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.6 }}>
-                该员工创建的 E2E 任务跑完后，系统自动在代码实例上执行 git qpr（你预置的全局 alias：自动带 reviewer、--no-edit、--assume-yes，全程无需交互；确定性执行、不经 Claude），
-                等它跑完后提取终端输出里的 Code Review 链接，以该员工名义经聊天框 + 飞书发给你。
+                需求完成（有 E2E 权限时为 E2E 完结）后，系统在实例工作目录自动：从最新基线新建专属分支 <code>feishu-claude/员工-任务-时间</code> → 提交改动 → <code>git push -u</code> → 开 PR
+                （repo 工程则设好跟踪分支后执行 <code>git qpr</code>）。无改动自动跳过；分支名与 PR 链接写入需求时间线/汇报，并经聊天框 + 飞书发给你。
               </span>
             </span>
           </label>
+          {autoPr && (
+            <div style={{ marginTop: 8 }}>
+              <label className="form-label">PR 目标分支 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 12 }}>留空=远端默认分支</span></label>
+              <input className="form-input" value={prBaseBranch} placeholder="如 main / develop" onChange={e => setPrBaseBranch(e.target.value)} />
+            </div>
+          )}
         </div>
         <div className="form-group">
           <label className="form-label">定期汇报 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 12 }}>有进行中/排队的工作时，按间隔主动汇报进度（飞书 + 面板红点）；任务完成/失败/卡住时始终会立即上报</span></label>
@@ -443,7 +450,7 @@ function EmployeeDetail({ empId, onBack, showToast }) {
             return <span key={p} className="hook-badge" title={`已授权：${pm?.label || p}`}>{pm?.icon || '🔓'} {pm ? pm.label.replace('创建 ', '') : p}</span>
           })}
           {!!emp.workSpec && <span className="hook-badge" title={emp.workSpec}>📜 SPEC {emp.workSpec.length}字</span>}
-          {!!emp.autoPr && <span className="hook-badge" title="E2E 完结后自动执行 git qpr 并上报 Code Review 链接">🚀 自动PR</span>}
+          {!!emp.autoPr && <span className="hook-badge" title={"任务完结后自动建分支并提交 PR" + (emp.prBaseBranch ? ` → ${emp.prBaseBranch}` : "")}>🚀 自动PR</span>}
           {!!emp.notifyInstanceId && (
             <span className="hook-badge dim" title="飞书通知实例：员工的消息经它的机器人推给你">
               📣 {(emp.instances || []).find(i => i.id === emp.notifyInstanceId)?.name || `#${emp.notifyInstanceId}`}
@@ -922,6 +929,8 @@ const TL_META = {
   text: { icon: '✍️', color: '#0f766e' },
   done: { icon: '✅', color: '#16a34a' },
   error: { icon: '❌', color: '#dc2626' },
+  pr: { icon: '🔀', color: '#0891b2' },
+  pr_done: { icon: '🔀', color: '#16a34a' },
 }
 const STATUS_TEXT = { QUEUED: '进入队列', RUNNING: '开工', DONE: '已完成', FAILED: '失败', CANCELLED: '已取消', INTERRUPTED: '被中断' }
 
@@ -971,6 +980,11 @@ function LiveTimeline({ events, running }) {
           case 'turn': body = <>开始执行{e.waitedMs > 1500 ? <span className="tl-meta">排队等待了 {fmtDur(e.waitedMs)}</span> : null}</>; break
           case 'thinking': body = <span className="tl-text tl-think">{e.text}</span>; break
           case 'text': body = <span className="tl-text">{e.text}</span>; break
+          case 'pr': body = <span className="tl-text">{e.text}</span>; break
+          case 'pr_done': body = <>{e.status === 'OK' ? 'PR 已提交' : e.status === 'NO_CHANGES' ? '无改动，跳过 PR' : 'PR 提交失败'}
+            {e.branch ? <code className="tl-detail">{e.branch}{e.base ? ` → ${e.base}` : ''}</code> : null}
+            {e.url ? <a href={e.url} target="_blank" rel="noreferrer" className="tl-meta">{e.url}</a> : null}
+            {e.error ? <span className="tl-meta" style={{ color: '#dc2626' }}>{e.error}</span> : null}</>; break
           case 'done': body = <>本轮结束 <span className="tl-meta">
             总 {fmtDur(e.durationMs)} · 工具 {e.toolCount} 次 / {fmtDur(e.toolElapsedMs)}
             {e.thinkingMs > 0 ? ` · 思考 ${fmtDur(e.thinkingMs)}` : ''}
