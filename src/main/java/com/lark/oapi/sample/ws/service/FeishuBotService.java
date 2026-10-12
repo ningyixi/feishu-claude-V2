@@ -138,6 +138,18 @@ public class FeishuBotService {
 
                         log.info("[Feishu][{}] 收到消息: openId={}, chatType={}, msgType={}", instance.getName(), openId, chatType, msgType);
 
+                        // 幂等：飞书长连接在重连/未及时 ack 时会重投同一条消息 → 同一需求被 Claude 执行两遍
+                        if (!firstDelivery(instanceId, messageId)) {
+                            log.info("[Feishu][{}] 重复投递，忽略: messageId={}", instance.getName(), messageId);
+                            return;
+                        }
+                        // 长时间断线后重连会补投积压的旧消息：超过 30 分钟的不再执行（避免半夜醒来跑一堆过期指令）
+                        String createTime = eventData.getMessage().getCreateTime();
+                        if (isExpired(createTime)) {
+                            log.warn("[Feishu][{}] 消息已过期（{}），忽略: messageId={}", instance.getName(), createTime, messageId);
+                            return;
+                        }
+
                         Thread.ofVirtual().name("msg-" + messageId).start(() -> {
                             try {
                                 handleMessage(instanceId, openId, chatType, chatId, messageId, msgType, rawContent);
@@ -287,6 +299,24 @@ public class FeishuBotService {
 
     /** 单张图片大小上限（base64 前的原始字节数） */
     private static final int MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+
+    // ===== 入站消息幂等（参考 larksuite/openclaw-lark src/messaging/inbound/dedup.ts） =====
+
+    private static final long MSG_EXPIRY_MS = 30L * 60 * 1000;
+    private final MessageDedup dedup = new MessageDedup(12L * 3600 * 1000, 5000);
+
+    boolean firstDelivery(Long instanceId, String messageId) {
+        return messageId == null || messageId.isBlank() || dedup.firstSeen(instanceId + ":" + messageId);
+    }
+
+    static boolean isExpired(String createTimeMs) {
+        if (createTimeMs == null || createTimeMs.isBlank()) return false;
+        try {
+            return System.currentTimeMillis() - Long.parseLong(createTimeMs.trim()) > MSG_EXPIRY_MS;
+        } catch (NumberFormatException e) {
+            return false;
+        }
+    }
 
     private void handleMessage(Long instanceId, String openId, String chatType, String chatId, String messageId, String msgType, String rawContent) {
         InstanceConnection conn = connections.get(instanceId);
