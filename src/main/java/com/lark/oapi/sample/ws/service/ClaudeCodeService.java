@@ -123,6 +123,99 @@ public class ClaudeCodeService {
         return a.equals(b);
     }
 
+    // ===== 独立通道（lane）：数字员工需求/聊天专用会话，不与实例主会话（飞书私聊/E2E/供应商）共用 =====
+
+    /** 空闲 lane 保留时长：需求完成后仍可带上下文追问 */
+    private static final long LANE_IDLE_TTL_MS = Long.getLong("claude.laneIdleTtlMinutes", 30L) * 60_000L;
+    /** 空闲 lane 最多保留个数（超出按最久未用淘汰，防进程堆积） */
+    private static final int LANE_IDLE_CAP = Integer.getInteger("claude.laneIdleCap", 6);
+
+    private final Map<String, TerminalSession> lanes = new ConcurrentHashMap<>();
+    private final Map<String, Long> laneLastUsed = new ConcurrentHashMap<>();
+
+    /**
+     * 在独立 lane 上对话：lane 首次使用时以实例的工作目录/模型/沙箱档位起一个新的 CLI 进程（全新上下文），
+     * 后续同 lane 复用。与实例主会话互不排队、互不污染上下文。
+     */
+    public String chatInLane(String lane, Long instanceId, String message, String workingDir, String model,
+                             TurnListener listener) {
+        try {
+            TerminalSession s = getOrCreateLane(lane, instanceId, workingDir, model);
+            laneLastUsed.put(lane, System.currentTimeMillis());
+            log.info("[ClaudeCode][lane {}] 发送消息 (instance={})", lane, instanceId);
+            try {
+                return s.sendMessage(message, null, listener);
+            } finally {
+                laneLastUsed.put(lane, System.currentTimeMillis());
+            }
+        } catch (Exception e) {
+            log.error("[ClaudeCode][lane {}] 对话失败", lane, e);
+            if (listener != null) listener.onTurnError("Claude 对话失败: " + e.getMessage(), false);
+            return "❌ Claude 对话失败: " + e.getMessage();
+        }
+    }
+
+    private synchronized TerminalSession getOrCreateLane(String lane, Long instanceId, String workingDir, String model)
+            throws IOException {
+        int sandboxLevel = instanceRepo.findById(instanceId)
+                .map(com.lark.oapi.sample.ws.model.entity.BotInstance::getSandboxLevel)
+                .orElse(SandboxPolicy.LEVEL_FULL);
+        TerminalSession s = lanes.get(lane);
+        if (s != null && s.isAlive() && nullSafeEquals(s.getWorkingDir(), workingDir == null ? "" : workingDir)
+                && s.getSandboxLevel() == sandboxLevel) {
+            return s;
+        }
+        if (s != null) s.destroy();
+        evictIdleLanes(LANE_IDLE_CAP - 1);
+        s = new TerminalSession("lane:" + lane, workingDir, model, sandboxLevel);
+        s.start();
+        lanes.put(lane, s);
+        log.info("[ClaudeCode] 创建独立会话 lane={}, instance={}, dir={}", lane, instanceId, workingDir);
+        return s;
+    }
+
+    public TerminalSession getLaneSession(String lane) {
+        return lane != null ? lanes.get(lane) : null;
+    }
+
+    public boolean hasLiveLane(String lane) {
+        TerminalSession s = getLaneSession(lane);
+        return s != null && s.isAlive();
+    }
+
+    public void destroyLane(String lane) {
+        TerminalSession s = lanes.remove(lane);
+        laneLastUsed.remove(lane);
+        if (s != null) s.destroy();
+    }
+
+    /** 只保留 keep 个空闲 lane（进行中的轮次永不淘汰） */
+    private void evictIdleLanes(int keep) {
+        var idle = lanes.entrySet().stream()
+                .filter(e -> !e.getValue().isTurnActive() && e.getValue().getQueuedCount() == 0)
+                .sorted(java.util.Comparator.comparingLong(e -> laneLastUsed.getOrDefault(e.getKey(), 0L)))
+                .map(Map.Entry::getKey).toList();
+        for (int i = 0; i < idle.size() - Math.max(0, keep); i++) {
+            log.info("[ClaudeCode] 淘汰空闲 lane: {}", idle.get(i));
+            destroyLane(idle.get(i));
+        }
+    }
+
+    /** 定时回收：空闲超过 TTL 或进程已死的 lane */
+    @org.springframework.scheduling.annotation.Scheduled(fixedDelay = 60_000)
+    public void reapLanes() {
+        long now = System.currentTimeMillis();
+        for (var e : new java.util.ArrayList<>(lanes.entrySet())) {
+            TerminalSession s = e.getValue();
+            boolean busy = s.isTurnActive() || s.getQueuedCount() > 0;
+            if (!s.isAlive() && !busy) { destroyLane(e.getKey()); continue; }
+            if (!busy && now - laneLastUsed.getOrDefault(e.getKey(), 0L) > LANE_IDLE_TTL_MS) {
+                log.info("[ClaudeCode] 回收空闲 lane: {}", e.getKey());
+                destroyLane(e.getKey());
+            }
+        }
+    }
+
     /** 获取实例的终端会话（可能为 null = 尚未创建），供状态服务读取活动阶段 */
     public TerminalSession getSession(Long instanceId) {
         return sessions.get(instanceId);
@@ -154,6 +247,8 @@ public class ClaudeCodeService {
     public void destroyAll() {
         sessions.values().forEach(TerminalSession::destroy);
         sessions.clear();
+        lanes.values().forEach(TerminalSession::destroy);
+        lanes.clear();
     }
 
     /**

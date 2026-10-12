@@ -36,8 +36,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>需求下发即入队（QUEUED），{@link #scheduleQueues} 把最老的需求配对到空闲绑定实例</li>
  *   <li>每员工每实例同一时刻只跑一个需求；绑定 N 个实例 = 最多 N 个需求并行</li>
  *   <li>手动指定实例的需求只等它的实例空闲；自动分派按绑定列表顺序取第一个空闲实例</li>
- *   <li>执行 = 实例常驻会话上的一个 turn（与飞书私聊/E2E/供应商工作台同一条路径，
- *       turnLock 天然串行——跨员工/跨功能共用实例时排队，进度快照展示 queueDepth）</li>
+ *   <li>执行 = 每个需求一个独立 CLI 会话（lane "demand-{id}"，全新上下文），不再排在实例主会话
+ *       （飞书私聊/E2E/供应商）后面，也不继承之前需求累积的上下文；完成后空闲保留 30 分钟供追问</li>
  *   <li>一个需求完成 → finally 链式触发下一次调度</li>
  * </ul>
  * 实时进度：内存 ProgressSnapshot（TurnListener 采集），前端 3s 轮询经 REST 读取；
@@ -346,8 +346,9 @@ public class EmployeeService {
         Thread.ofVirtual().name("emp-demand-" + demandId).start(() -> {
             String dir = firstNonBlank(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
             try {
-                String reply = claudeCodeService.chat(instanceId, "employee-" + empId + "-d" + demandId,
-                        prompt, null, dir, inst.getClaudeModel(), listener);
+                // 每个需求一个全新的独立会话：不排在飞书私聊/E2E 后面，也不继承之前需求累积的上下文
+                String reply = claudeCodeService.chatInLane(demandLane(demandId), instanceId,
+                        prompt, dir, inst.getClaudeModel(), listener);
                 if (reply != null && (reply.startsWith("❌") || reply.startsWith("⏰"))) {
                     markFailed(demandId, reply);
                 } else {
@@ -364,6 +365,12 @@ public class EmployeeService {
             }
         });
     }
+
+    /** 需求专属会话 lane（完成后空闲保留一段时间供带上下文追问） */
+    static String demandLane(Long demandId) { return "demand-" + demandId; }
+
+    /** 员工聊天会话 lane（每员工每实例一个，跨聊天保留记忆，与实例主会话隔离） */
+    static String chatLane(Long empId, Long instanceId) { return "empchat-" + empId + "-i" + instanceId; }
 
     /** 终态落库带守卫：需求可能已被取消/员工被删——非 RUNNING 不覆盖 */
     private void markDone(Long demandId, String result) {
@@ -443,7 +450,7 @@ public class EmployeeService {
     private void abortIfTurnStarted(EmployeeDemand d) {
         ProgressSnapshot snap = progress.get(d.getId());
         if (snap != null && snap.turnStarted && d.getInstanceId() != null) {
-            TerminalSession s = claudeCodeService.getSession(d.getInstanceId());
+            TerminalSession s = claudeCodeService.getLaneSession(demandLane(d.getId()));
             if (s != null) s.abortCurrentTurn();
         }
     }
@@ -583,6 +590,7 @@ public class EmployeeService {
         public final Long instanceId;
         public final Long demandId;   // 追问上下文（可空）
         public final ProgressSnapshot snap = new ProgressSnapshot();
+        public volatile String lane;
 
         ChatTurn(Long instanceId, Long demandId) {
             this.instanceId = instanceId;
@@ -636,9 +644,13 @@ public class EmployeeService {
             try {
                 BotInstance inst = instanceRepo.findById(instId).orElseThrow();
                 String dir = firstNonBlank(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
-                String reply = claudeCodeService.chat(instId, "employee-" + empId + "-chat",
-                        chatPrompt(emp, text.trim(), ctxTitle), null, dir, inst.getClaudeModel(),
-                        new ProgressListener(empId, null, instId, turn.snap));
+                // 带需求追问且该需求会话还在 → 直接在需求会话里问（记忆最全）；否则用员工聊天会话
+                String lane = demandId != null && claudeCodeService.hasLiveLane(demandLane(demandId))
+                        ? demandLane(demandId) : chatLane(empId, instId);
+                turn.lane = lane;
+                String reply = claudeCodeService.chatInLane(lane, instId,
+                        chatPrompt(emp, text.trim(), ctxTitle), dir, inst.getClaudeModel(),
+                        new ProgressListener(empId, null, instId, turn.snap, lane));
                 String content = reply == null || reply.isBlank() ? "（无回复内容）" : reply;
                 postMessage(emp, "CHAT", content, demandId, instId);   // 员工回复：落库 + 飞书推送
             } catch (Exception e) {
@@ -672,7 +684,7 @@ public class EmployeeService {
     public JsonObject chatProgressJson(Long employeeId) {
         ChatTurn t = chatTurns.get(employeeId);
         if (t == null) return null;
-        JsonObject o = snapshotJson(t.snap, t.instanceId);
+        JsonObject o = snapshotJson(t.snap, t.lane);
         if (o != null) {
             o.addProperty("instanceId", t.instanceId);
             if (t.demandId != null) o.addProperty("demandId", t.demandId);
@@ -1086,11 +1098,11 @@ public class EmployeeService {
 
     /** demandId → 进度 JSON（无快照返回 null） */
     public JsonObject progressJson(Long demandId, Long instanceId) {
-        return snapshotJson(progress.get(demandId), instanceId);
+        return snapshotJson(progress.get(demandId), demandLane(demandId));
     }
 
     /** 快照序列化（需求进度与聊天进度共用；queueDepth 实时取会话队列长度） */
-    private JsonObject snapshotJson(ProgressSnapshot snap, Long instanceId) {
+    private JsonObject snapshotJson(ProgressSnapshot snap, String lane) {
         if (snap == null) return null;
         JsonObject o = new JsonObject();
         o.addProperty("phase", snap.phase);
@@ -1103,7 +1115,7 @@ public class EmployeeService {
         o.addProperty("answerTail", snap.answerTail);
         o.addProperty("toolCount", snap.toolCount);
         if (snap.errorTail != null) o.addProperty("errorTail", snap.errorTail);
-        TerminalSession s = instanceId != null ? claudeCodeService.getSession(instanceId) : null;
+        TerminalSession s = claudeCodeService.getLaneSession(lane);
         o.addProperty("queueDepth", s != null ? s.getQueuedCount() : 0);
         JsonArray tools = new JsonArray();
         synchronized (snap.tools) {
@@ -1144,12 +1156,15 @@ public class EmployeeService {
         private long lastThinkPub;
         private final StringBuilder thinkBuf = new StringBuilder();
 
+        private final String lane;
+
         ProgressListener(Long employeeId, Long demandId, Long instanceId) {
-            this(employeeId, demandId, instanceId, new ProgressSnapshot());
+            this(employeeId, demandId, instanceId, new ProgressSnapshot(), demandLane(demandId));
             progress.put(demandId, snap);
         }
 
-        ProgressListener(Long employeeId, Long demandId, Long instanceId, ProgressSnapshot snapshot) {
+        ProgressListener(Long employeeId, Long demandId, Long instanceId, ProgressSnapshot snapshot, String lane) {
+            this.lane = lane;
             this.employeeId = employeeId;
             this.demandId = demandId;
             this.instanceId = instanceId;
@@ -1202,7 +1217,7 @@ public class EmployeeService {
             try {
                 EmployeeDemand d = demandRepo.findById(demandId).orElse(null);
                 if (d == null || !"RUNNING".equals(d.getStatus())) {
-                    TerminalSession s = claudeCodeService.getSession(instanceId);
+                    TerminalSession s = claudeCodeService.getLaneSession(lane);
                     if (s != null) s.abortCurrentTurn();
                 }
             } catch (Exception ignored) {}
@@ -1212,7 +1227,7 @@ public class EmployeeService {
         public void onQueued() {
             snap.queued = true;
             snap.phase = "排队中";
-            TerminalSession s = instanceId != null ? claudeCodeService.getSession(instanceId) : null;
+            TerminalSession s = claudeCodeService.getLaneSession(lane);
             JsonObject o = obj("phase", "排队中");
             o.addProperty("queueDepth", s != null ? s.getQueuedCount() + 1 : 1);
             o.addProperty("reason", "实例正在处理其他任务（飞书私聊/E2E/其他员工），本任务排队等待");
