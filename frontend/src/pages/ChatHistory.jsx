@@ -149,7 +149,7 @@ export default function ChatHistory({ instanceId, instanceName, onBack }) {
               }}>
                 {/* 时间标签 */}
                 <div style={{
-                  fontSize: '11px',
+                  fontSize: 12,
                   color: 'var(--text-dim)',
                   marginBottom: '3px',
                   textAlign: isUser ? 'right' : 'left',

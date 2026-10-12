@@ -11,7 +11,7 @@ const NAV = [
   { to: '/', label: '📡', title: '实例' },
   { to: '/e2e', label: '🧪', title: 'E2E 测试' },
   { to: '/hooks', label: '🪝', title: 'Hook' },
-  { to: '/supplier', label: '🏭', title: '供应商工作台' },
+  { to: '/supplier', label: '🏭', title: '供应商工作台', short: '供应商' },
   { to: '/employees', label: '👔', title: '数字员工' },
 ]
 
@@ -48,23 +48,24 @@ function Panel({ onLogout }) {
   return (
     <BrowserRouter>
       <div className="app">
-        <nav className="sidebar">
-          <div className="sidebar-brand">🤖</div>
+        <nav className="sidebar" aria-label="主导航">
+          <div className="sidebar-brand" aria-hidden="true">🤖</div>
           {NAV.map(n => (
             <NavLink key={n.to} to={n.to} end={n.to === '/'}
               className={({ isActive }) => 'nav-item' + (isActive ? ' active' : '')}
+              aria-label={n.to === '/employees' && empUnread > 0 ? `${n.title}，${empUnread} 条未读` : n.title}
               title={n.to === '/employees' && empUnread > 0
                 ? `${n.title} · ${empUnread} 条未读上报` : n.title}>
-              <span className="nav-icon">{n.label}
+              <span className="nav-icon" aria-hidden="true">{n.label}
                 {n.to === '/employees' && empUnread > 0 && (
                   <span className="nav-badge">{empUnread > 99 ? '99+' : empUnread}</span>
                 )}
               </span>
-              <span className="nav-label">{n.title}</span>
+              <span className="nav-label">{n.short || n.title}</span>
             </NavLink>
           ))}
-          <button className="nav-item nav-logout" onClick={onLogout} title="退出登录">
-            <span className="nav-icon">🚪</span>
+          <button className="nav-item nav-logout" onClick={onLogout} title="退出登录" aria-label="退出登录">
+            <span className="nav-icon" aria-hidden="true">🚪</span>
             <span className="nav-label">退出</span>
           </button>
         </nav>

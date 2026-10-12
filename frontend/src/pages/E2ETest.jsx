@@ -570,7 +570,7 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
         {ROLES.map(r => (
           <div key={r.key}>
             <label className="form-label" style={{ fontSize: 13 }}>
-              {r.emoji} {r.label} <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>{r.hint}</span>
+              {r.emoji} {r.label} <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 12 }}>{r.hint}</span>
             </label>
             <select className="form-input" style={{ padding: '6px 8px' }}
               value={pick[r.key]} onChange={e => setPick(p => ({ ...p, [r.key]: e.target.value }))}>
@@ -601,7 +601,7 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
               onChange={() => setCommMode('filesystem')} />
             <span>
               📁 <b>共享文件系统</b>（黑板模式）
-              <span style={{ display: 'block', fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.6 }}>
+              <span style={{ display: 'block', fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.6 }}>
                 成员在同一工作目录经 .e2e/任务ID/ 文件交换大内容（改动说明/用例/报告），群聊只留精简摘要。需成员目录相同才发挥全部效果。
               </span>
             </span>
@@ -611,7 +611,7 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
               onChange={() => setCommMode('a2a')} />
             <span>
               🔗 <b>A2A</b>（Agent2Agent 协议）
-              <span style={{ display: 'block', fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.6 }}>
+              <span style={{ display: 'block', fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.6 }}>
                 工件作为任务信封载荷在成员间直传（编排器派发，状态全程追踪：待执行→执行中→完成/失败），
                 不依赖共享目录，<b>跨目录成员可用</b>。移植自开源项目 axocoatl 的 A2A 方案。
               </span>
@@ -654,10 +654,10 @@ function RunBlock({ run }) {
       <div className="run-block-head" onClick={() => setOpen(v => !v)}>
         <span>{done ? '✅' : failed ? '❌' : '⏸'} 第 {run.runIndex} 轮任务</span>
         <span className="run-req" title={run.requirement}>{truncate(run.requirement, 16)}</span>
-        <span style={{ marginLeft: 'auto', fontSize: 11, color: done ? 'var(--success, #16a34a)' : failed ? 'var(--error)' : 'var(--text-dim)' }}>
+        <span style={{ marginLeft: 'auto', fontSize: 12, color: done ? 'var(--success, #16a34a)' : failed ? 'var(--error)' : 'var(--text-dim)' }}>
           {passed}/{(run.cases || []).length}
         </span>
-        <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{open ? '▲' : '▼'}</span>
+        <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>{open ? '▲' : '▼'}</span>
       </div>
       {open && (
         <div className="run-block-body">
@@ -756,7 +756,7 @@ function RoundHistory({ rounds }) {
             return (
               <div key={c.id} className="round-case-row" title={note ? `${c.id}: ${note}` : c.id}>
                 <span>{st.icon}</span>
-                <b style={{ fontSize: 11 }}>{c.id}</b>
+                <b style={{ fontSize: 12 }}>{c.id}</b>
                 <span className="rc-title">{c.title}</span>
               </div>
             )
@@ -778,8 +778,8 @@ function CaseCard({ c }) {
         <span>{st.icon}</span>
         <b style={{ fontSize: 12 }}>{c.id}</b>
         <span style={{ fontSize: 12, flex: 1 }}>{c.title}</span>
-        <span style={{ fontSize: 11, color: st.color }}>{st.label}{c.status === 'running' && '…'}</span>
-        <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{open ? '▲' : '▼'}</span>
+        <span style={{ fontSize: 12, color: st.color }}>{st.label}{c.status === 'running' && '…'}</span>
+        <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>{open ? '▲' : '▼'}</span>
       </div>
       {open && (
         <div className="case-body">

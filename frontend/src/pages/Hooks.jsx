@@ -164,7 +164,7 @@ export default function Hooks() {
                           <td style={{ whiteSpace: 'nowrap' }}>{fmtTime(r.startedAt)}</td>
                           <td>{TRIGGER_LABEL[r.triggerType] || r.triggerType}</td>
                           <td style={{ color: rs.color, whiteSpace: 'nowrap' }}>{r.status === 'RUNNING' ? <span className="spinner" style={{ width: 10, height: 10 }} /> : rs.icon} {rs.label}</td>
-                          <td style={{ whiteSpace: 'nowrap', fontSize: 11 }}>{fmtTime(r.windowFrom)} → {fmtTime(r.windowTo)}</td>
+                          <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>{fmtTime(r.windowFrom)} → {fmtTime(r.windowTo)}</td>
                           <td>{r.messageCount ?? '—'}</td>
                           <td>{fmtDur(r.durationMs)}</td>
                           <td className="hook-summary" title={(r.judgeReason || '') + '\n' + (r.summary || '')}>
@@ -198,7 +198,7 @@ export default function Hooks() {
                   <td style={{ whiteSpace: 'nowrap' }}>{fmtTime(c.at)}</td>
                   <td>{hooks.find(h => h.id === c.hookId)?.name || `#${c.hookId}`}</td>
                   <td><code>{c.filePath}</code></td>
-                  <td style={{ whiteSpace: 'nowrap', fontSize: 11 }}>
+                  <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
                     {(c.sizeBefore ?? 0) === 0 && (c.sizeAfter ?? 0) > 0 ? '🆕 新增'
                       : (c.sizeAfter ?? 0) === 0 ? '🗑 删除'
                       : `${(c.sizeBefore / 1024).toFixed(1)}K → ${(c.sizeAfter / 1024).toFixed(1)}K`}
@@ -317,7 +317,7 @@ function HookForm({ hook, instances, onClose, onSaved, showToast }) {
                     <input type="checkbox" disabled={!!occ && !checked} checked={checked} onChange={() => toggleInst(i.id)} />
                     {i.name || `#${i.id}`}
                     {occ && (
-                      <span style={{ fontSize: 10.5, color: checked ? 'var(--text-dim)' : '#d97706' }}>
+                      <span style={{ fontSize: 12, color: checked ? 'var(--text-dim)' : '#d97706' }}>
                         👔 {occ}{checked ? ' 绑定（存量保留）' : ' 独占，需先解绑'}
                       </span>
                     )}

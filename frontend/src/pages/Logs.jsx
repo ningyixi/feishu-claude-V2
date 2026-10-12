@@ -71,7 +71,7 @@ export default function Logs() {
           onClick={() => setLogs([])}>
           清空
         </button>
-        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+        <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>
           {filtered.length} 条
         </span>
       </div>

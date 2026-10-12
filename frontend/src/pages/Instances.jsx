@@ -223,7 +223,7 @@ export default function Instances() {
               {/* 名称 + 实时状态 */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
                 <span style={{ fontSize: '14.5px', fontWeight: 700 }}>{inst.name || '(未命名)'}</span>
-                {!inst.enabled && !st && <span style={{ fontSize: '10.5px', color: 'var(--text-dim)' }}>已禁用</span>}
+                {!inst.enabled && !st && <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>已禁用</span>}
                 <StatusBadge st={st} />
               </div>
               {/* 徽章行（独占/沙箱，有才渲染） */}
@@ -264,27 +264,27 @@ export default function Instances() {
               {st?.detail && <div className="status-detail inst-detail" title={st.detail}>💬 {st.detail}</div>}
               {/* 操作行：图标 + 文字 */}
               <div style={{ display: 'flex', gap: 6, marginTop: 9, flexWrap: 'wrap' }}>
-                <button className="btn btn-primary" onClick={() => setChatInstance(inst)} style={{ fontSize: '11.5px', padding: '3px 9px' }}>💬 对话</button>
+                <button className="btn btn-primary" onClick={() => setChatInstance(inst)} style={{ fontSize: 12.5, padding: '3px 9px' }}>💬 对话</button>
                 <button className="btn" onClick={() => runTest(inst.id, 'feishu')} disabled={feishuTest?.status === 'loading'}
-                  style={{ fontSize: '11.5px', padding: '3px 9px' }} title="测试飞书连接">
+                  style={{ fontSize: 12.5, padding: '3px 9px' }} title="测试飞书连接">
                   {feishuTest?.status === 'loading' ? '⏳ 测试中' : '🐦 测飞书'}
                 </button>
                 <button className="btn" onClick={() => runTest(inst.id, 'claude')} disabled={claudeTest?.status === 'loading'}
-                  style={{ fontSize: '11.5px', padding: '3px 9px' }} title="测试 Claude">
+                  style={{ fontSize: 12.5, padding: '3px 9px' }} title="测试 Claude">
                   {claudeTest?.status === 'loading' ? '⏳ 测试中' : '🤖 测 Claude'}
                 </button>
-                <button className="btn" onClick={() => startEdit(inst)} style={{ fontSize: '11.5px', padding: '3px 9px', marginLeft: 'auto' }}>✏️ 编辑</button>
-                <button className="btn" onClick={() => handleDelete(inst.id)} style={{ fontSize: '11.5px', padding: '3px 9px', color: 'var(--error)' }}>🗑 删除</button>
+                <button className="btn" onClick={() => startEdit(inst)} style={{ fontSize: 12.5, padding: '3px 9px', marginLeft: 'auto' }}>✏️ 编辑</button>
+                <button className="btn" onClick={() => handleDelete(inst.id)} style={{ fontSize: 12.5, padding: '3px 9px', color: 'var(--error)' }}>🗑 删除</button>
               </div>
               {/* 测试结果：点过才显示，各一行小字 */}
               {feishuTest && feishuTest.status !== 'loading' && (
-                <div className={`test-result ${feishuTest.status}`} style={{ marginTop: 6, fontSize: '11px', padding: '4px 8px' }}>
+                <div className={`test-result ${feishuTest.status}`} style={{ marginTop: 6, fontSize: 12, padding: '4px 8px' }}>
                   🐦 {feishuTest.status === 'success' ? '✅' : '❌'} {feishuTest.message}
                   {feishuTest.detail && <span style={{ opacity: 0.75 }}> · {feishuTest.detail.substring(0, 60)}</span>}
                 </div>
               )}
               {claudeTest && claudeTest.status !== 'loading' && (
-                <div className={`test-result ${claudeTest.status}`} style={{ marginTop: 6, fontSize: '11px', padding: '4px 8px' }}>
+                <div className={`test-result ${claudeTest.status}`} style={{ marginTop: 6, fontSize: 12, padding: '4px 8px' }}>
                   🤖 {claudeTest.status === 'success' ? '✅' : '❌'} {claudeTest.message}
                   {claudeTest.detail && <span style={{ opacity: 0.75 }}> · {claudeTest.detail.substring(0, 60)}</span>}
                 </div>

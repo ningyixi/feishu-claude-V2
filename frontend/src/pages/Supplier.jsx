@@ -102,7 +102,7 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
                 <div>更新: {String(j.updatedAt || '').replace('T', ' ').substring(5, 16)}</div>
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
-                <button className="btn" style={{ fontSize: 11, padding: '2px 10px', color: 'var(--error)' }} onClick={e => remove(j, e)}>删除</button>
+                <button className="btn" style={{ fontSize: 12, padding: '2px 10px', color: 'var(--error)' }} onClick={e => remove(j, e)}>删除</button>
               </div>
             </div>
           )
@@ -445,7 +445,7 @@ function GameView({ jobId, onBack, showToast }) {
                       {cur.status === 'RUNNING' ? '执行中…' : (cur.artifact ? '🔄 带指示重跑' : '▶ 让实例执行')}
                     </button>
                   </div>
-                  {!job.instanceId && <div style={{ fontSize: 11, color: 'var(--error)', marginTop: 6 }}>⚠️ 还没绑定执行实例，先在右上角选择</div>}
+                  {!job.instanceId && <div style={{ fontSize: 12, color: 'var(--error)', marginTop: 6 }}>⚠️ 还没绑定执行实例，先在右上角选择</div>}
                   {cur.note && <div style={{ fontSize: 12, color: 'var(--error)', marginTop: 8 }}>⚠️ {cur.note}</div>}
                 </div>
               )}
@@ -458,11 +458,11 @@ function GameView({ jobId, onBack, showToast }) {
                     <div style={{ flex: 1 }} />
                     {editingArtifact ? (
                       <>
-                        <button className="btn" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => setEditingArtifact(false)}>取消</button>
-                        <button className="btn btn-primary" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => saveArtifact(cur.nodeId)}>保存</button>
+                        <button className="btn" style={{ fontSize: 12, padding: '3px 10px' }} onClick={() => setEditingArtifact(false)}>取消</button>
+                        <button className="btn btn-primary" style={{ fontSize: 12, padding: '3px 10px' }} onClick={() => saveArtifact(cur.nodeId)}>保存</button>
                       </>
                     ) : (
-                      <button className="btn" style={{ fontSize: 11, padding: '3px 10px' }}
+                      <button className="btn" style={{ fontSize: 12, padding: '3px 10px' }}
                         onClick={() => { setArtifactDraft(cur.artifact || ''); setEditingArtifact(true) }}>✏️ 编辑纠正</button>
                     )}
                   </div>
@@ -499,7 +499,7 @@ function GameView({ jobId, onBack, showToast }) {
                   <div style={{ fontSize: 12.5, fontWeight: isSel ? 700 : 500, color: n.status === 'DONE' ? '#16a34a' : 'var(--text)' }}>
                     {NODE_TYPE[n.type]?.icon} {n.title}
                   </div>
-                  <div style={{ fontSize: 10.5, color: 'var(--text-dim)', marginTop: 2 }}>
+                  <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 2 }}>
                     {NODE_TYPE[n.type]?.label} · <span style={{ color: st.color }}>{st.label}</span>
                     {n.artifact ? ' · 📄有工件' : ''}
                   </div>
@@ -507,7 +507,7 @@ function GameView({ jobId, onBack, showToast }) {
               </div>
             )
           })}
-          {running && <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 10 }}>🔄 实例执行中，状态每 4 秒自动刷新…</div>}
+          {running && <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 10 }}>🔄 实例执行中，状态每 4 秒自动刷新…</div>}
         </div>
       </div>
     </div>
@@ -603,11 +603,11 @@ function WorkflowEditor({ onBack, showToast }) {
               <span style={{ color: 'var(--text-dim)', fontSize: 12, width: 24 }}>{i + 1}</span>
               <span style={{ width: 90, fontSize: 12 }}>{NODE_TYPE[n.type]?.icon} {NODE_TYPE[n.type]?.label}</span>
               <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{n.title || '(未命名)'}</span>
-              <span style={{ fontSize: 11, color: 'var(--text-dim)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.description}</span>
-              <button className="btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={() => moveNode(i, -1)}>↑</button>
-              <button className="btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={() => moveNode(i, 1)}>↓</button>
-              <button className="btn" style={{ fontSize: 11, padding: '2px 8px' }} onClick={() => setNodeDraft({ index: i, node: { ...n } })}>编辑</button>
-              <button className="btn" style={{ fontSize: 11, padding: '2px 8px', color: 'var(--error)' }}
+              <span style={{ fontSize: 12, color: 'var(--text-dim)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.description}</span>
+              <button className="btn" style={{ fontSize: 12, padding: '2px 8px' }} onClick={() => moveNode(i, -1)}>↑</button>
+              <button className="btn" style={{ fontSize: 12, padding: '2px 8px' }} onClick={() => moveNode(i, 1)}>↓</button>
+              <button className="btn" style={{ fontSize: 12, padding: '2px 8px' }} onClick={() => setNodeDraft({ index: i, node: { ...n } })}>编辑</button>
+              <button className="btn" style={{ fontSize: 12, padding: '2px 8px', color: 'var(--error)' }}
                 onClick={() => setEditing(x => ({ ...x, nodes: x.nodes.filter((_, xi) => xi !== i) }))}>删</button>
             </div>
           ))}
@@ -615,7 +615,7 @@ function WorkflowEditor({ onBack, showToast }) {
             onClick={() => setNodeDraft({ index: -1, node: { id: `n${editing.nodes.length + 1}`, title: '', type: 'manual', description: '', prompt: '' } })}>
             + 添加节点
           </button>
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.8 }}>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.8 }}>
             节点 prompt 支持占位符：{'{supplierName} {supplierId} {libraryPath} {docs} {skills} {extra}'}（玩家在节点页填的补充指示）、{'{artifact:n1}'}（引用某节点工件）。
             存档配置了 Skill 时，即使 prompt 不写 {'{skills}'} 也会自动在末尾追加"可用技能"段。
           </div>

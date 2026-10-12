@@ -121,10 +121,10 @@ function EmployeeList({ onOpen, showToast }) {
                   {e.name}
                   {(e.unreadCount || 0) > 0 && <span className="unread-dot" title={`${e.unreadCount} 条未读上报`}>{e.unreadCount}</span>}
                 </div>
-                <div style={{ fontSize: 11.5, color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                <div style={{ fontSize: 12.5, color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
                   title={e.roleDesc}>{e.roleDesc || '未填职责描述'}</div>
               </div>
-              <button className="btn" style={{ fontSize: 11, padding: '2px 10px', color: 'var(--error)' }}
+              <button className="btn" style={{ fontSize: 12, padding: '2px 10px', color: 'var(--error)' }}
                 onClick={ev => remove(e, ev)}>删除</button>
             </div>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 5, marginTop: 10 }}>
@@ -151,7 +151,7 @@ function EmployeeList({ onOpen, showToast }) {
               {(e.stats?.failed || 0) > 0 && <span className="emp-stat" style={{ color: '#dc2626', background: 'rgba(220,38,38,0.10)' }}>✗ 失败 {e.stats.failed}</span>}
             </div>
             {(e.runningSummary || []).length > 0 && (
-              <div style={{ fontSize: 11.5, color: '#2563eb', marginTop: 8, lineHeight: 1.7 }}>
+              <div style={{ fontSize: 12.5, color: '#2563eb', marginTop: 8, lineHeight: 1.7 }}>
                 {e.runningSummary.map(r => (
                   <div key={r.demandId}>🔨 {r.instanceName}: {r.title}</div>
                 ))}
@@ -240,13 +240,13 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
           </div>
         </div>
         <div className="form-group">
-          <label className="form-label">职责描述 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>作为员工人设注入每次需求</span></label>
+          <label className="form-label">职责描述 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 12 }}>作为员工人设注入每次需求</span></label>
           <textarea className="form-input" rows={3} style={{ resize: 'vertical' }} value={roleDesc}
             onChange={e => setRoleDesc(e.target.value)}
             placeholder="例如：负责酒店供应商 API 对接——阅读接口文档、编写对接代码、自测并输出对接报告" />
         </div>
         <div className="form-group">
-          <label className="form-label">可操作的实例 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>多选；需求会在这些实例上自动并行（每实例同一时刻一个）</span></label>
+          <label className="form-label">可操作的实例 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 12 }}>多选；需求会在这些实例上自动并行（每实例同一时刻一个）</span></label>
           {instances.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>暂无可用实例（先到 📡 实例页创建并启用）</div>}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {instances.map(i => {
@@ -260,20 +260,20 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
                   <input type="checkbox" disabled={!!occ && !checked} checked={checked} onChange={() => toggle(i.id)} />
                   📡 {i.name || `#${i.id}`}
                   {occ && !checked
-                    ? <span style={{ fontSize: 11, color: '#d97706' }}>👔 已被「{occ}」绑定，需先解绑</span>
-                    : <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{i.claudeWorkingDir || i.shellWorkingDir || ''}</span>}
+                    ? <span style={{ fontSize: 12, color: '#d97706' }}>👔 已被「{occ}」绑定，需先解绑</span>
+                    : <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>{i.claudeWorkingDir || i.shellWorkingDir || ''}</span>}
                 </label>
               )
             })}
           </div>
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 6, lineHeight: 1.6 }}>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 6, lineHeight: 1.6 }}>
             🔒 绑定时实例自动开启<b>严格沙箱</b>（白名单命令 + 文件圈禁在工作目录 + 忽略仓库自带提权配置），解绑自动恢复全权限；
             这是员工工作机的默认安全档，admin 可在 📡 实例页手动调整。
           </div>
         </div>
         <div className="form-group">
           <label className="form-label">📣 飞书通知实例
-            <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>
+            <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 12 }}>
               员工的上报/聊天回复经哪个实例的飞书机器人推给你（从已绑定实例中选；该实例需配置「授权用户 Open ID」且保持连接）
             </span>
           </label>
@@ -291,7 +291,7 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
           </select>
         </div>
         <div className="form-group">
-          <label className="form-label">系统权限 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>授权后员工执行需求时可在本系统创建对应对象（服务端强制校验，未授权会被拒绝）</span></label>
+          <label className="form-label">系统权限 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 12 }}>授权后员工执行需求时可在本系统创建对应对象（服务端强制校验，未授权会被拒绝）</span></label>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
             {EMP_PERMS.map(p => (
               <label key={p.key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, cursor: 'pointer' }}>
@@ -305,7 +305,7 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
           <label style={{ display: 'flex', alignItems: 'flex-start', gap: 8, fontSize: 13, cursor: 'pointer' }}>
             <input type="checkbox" style={{ marginTop: 3 }} checked={autoPr} onChange={e => setAutoPr(e.target.checked)} />
             <span>🚀 E2E 测试完结后自动提交 PR（<code>git qpr</code>）
-              <span style={{ display: 'block', fontSize: 11, color: 'var(--text-dim)', lineHeight: 1.6 }}>
+              <span style={{ display: 'block', fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.6 }}>
                 该员工创建的 E2E 任务跑完后，系统自动在代码实例上执行 git qpr（你预置的全局 alias：自动带 reviewer、--no-edit、--assume-yes，全程无需交互；确定性执行、不经 Claude），
                 等它跑完后提取终端输出里的 Code Review 链接，以该员工名义经聊天框 + 飞书发给你。
               </span>
@@ -313,7 +313,7 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
           </label>
         </div>
         <div className="form-group">
-          <label className="form-label">定期汇报 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>有进行中/排队的工作时，按间隔主动汇报进度（飞书 + 面板红点）；任务完成/失败/卡住时始终会立即上报</span></label>
+          <label className="form-label">定期汇报 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 12 }}>有进行中/排队的工作时，按间隔主动汇报进度（飞书 + 面板红点）；任务完成/失败/卡住时始终会立即上报</span></label>
           <select className="form-input" value={reportIntervalMin} onChange={e => setReportIntervalMin(Number(e.target.value))}>
             <option value={0}>关闭（只在完成/失败/卡住时上报）</option>
             <option value={30}>每 30 分钟</option>
@@ -324,7 +324,7 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
         </div>
         <div className="form-group">
           <label className="form-label">📜 工作 SPEC
-            <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>
+            <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 12 }}>
               （写代码要有 spec，员工干活也要有"干活的 spec"——用这份文档规范该员工的行为：飞书链接怎么处理、代码/提交规范、流程要求、汇报格式…
               它会注入这个员工的每次任务与聊天，优先级高于系统默认流程）
             </span>
@@ -334,7 +334,7 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
           </div>
           <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
             <button className="btn" style={{ fontSize: 12, padding: '3px 12px' }} onClick={() => setSpecEditing(true)}>✏️ 编辑 SPEC</button>
-            {workSpec && <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{workSpec.length} 字 · 每次任务/聊天自动注入</span>}
+            {workSpec && <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>{workSpec.length} 字 · 每次任务/聊天自动注入</span>}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
@@ -348,14 +348,14 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
         <div className="modal-mask" onClick={e => { e.stopPropagation(); setSpecEditing(false) }}>
           <div className="modal-box spec-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-title">📜 {name || '员工'} 的工作 SPEC</div>
-            <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 8, lineHeight: 1.7 }}>
+            <div style={{ fontSize: 12.5, color: 'var(--text-dim)', marginBottom: 8, lineHeight: 1.7 }}>
               写代码要有 spec，员工干活也要有"干活的 spec"——这里写的每一条规范，它每次执行任务和聊天时都会严格遵守（优先级高于系统默认流程）。
               写完点「完成」回到表单，再点「保存」生效。
             </div>
             <textarea className="spec-editor" value={workSpec} onChange={e => setWorkSpec(e.target.value)}
               placeholder={'把这个员工在你这里干活要遵守的规矩写下来，例如：\n\n- 需求里的飞书链接（*.feishu.cn）必须用 lark-cli 解析，禁止直接 curl\n- 开发完成后必须创建 E2E 测试任务自测，并在群聊里发言说明测什么、怎么判定\n- 提交信息用 conventional commits 格式（feat: / fix: / ...）\n- 只允许修改 xx 模块的代码，跨模块改动先在汇报里说明\n- 汇报一律中文、分点、先结论后细节\n- 遇到不确定的业务规则，写进「需要老板支持」，不要自己拍板'} />
             <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
-              <span style={{ flex: 1, fontSize: 11, color: 'var(--text-dim)', alignSelf: 'center' }}>{workSpec.length} 字</span>
+              <span style={{ flex: 1, fontSize: 12, color: 'var(--text-dim)', alignSelf: 'center' }}>{workSpec.length} 字</span>
               <button className="btn btn-primary" onClick={() => setSpecEditing(false)}>完成</button>
             </div>
           </div>
@@ -474,8 +474,8 @@ function EmployeeDetail({ empId, onBack, showToast }) {
           <span className={'live-dot' + (connected ? ' on' : '')} title={connected ? '实时执行流已连接' : '实时流未连接，轮询兜底中'}>
             {connected ? '● 实时' : '○ 轮询'}
           </span>
-          {queuedCount > 0 && <span style={{ fontWeight: 400, color: '#d97706', fontSize: 11.5, marginLeft: 8 }}>⏳ {queuedCount} 个需求排队中</span>}
-          <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontSize: 11.5, marginLeft: 8 }}>每实例同一时刻做一个需求</span>
+          {queuedCount > 0 && <span style={{ fontWeight: 400, color: '#d97706', fontSize: 12.5, marginLeft: 8 }}>⏳ {queuedCount} 个需求排队中</span>}
+          <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontSize: 12.5, marginLeft: 8 }}>每实例同一时刻做一个需求</span>
         </div>
         {(emp.instances || []).length === 0 && (
           <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>⚠ 该员工还没绑定实例，点右上「✏️ 编辑」绑定。</div>
@@ -487,7 +487,7 @@ function EmployeeDetail({ empId, onBack, showToast }) {
             <div key={inst.id} className={'emp-station' + (d ? ' busy' : '')}>
               <div style={{ minWidth: 140 }}>
                 <div style={{ fontSize: 12.5, fontWeight: 700 }}>📡 {inst.name}</div>
-                <div style={{ fontSize: 10.5, color: d ? '#2563eb' : 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
+                <div style={{ fontSize: 12, color: d ? '#2563eb' : 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4, marginTop: 2 }}>
                   {d ? <><span className="spinner" style={{ width: 9, height: 9 }} /> 正在干活</> : '💤 等待需求'}
                 </div>
               </div>
@@ -495,11 +495,11 @@ function EmployeeDetail({ empId, onBack, showToast }) {
                 <div className="progress-box">
                   <div style={{ fontWeight: 600 }}>{d.title}</div>
                   {d.progress ? <ProgressView p={d.progress} />
-                    : <div style={{ color: 'var(--text-dim)', fontSize: 11.5 }}>正在启动…</div>}
+                    : <div style={{ color: 'var(--text-dim)', fontSize: 12.5 }}>正在启动…</div>}
                   <LiveTimeline events={timelines['d' + d.id]} running />
                 </div>
               ) : (
-                <div style={{ fontSize: 11.5, color: 'var(--text-dim)', alignSelf: 'center' }}>
+                <div style={{ fontSize: 12.5, color: 'var(--text-dim)', alignSelf: 'center' }}>
                   {waiting.length > 0 ? `⏳ 待派: ${waiting.map(w => w.title).join('、')}` : '—'}
                 </div>
               )}
@@ -526,20 +526,20 @@ function EmployeeDetail({ empId, onBack, showToast }) {
                 </span>
                 <b style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</b>
                 {d.instanceName && <span className="hook-badge dim" title="执行实例（映射关系）">📡 {d.instanceName}</span>}
-                <span style={{ fontSize: 11, color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
+                <span style={{ fontSize: 12, color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
                   {fmtTime(d.createdAt)}{d.elapsedMs > 0 ? ` · ${fmtDur(d.elapsedMs)}` : ''}
                 </span>
-                <span style={{ fontSize: 10, color: 'var(--text-dim)' }}>{open ? '▲' : '▼'}</span>
+                <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>{open ? '▲' : '▼'}</span>
               </div>
               {open && (
                 <div className="demand-body">
                   <div style={{ marginBottom: 8 }}>
-                    <b style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>需求内容</b>
+                    <b style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>需求内容</b>
                     <div style={{ whiteSpace: 'pre-wrap', marginTop: 2 }}>{d.requirement}</div>
                   </div>
                   {timelines['d' + d.id]?.length > 0 ? (
                     <div style={{ marginBottom: 8 }}>
-                      <b style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>执行过程</b>
+                      <b style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>执行过程</b>
                       <LiveTimeline events={timelines['d' + d.id]} running={d.status === 'RUNNING'} />
                     </div>
                   ) : ['DONE', 'FAILED'].includes(d.status) && <SavedTimeline demandId={d.id} />}
@@ -548,23 +548,23 @@ function EmployeeDetail({ empId, onBack, showToast }) {
                   )}
                   {d.result && (
                     <div>
-                      <b style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>完成汇报</b>
+                      <b style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>完成汇报</b>
                       <div className="md-body" style={{ marginTop: 2 }}>
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{d.result}</ReactMarkdown>
                       </div>
                     </div>
                   )}
                   <div style={{ display: 'flex', gap: 8, marginTop: 10, justifyContent: 'flex-end' }}>
-                    <button className="btn" style={{ fontSize: 11.5, padding: '3px 12px' }}
+                    <button className="btn" style={{ fontSize: 12.5, padding: '3px 12px' }}
                       onClick={() => setReplyTo({ demandId: d.id, title: d.title })}>💬 追问</button>
                     {(d.status === 'QUEUED' || d.status === 'RUNNING') && (
-                      <button className="btn" style={{ fontSize: 11.5, padding: '3px 12px', color: '#d97706' }}
+                      <button className="btn" style={{ fontSize: 12.5, padding: '3px 12px', color: '#d97706' }}
                         onClick={() => act(d.id, 'cancel')}>
                         {d.status === 'RUNNING' ? '⏹ 取消（已请求停止）' : '取消'}
                       </button>
                     )}
                     {['FAILED', 'CANCELLED', 'INTERRUPTED'].includes(d.status) && (
-                      <button className="btn" style={{ fontSize: 11.5, padding: '3px 12px' }} onClick={() => act(d.id, 'retry')}>🔄 重试</button>
+                      <button className="btn" style={{ fontSize: 12.5, padding: '3px 12px' }} onClick={() => act(d.id, 'retry')}>🔄 重试</button>
                     )}
                   </div>
                 </div>
@@ -628,7 +628,7 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
           <span className={'mode-opt' + (mode === 'chat' ? ' active' : '')} onClick={() => setMode('chat')}>💬 对话</span>
           <span className={'mode-opt' + (mode === 'shell' ? ' active' : '')} onClick={() => setMode('shell')}>🖥 Shell</span>
         </span>
-        <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontSize: 11.5 }}>
+        <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontSize: 12.5 }}>
           {mode === 'shell'
             ? '命令在实例工作目录直接执行（不经 Claude），交互提问自动答 y，输出里的 URL 自动提取'
             : '可以直接对话派小活（正式大任务建议走 📮 下发需求，有状态跟踪）'}
@@ -650,7 +650,7 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
                   {shellProgress.instanceName && <span>📡 {shellProgress.instanceName}</span>}
                   <span>{fmtDur(shellProgress.elapsedMs)}</span>
                 </div>
-                <div className="emp-msg-content" style={{ fontFamily: 'var(--font-mono)', fontSize: 11.5 }}>$ {shellProgress.command}</div>
+                <div className="emp-msg-content" style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5 }}>$ {shellProgress.command}</div>
               </div>
             </div>
           )}
@@ -677,13 +677,13 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
       <div className="emp-chat-input">
         {mode === 'shell' && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6, flexWrap: 'wrap' }}>
-            <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>执行实例：</span>
+            <span style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>执行实例：</span>
             <select className="form-input" style={{ width: 'auto', padding: '3px 8px', fontSize: 12 }}
               value={shellInstance || String(defaultShellInstance || '')}
               onChange={e => setShellInstance(e.target.value)}>
               {(emp?.instances || []).map(i => <option key={i.id} value={i.id}>📡 {i.name}</option>)}
             </select>
-            <span style={{ fontSize: 10.5, color: '#b45309' }} title="Shell 是面板管理员的直通通道，以服务端进程权限执行，不受 Claude 沙箱档位约束">
+            <span style={{ fontSize: 12, color: '#b45309' }} title="Shell 是面板管理员的直通通道，以服务端进程权限执行，不受 Claude 沙箱档位约束">
               ⚠ admin 直通通道（不经沙箱）
             </span>
           </div>
@@ -750,7 +750,7 @@ function MsgBubble({ m, emp }) {
 /** RUNNING 需求的实时进度盒（3s 轮询的内嵌快照） */
 function ProgressView({ p }) {  const phaseIcon = { '排队中': '⏳', '思考中': '🧠', '工具执行中': '🛠️', '生成回复': '✍️', '已结束': '✅' }[p.phase] || '🔄'
   return (
-    <div style={{ fontSize: 11.5, color: 'var(--text-dim)', lineHeight: 1.7 }}>
+    <div style={{ fontSize: 12.5, color: 'var(--text-dim)', lineHeight: 1.7 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
         <span>{phaseIcon} {p.phase}</span>
         {p.currentTool && <span>· 🛠 <code>{p.currentTool}</code>{p.currentToolDetail ? <code className="tl-detail">{p.currentToolDetail}</code> : null}</span>}
@@ -813,7 +813,7 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
             placeholder="描述清楚要做什么，例如：按 create-supplier skill 对接 XX 供应商的查价接口，完成自测并输出对接报告" />
         </div>
         <div className="form-group">
-          <label className="form-label">标题 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 11 }}>可选，缺省取需求前 30 字</span></label>
+          <label className="form-label">标题 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 12 }}>可选，缺省取需求前 30 字</span></label>
           <input className="form-input" value={title} onChange={e => setTitle(e.target.value)}
             placeholder="例如：对接 XX 供应商查价接口" />
         </div>
@@ -823,7 +823,7 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
             <option value="">🔄 自动分派（挑空闲的绑定实例）</option>
             {(emp.instances || []).map(i => <option key={i.id} value={i.id}>📡 指定: {i.name}</option>)}
           </select>
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
             需求自动入队开工；绑定多个实例时可同时各做一个需求（每实例同一时刻一个）。
           </div>
         </div>
@@ -1014,7 +1014,7 @@ function SavedTimeline({ demandId }) {
   if (!events || events.length === 0) return null
   return (
     <div style={{ marginBottom: 8 }}>
-      <b style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>执行过程（已保存）</b>
+      <b style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>执行过程（已保存）</b>
       <LiveTimeline events={events} running={false} />
     </div>
   )
