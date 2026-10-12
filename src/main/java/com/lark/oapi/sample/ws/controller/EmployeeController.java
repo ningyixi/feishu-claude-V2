@@ -305,7 +305,8 @@ public class EmployeeController {
             Long instanceId = body.has("instanceId") && !body.get("instanceId").isJsonNull()
                     ? body.get("instanceId").getAsLong() : null;
             EmployeeDemand d = employeeService.dispatchDemand(id, opt(body, "requirement"), opt(body, "title"), instanceId,
-                    workspaces(body));
+                    workspaces(body),
+                    body.has("confirmMismatch") && body.get("confirmMismatch").getAsBoolean());
             return ResponseEntity.ok(demandJson(d, instanceNames()).toString());
         } catch (IllegalArgumentException ex) {
             return badRequest(ex.getMessage());
@@ -356,6 +357,8 @@ public class EmployeeController {
             JsonObject io = new JsonObject();
             io.addProperty("id", iid);
             io.addProperty("name", instNames.getOrDefault(iid, "#" + iid + "(已删除)"));
+            String wd = employeeService.instanceDir(iid);
+            if (wd != null) io.addProperty("workingDir", wd);
             insts.add(io);
         }
         o.add("instanceIds", ids);

@@ -410,7 +410,42 @@ public class EmployeeService {
 
     public EmployeeDemand dispatchDemand(Long employeeId, String requirement, String title, Long instanceId,
                                          List<WorkspaceGitService.Workspace> workspaces) {
+        return dispatchDemand(employeeId, requirement, title, instanceId, workspaces, false);
+    }
+
+    /** 实例的工作目录（claude 优先，其次 shell）；实例不存在返回 null */
+    public String instanceDir(Long instanceId) {
+        return instanceRepo.findById(instanceId)
+                .map(i -> firstNonBlank(i.getClaudeWorkingDir(), i.getShellWorkingDir(), ""))
+                .filter(s -> !s.isBlank()).orElse(null);
+    }
+
+    static List<String> wsPaths(List<WorkspaceGitService.Workspace> ws) {
+        List<String> out = new ArrayList<>();
+        for (WorkspaceGitService.Workspace w : ws) out.add(w.path);
+        return out;
+    }
+
+    /**
+     * @param confirmMismatch 老板已确认：即使执行实例目录与工作区都不一致也照常下发
+     */
+    public EmployeeDemand dispatchDemand(Long employeeId, String requirement, String title, Long instanceId,
+                                         List<WorkspaceGitService.Workspace> workspaces, boolean confirmMismatch) {
         List<WorkspaceGitService.Workspace> ws = validateWorkspaces(workspaces);
+        if (!ws.isEmpty() && !confirmMismatch) {
+            List<String> paths = wsPaths(ws);
+            DigitalEmployee e0 = employeeRepo.findById(employeeId).orElse(null);
+            if (instanceId != null) {
+                String dir = instanceDir(instanceId);
+                if (dir == null || !PathMatch.matchesAny(dir, paths)) {
+                    throw new IllegalArgumentException("所选执行实例的工作目录（" + (dir != null ? dir : "未配置")
+                            + "）与任何工作区路径都不一致，写代码的实例目录应等于/包含/位于工作区内；如确认无误请勾选确认后再下发");
+                }
+            } else if (e0 != null && e0.instanceIdList().stream()
+                    .noneMatch(iid -> { String d = instanceDir(iid); return d != null && PathMatch.matchesAny(d, paths); })) {
+                throw new IllegalArgumentException("该员工绑定的实例里没有工作目录与工作区路径一致的，自动分派无法保证目录一致；如确认无误请勾选确认后再下发");
+            }
+        }
         DigitalEmployee emp = employeeRepo.findById(employeeId)
                 .orElseThrow(() -> new IllegalArgumentException("员工不存在: " + employeeId));
         if (requirement == null || requirement.isBlank()) throw new IllegalArgumentException("请填写需求内容");
@@ -460,8 +495,24 @@ public class EmployeeService {
                 }
                 if (!busy.contains(want)) target = want;
             } else {
-                for (Long iid : bound) {
-                    if (!busy.contains(iid) && instanceRepo.existsById(iid)) { target = iid; break; }
+                // 有工作区：优先目录覆盖主工作区的实例，其次与任一工作区一致的；都没有（老板已确认不一致）才退回任意实例。
+                // 有匹配实例但都忙 → 继续排队等它，不派给目录不一致的实例
+                List<String> paths = wsPaths(WorkspaceGitService.parse(d.getWorkspacesJson()));
+                int best = 0;
+                if (!paths.isEmpty()) {
+                    for (Long iid : bound) {
+                        String dir = instanceDir(iid);
+                        if (dir != null) best = Math.max(best, PathMatch.score(dir, paths));
+                    }
+                }
+                for (int want2 = best; want2 >= 0 && target == null; want2--) {
+                    for (Long iid : bound) {
+                        if (busy.contains(iid) || !instanceRepo.existsById(iid)) continue;
+                        String dir = instanceDir(iid);
+                        int sc = dir != null && !paths.isEmpty() ? PathMatch.score(dir, paths) : 0;
+                        if (sc == want2) { target = iid; break; }
+                    }
+                    if (best > 0) break;   // 只接受最佳分数档
                 }
             }
             if (target == null) continue;   // 无空闲实例，继续排队
