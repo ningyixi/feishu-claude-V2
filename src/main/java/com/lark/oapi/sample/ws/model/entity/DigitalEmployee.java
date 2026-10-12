@@ -41,12 +41,19 @@ public class DigitalEmployee {
     private String workSpec = "";
 
     /**
-     * E2E 任务完结后自动提交 PR（执行老板预置的全局 alias git qpr：自动带 reviewer + --assume-yes，
-     * 确定性 shell 执行，提取输出里的 Code Review 链接上报），聊天框+飞书以员工名义发送。
+     * 任务完结（需求完成 / E2E 完结）后自动提交 PR：GitPrService 新建专属分支并跟踪基线分支后提交、推送、开 PR（repo 工程走 git qpr），
+     * 链接写入需求汇报与时间线，并以员工名义发聊天框+飞书。
      * 包装类型防存量行 NULL（见 BotInstance.sandboxLevel 教训）。
      */
     @Column(name = "auto_pr")
     private Boolean autoPr = false;
+
+    /** 自动 PR 的目标（基线）分支；空 = 自动探测远端默认分支 */
+    @Column(name = "pr_base_branch")
+    private String prBaseBranch;
+
+    public String getPrBaseBranch() { return prBaseBranch; }
+    public void setPrBaseBranch(String v) { this.prBaseBranch = v != null && !v.isBlank() ? v.trim() : null; }
 
     /** 绑定的实例 id 列表（CSV）— 员工能操作哪些实例 */
     @Column(name = "instance_ids")

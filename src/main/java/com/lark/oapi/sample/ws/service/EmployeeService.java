@@ -61,6 +61,7 @@ public class EmployeeService {
     private final ClaudeCodeService claudeCodeService;
     private final FeishuBotService feishuBotService;
     private final EmployeeEventBus eventBus;
+    private final GitPrService gitPrService;
 
     /** demandId → 实时进度快照（内存态，终态即移除） */
     private final Map<Long, ProgressSnapshot> progress = new ConcurrentHashMap<>();
@@ -71,7 +72,8 @@ public class EmployeeService {
                            BotInstanceRepository instanceRepo,
                            ClaudeCodeService claudeCodeService,
                            FeishuBotService feishuBotService,
-                           EmployeeEventBus eventBus) {
+                           EmployeeEventBus eventBus,
+                           GitPrService gitPrService) {
         this.employeeRepo = employeeRepo;
         this.demandRepo = demandRepo;
         this.msgRepo = msgRepo;
@@ -79,6 +81,57 @@ public class EmployeeService {
         this.claudeCodeService = claudeCodeService;
         this.feishuBotService = feishuBotService;
         this.eventBus = eventBus;
+        this.gitPrService = gitPrService;
+    }
+
+    public DigitalEmployee setPrBaseBranch(Long empId, String base) {
+        DigitalEmployee e = employeeRepo.findById(empId).orElseThrow(() -> new IllegalArgumentException("员工不存在: " + empId));
+        if (base != null && !base.isBlank() && !base.trim().matches("[A-Za-z0-9._/\\-]+")) {
+            throw new IllegalArgumentException("PR 目标分支名不合法: " + base);
+        }
+        e.setPrBaseBranch(base);
+        return employeeRepo.save(e);
+    }
+
+    // ===== 自动提交 PR（需求完成 / E2E 完结） =====
+
+    /**
+     * 在实例工作目录走确定性 PR 流程（新分支 + 跟踪基线 + 提交 + 推送 + 开 PR），步骤推到时间线，
+     * 结果以 SHELL 消息上报（聊天框 + 飞书）。异步执行，不阻塞调用方。
+     *
+     * @param demandId 关联需求（时间线归属 + 结果追加到需求汇报）；E2E 触发时为 null
+     * @param taskTag  分支名里的任务标识，如 d12 / e2e-xxxx
+     */
+    public void submitPrAsync(DigitalEmployee emp, Long instanceId, Long demandId, String taskTag, String title, String trigger) {
+        Thread.ofVirtual().name("emp-pr-" + emp.getId()).start(() -> {
+            BotInstance inst = instanceRepo.findById(instanceId).orElse(null);
+            String dir = inst != null ? firstNonBlank(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "") : "";
+            java.util.function.Consumer<String> onStep = s -> {
+                JsonObject o = new JsonObject();
+                o.addProperty("text", s);
+                eventBus.publish(emp.getId(), "pr", demandId, "demand", o);
+            };
+            onStep.accept("🚀 开始自动提交 PR（" + trigger + "）");
+            GitPrService.Result r = gitPrService.submit(dir, emp.getName(), taskTag, title, emp.getPrBaseBranch(), onStep);
+            JsonObject done = new JsonObject();
+            done.addProperty("status", r.status.name());
+            if (r.branch != null) done.addProperty("branch", r.branch);
+            if (r.base != null) done.addProperty("base", r.base);
+            if (r.url != null) done.addProperty("url", r.url);
+            if (r.error != null) done.addProperty("error", r.error);
+            eventBus.publish(emp.getId(), "pr_done", demandId, "demand", done);
+            String msg = "🤖【自动流程 · " + trigger + "】" + r.summary()
+                    + (inst != null ? "\n实例「" + inst.getName() + "」" : "")
+                    + "\n--- 步骤 ---\n" + String.join("\n", r.steps);
+            postMessage(emp, "SHELL", msg, demandId, instanceId);
+            if (demandId != null) {
+                demandRepo.findById(demandId).ifPresent(d -> {
+                    d.setResult((d.getResult() != null ? d.getResult() : "") + "\n\n---\n**自动 PR**：" + r.summary());
+                    d.setTimelineJson(eventBus.demandTimelineJson(d.getEmployeeId(), d.getId()));
+                    demandRepo.save(d);
+                });
+            }
+        });
     }
 
     /** 需求状态变更 → SSE（前端据此局部刷新列表，不必等轮询） */
@@ -384,6 +437,11 @@ public class EmployeeService {
             demandRepo.save(d);
             log.info("[员工] 需求完成: demand={}, 结果 {} 字", demandId, result.length());
             notifyDemandFinished(d, result);
+            // 自动 PR：需求完成即提交。持有 E2E 权限的员工按 SOP 会建 E2E 任务，由 E2E 完结时提交，避免重复
+            DigitalEmployee owner = employeeRepo.findById(d.getEmployeeId()).orElse(null);
+            if (owner != null && owner.isAutoPr() && !owner.permList().contains("e2e") && d.getInstanceId() != null) {
+                submitPrAsync(owner, d.getInstanceId(), d.getId(), "d" + d.getId(), d.getTitle(), "需求完成");
+            }
         });
     }
 
@@ -1027,9 +1085,8 @@ public class EmployeeService {
             + "应选用与写码实例不同的实例——设计用例和执行测试的不能是写代码的那个（独立性原则，防止给自己的代码放水），且 designer 与 executor 也尽量分开；"
             + "只有绑定实例不够时才让一个实例兼任多角色。创建后 → 启动流水线 → 在群聊里发言说明本次改动了什么、要测什么、怎么判定，"
             + "群聊里老板或成员 @ 你时配合回应 → 然后等待系统把 E2E 结果推送给你（不要阻塞轮询等待）。\n"
-            + "4. 提交 PR：统一用老板机器上预置的 git qpr（全局 alias，自动带 reviewer、自动确认、全程无需交互），"
-            + "执行完从输出里提取网络链接（Code Review URL）汇报给老板；"
-            + "若老板开启了「自动提交 PR」，E2E 完结后系统会自动执行 git qpr 并以你的名义上报链接，你无需自己执行。\n"
+            + "4. 提交 PR：若老板开启了「自动提交 PR」，系统会在任务结束后自动新建专属分支、提交、推送并开 PR/提交评审，"
+            + "你只需把改动留在工作目录（可以不提交），不要自己切分支或执行 git qpr；未开启时再按需手动执行 git qpr 并汇报链接。\n"
             + "5. Git 纪律：提交前用 git status / git diff 确认改动内容，不提交无关文件、不修改 git 全局配置。\n";
 
     /** 员工自定义工作 SPEC 段（老板手写的规范，优先级最高） */

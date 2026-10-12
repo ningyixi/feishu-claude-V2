@@ -849,14 +849,16 @@ public class E2EOrchestrator {
                     "🧪 你创建的 E2E 测试任务出结果了（任务 " + task.id + "，第 " + task.pipeline.runIndex + " 轮）：\n"
                     + summary + "\n\n可到面板查看群聊详情，或在员工聊天框继续对话。",
                     null, null);
-            // 自动提 PR：E2E 完结 + 员工开启 autoPr → 在代码改动实例（programmer 优先）上确定性执行 git qpr
-            //（老板预置的全局 alias：repo upload --single --reviewers … --no-edit --assume-yes，reviewer 和确认全自动）
+            // 自动提 PR：E2E 完结 + 员工开启 autoPr → 在代码改动实例（programmer 优先）上走 GitPrService
             if (ranToCompletion && emp.isAutoPr()) {
                 E2ETaskService.Member coder = task.memberByRole("programmer");
                 if (coder == null && !task.members.isEmpty()) coder = task.members.get(0);
                 if (coder != null) {
                     try {
-                        employeeService.runShell(emp.getId(), "git qpr", coder.instanceId, true);
+                        // 确定性 PR 流程（新分支 + 跟踪基线 + 推送 + 开 PR）；裸跑 git qpr 在分离 HEAD / 无 upstream 时
+                        // 会报 "cannot find tracking branch"
+                        employeeService.submitPrAsync(emp, coder.instanceId, null, "e2e-" + task.id,
+                                "E2E " + task.id + " 自动修复", "E2E 完结");
                         log.info("[E2E] 自动 PR 已触发: task={}, emp={}, instance={}", task.id, emp.getId(), coder.instanceId);
                     } catch (Exception ex) {
                         employeeService.postMessage(emp, "SHELL",

@@ -110,6 +110,10 @@ public class EmployeeController {
                     body.has("autoPr") && !body.get("autoPr").isJsonNull() ? body.get("autoPr").getAsBoolean() : null,
                     body.has("notifyInstanceId") && !body.get("notifyInstanceId").isJsonNull()
                             ? body.get("notifyInstanceId").getAsLong() : null);
+            if (body.has("prBaseBranch")) {
+                e = employeeService.setPrBaseBranch(e.getId(),
+                        body.get("prBaseBranch").isJsonNull() ? null : body.get("prBaseBranch").getAsString());
+            }
             return ResponseEntity.ok(employeeJson(e, instanceNames()).toString());
         } catch (IllegalArgumentException ex) {
             return badRequest(ex.getMessage());
@@ -250,6 +254,10 @@ public class EmployeeController {
                     body.has("autoPr") && !body.get("autoPr").isJsonNull() ? body.get("autoPr").getAsBoolean() : null,
                     body.has("notifyInstanceId") && !body.get("notifyInstanceId").isJsonNull()
                             ? body.get("notifyInstanceId").getAsLong() : null);
+            if (body.has("prBaseBranch")) {
+                e = employeeService.setPrBaseBranch(e.getId(),
+                        body.get("prBaseBranch").isJsonNull() ? null : body.get("prBaseBranch").getAsString());
+            }
             return ResponseEntity.ok(employeeJson(e, instanceNames()).toString());
         } catch (IllegalArgumentException ex) {
             return badRequest(ex.getMessage());
@@ -314,6 +322,7 @@ public class EmployeeController {
         o.addProperty("reportIntervalMin", e.getReportIntervalMin());
         o.addProperty("workSpec", e.getWorkSpec() != null ? e.getWorkSpec() : "");
         o.addProperty("autoPr", e.isAutoPr());
+        o.addProperty("prBaseBranch", e.getPrBaseBranch() != null ? e.getPrBaseBranch() : "");
         if (e.getNotifyInstanceId() != null) o.addProperty("notifyInstanceId", e.getNotifyInstanceId());
         JsonArray perms = new JsonArray();
         for (String p : e.permList()) perms.add(p);

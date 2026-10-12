@@ -38,3 +38,12 @@ feishu:
     max-bot-turns: 10
     idle-reset-minutes: 10
     bot-open-ids: ""   # 额外视为机器人的 open_id（逗号分隔）；sender_type=app 的消息已自动识别
+
+# 数字员工自动 PR（GitPrService）
+employee:
+  pr:
+    repo-command: "git qpr"        # repo 工程（祖先目录有 .repo）里提交评审的命令
+    branch-prefix: "feishu-claude" # 分支名：<prefix>/<员工>-<任务>-<时间>
+    default-base: ""               # 全局默认目标分支；空 = 自动探测远端默认分支（员工上可单独覆盖）
+    timeout-seconds: 180
+    gh-command: "gh"               # GitHub CLI；未安装时只推送分支并给出链接
