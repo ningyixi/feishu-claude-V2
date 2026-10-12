@@ -411,7 +411,7 @@ public class StreamingCardController implements TurnListener {
             }
             if (!done) {
                 if (sentMessageId != null) {
-                    patchMessage(finalJson, " final");   // 终态兜底：即使中间帧全被限频跳过也保证最终内容正确
+                    patchMessage(finalJson, "\u0000final");   // 终态兜底：即使中间帧全被限频跳过也保证最终内容正确
                     done = true;
                 } else {
                     done = sendInteractive(finalJson) != null;   // 什么都没发出去过 → 直接发终态卡
