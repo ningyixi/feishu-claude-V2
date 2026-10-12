@@ -377,12 +377,16 @@ function EmployeeDetail({ empId, onBack, showToast }) {
     .then(d => { if (d) setData(d) })
     .catch(() => {})
 
+  // 实时执行流：SSE 推送每一步（思考/工具调用/输出/完成/错误）；状态变化时防抖刷新详情
+  const { timelines, connected } = useEmployeeEvents(empId, load)
+
   useEffect(() => {
     load()
-    const t = setInterval(load, 3000)   // 实时进度：3s 轮询（进度快照内嵌在详情响应里）
+    // SSE 已覆盖实时性，轮询只做兜底（断线时 5s，连上后 20s）
+    const t = setInterval(load, connected ? 20000 : 5000)
     return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [empId])
+  }, [empId, connected])
 
   // 打开了该员工（能看到聊天框）→ 未读全部置已读，侧边栏/卡片红点清零
   useEffect(() => {
@@ -455,6 +459,7 @@ function EmployeeDetail({ empId, onBack, showToast }) {
       {/* 💬 双向聊天框：员工上报 + 老板直接对话派活 + 🖥 Shell 直通命令（打开即已读） */}
       <EmpMsgPanel empId={empId} messages={data.messages} unreadCount={data.unreadCount}
         chatProgress={data.chatProgress} shellProgress={data.shellProgress} emp={emp}
+        chatTimeline={timelines.chat}
         defaultShellInstance={defaultShellInstance} replyTo={replyTo}
         clearReplyTo={() => setReplyTo(null)} showToast={showToast} />
 
@@ -462,6 +467,9 @@ function EmployeeDetail({ empId, onBack, showToast }) {
       <div className="card" style={{ padding: '14px 16px' }}>
         <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>
           🖥 实例工位
+          <span className={'live-dot' + (connected ? ' on' : '')} title={connected ? '实时执行流已连接' : '实时流未连接，轮询兜底中'}>
+            {connected ? '● 实时' : '○ 轮询'}
+          </span>
           {queuedCount > 0 && <span style={{ fontWeight: 400, color: '#d97706', fontSize: 11.5, marginLeft: 8 }}>⏳ {queuedCount} 个需求排队中</span>}
           <span style={{ fontWeight: 400, color: 'var(--text-dim)', fontSize: 11.5, marginLeft: 8 }}>每实例同一时刻做一个需求</span>
         </div>
@@ -484,6 +492,7 @@ function EmployeeDetail({ empId, onBack, showToast }) {
                   <div style={{ fontWeight: 600 }}>{d.title}</div>
                   {d.progress ? <ProgressView p={d.progress} />
                     : <div style={{ color: 'var(--text-dim)', fontSize: 11.5 }}>正在启动…</div>}
+                  <LiveTimeline events={timelines['d' + d.id]} running />
                 </div>
               ) : (
                 <div style={{ fontSize: 11.5, color: 'var(--text-dim)', alignSelf: 'center' }}>
@@ -524,6 +533,12 @@ function EmployeeDetail({ empId, onBack, showToast }) {
                     <b style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>需求内容</b>
                     <div style={{ whiteSpace: 'pre-wrap', marginTop: 2 }}>{d.requirement}</div>
                   </div>
+                  {timelines['d' + d.id]?.length > 0 && (
+                    <div style={{ marginBottom: 8 }}>
+                      <b style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>执行过程</b>
+                      <LiveTimeline events={timelines['d' + d.id]} running={d.status === 'RUNNING'} />
+                    </div>
+                  )}
                   {d.errorMessage && (
                     <div style={{ color: 'var(--error)', marginBottom: 8, fontSize: 12 }}>⚠ {d.errorMessage}</div>
                   )}
@@ -564,7 +579,7 @@ function EmployeeDetail({ empId, onBack, showToast }) {
 }
 
 /** 💬 员工主动上报聊天框（新消息在下，自动滚到底；打开详情页即全部已读） */
-function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress, emp, defaultShellInstance, replyTo, clearReplyTo, showToast }) {
+function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress, chatTimeline, emp, defaultShellInstance, replyTo, clearReplyTo, showToast }) {
   const boxRef = useRef(null)
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
@@ -638,6 +653,7 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
                   {chatProgress.instanceName && <span>📡 {chatProgress.instanceName}</span>}
                 </div>
                 <ProgressView p={chatProgress} />
+                <LiveTimeline events={chatTimeline} running />
               </div>
             </div>
           )}
@@ -727,7 +743,7 @@ function ProgressView({ p }) {  const phaseIcon = { '排队中': '⏳', '思考�
     <div style={{ fontSize: 11.5, color: 'var(--text-dim)', lineHeight: 1.7 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
         <span>{phaseIcon} {p.phase}</span>
-        {p.currentTool && <span>· 🛠 <code>{p.currentTool}</code></span>}
+        {p.currentTool && <span>· 🛠 <code>{p.currentTool}</code>{p.currentToolDetail ? <code className="tl-detail">{p.currentToolDetail}</code> : null}</span>}
         {p.elapsedMs > 0 && <span>· {fmtDur(p.elapsedMs)}</span>}
         {p.queued && <b style={{ color: '#d97706' }}>· 实例忙，排队中（队列 {p.queueDepth}）</b>}
       </div>
@@ -806,6 +822,163 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
           <button className="btn btn-primary" onClick={submit} disabled={saving}>{saving ? '下发中…' : '下发需求'}</button>
         </div>
       </div>
+    </div>
+  )
+}
+
+/**
+ * 订阅 /api/employees/{id}/events（SSE）。返回按 key 分组的时间线：'d<demandId>' 或 'chat'。
+ * text/thinking 增量合并进同一条目，避免逐 token 一行；status/message 事件触发防抖刷新详情。
+ */
+function useEmployeeEvents(empId, onChange) {
+  const [timelines, setTimelines] = useState({})
+  const [connected, setConnected] = useState(false)
+  const onChangeRef = useRef(onChange)
+  onChangeRef.current = onChange
+
+  useEffect(() => {
+    setTimelines({})
+    let es, retry, debounce, closed = false
+    const seen = new Set()
+    const pending = []
+    let raf = null
+    const kick = () => {
+      clearTimeout(debounce)
+      debounce = setTimeout(() => onChangeRef.current && onChangeRef.current(), 300)
+    }
+    const flush = () => {
+      raf = null
+      const batch = pending.splice(0)
+      if (!batch.length) return
+      setTimelines(prev => {
+        const next = { ...prev }
+        for (const ev of batch) {
+          const key = ev.scope === 'chat' && !ev.demandId ? 'chat' : (ev.demandId ? 'd' + ev.demandId : null)
+          if (!key) continue
+          // 新一轮聊天开始 → 清空旧聊天时间线
+          let list = (ev.kind === 'turn' && key === 'chat') ? [] : (next[key] ? [...next[key]] : [])
+          const last = list[list.length - 1]
+          if ((ev.kind === 'text' || ev.kind === 'thinking') && last && last.kind === ev.kind) {
+            const merged = (last.text || '') + (ev.delta || '')
+            list[list.length - 1] = { ...last, text: merged.length > 4000 ? merged.slice(-4000) : merged, ts: ev.ts }
+          } else if (ev.kind === 'tool_end') {
+            const i = list.findIndex(x => x.kind === 'tool' && x.toolId === ev.toolId)
+            const item = { kind: 'tool', toolId: ev.toolId, name: ev.name, detail: ev.detail, status: ev.status, elapsedMs: ev.elapsedMs, ts: i >= 0 ? list[i].ts : ev.ts }
+            if (i >= 0) list[i] = item; else list.push(item)
+          } else if (ev.kind === 'tool_start') {
+            list.push({ kind: 'tool', toolId: ev.toolId, name: ev.name, detail: ev.detail, status: 'running', ts: ev.ts, startMs: ev.startMs })
+          } else if (ev.kind === 'text' || ev.kind === 'thinking') {
+            list.push({ kind: ev.kind, text: ev.delta || '', ts: ev.ts })
+          } else if (ev.kind !== 'message') {
+            list.push({ ...ev })
+          }
+          if (list.length > 300) list = list.slice(-300)
+          next[key] = list
+        }
+        return next
+      })
+    }
+    const connect = () => {
+      if (closed) return
+      es = new EventSource(`/api/employees/${empId}/events`)
+      es.addEventListener('hello', () => setConnected(true))
+      es.addEventListener('emp', e => {
+        let ev
+        try { ev = JSON.parse(e.data) } catch { return }
+        if (seen.has(ev.id)) return   // 重连回放去重
+        seen.add(ev.id)
+        if (ev.kind === 'status' || ev.kind === 'message' || ev.kind === 'done' || ev.kind === 'error') kick()
+        pending.push(ev)
+        if (!raf) raf = setTimeout(flush, 120)
+      })
+      es.onerror = () => {
+        setConnected(false)
+        es.close()
+        retry = setTimeout(connect, 3000)
+      }
+    }
+    connect()
+    return () => { closed = true; es && es.close(); clearTimeout(retry); clearTimeout(debounce); clearTimeout(raf) }
+  }, [empId])
+
+  return { timelines, connected }
+}
+
+const TL_META = {
+  status: { icon: '📌', color: '#64748b' },
+  queued: { icon: '⏳', color: '#d97706' },
+  turn: { icon: '🚀', color: '#2563eb' },
+  thinking: { icon: '🧠', color: '#7c3aed' },
+  text: { icon: '✍️', color: '#0f766e' },
+  done: { icon: '✅', color: '#16a34a' },
+  error: { icon: '❌', color: '#dc2626' },
+}
+const STATUS_TEXT = { QUEUED: '进入队列', RUNNING: '开工', DONE: '已完成', FAILED: '失败', CANCELLED: '已取消', INTERRUPTED: '被中断' }
+
+/** 实时执行时间线：每一步做了什么、工具参数、耗时、输出片段；运行中自动滚到底 */
+function LiveTimeline({ events, running }) {
+  const boxRef = useRef(null)
+  const [, setTick] = useState(0)
+  const stick = useRef(true)
+  useEffect(() => {
+    if (!running) return
+    const t = setInterval(() => setTick(x => x + 1), 1000)
+    return () => clearInterval(t)
+  }, [running])
+  useEffect(() => {
+    const b = boxRef.current
+    if (b && stick.current) b.scrollTop = b.scrollHeight
+  }, [events])
+  if (!events || events.length === 0) return null
+  const t0 = events[0].ts
+  const rel = ts => '+' + (fmtDur(Math.max(0, ts - t0)) || '0s')
+  return (
+    <div className="live-timeline" ref={boxRef}
+      onScroll={e => { const b = e.currentTarget; stick.current = b.scrollHeight - b.scrollTop - b.clientHeight < 30 }}>
+      {events.map((e, i) => {
+        if (e.kind === 'tool') {
+          const st = e.status
+          const live = st === 'running' ? Date.now() - (e.startMs || e.ts) : e.elapsedMs
+          return (
+            <div key={i} className={'tl-item tl-tool ' + st}>
+              <span className="tl-time">{rel(e.ts)}</span>
+              <span className="tl-icon">{st === 'running' ? <span className="spinner" style={{ width: 9, height: 9, marginRight: 0 }} /> : st === 'error' ? '⚠️' : '🛠'}</span>
+              <span className="tl-body">
+                <b>{e.name}</b>
+                {e.detail && <code className="tl-detail">{e.detail}</code>}
+                <span className="tl-meta" style={{ color: st === 'error' ? '#dc2626' : st === 'success' ? '#16a34a' : '#0891b2' }}>
+                  {st === 'running' ? '执行中' : st === 'success' ? '成功' : '失败'}{live > 0 ? ` · ${fmtDur(live)}` : ''}
+                </span>
+              </span>
+            </div>
+          )
+        }
+        const m = TL_META[e.kind] || { icon: '•', color: '#64748b' }
+        let body
+        switch (e.kind) {
+          case 'status': body = <>需求{STATUS_TEXT[e.status] || e.status}{e.error ? `：${e.error}` : ''}</>; break
+          case 'queued': body = <>实例忙，排队等待（队列 {e.queueDepth}）<span className="tl-meta">{e.reason}</span></>; break
+          case 'turn': body = <>开始执行{e.waitedMs > 1500 ? <span className="tl-meta">排队等待了 {fmtDur(e.waitedMs)}</span> : null}</>; break
+          case 'thinking': body = <span className="tl-text tl-think">{e.text}</span>; break
+          case 'text': body = <span className="tl-text">{e.text}</span>; break
+          case 'done': body = <>本轮结束 <span className="tl-meta">
+            总 {fmtDur(e.durationMs)} · 工具 {e.toolCount} 次 / {fmtDur(e.toolElapsedMs)}
+            {e.thinkingMs > 0 ? ` · 思考 ${fmtDur(e.thinkingMs)}` : ''}
+            {e.inputTokens >= 0 ? ` · in ${e.inputTokens} / out ${e.outputTokens}` : ''}
+            {e.cacheReadTokens > 0 ? ` · 缓存 ${e.cacheReadTokens}` : ''}
+            {e.costUsd >= 0 ? ` · $${Number(e.costUsd).toFixed(4)}` : ''}
+          </span></>; break
+          case 'error': body = <>{e.aborted ? '已中止' : '出错'}：{e.message}</>; break
+          default: body = e.kind
+        }
+        return (
+          <div key={i} className={'tl-item tl-' + e.kind}>
+            <span className="tl-time">{rel(e.ts)}</span>
+            <span className="tl-icon" style={{ color: m.color }}>{m.icon}</span>
+            <span className="tl-body">{body}</span>
+          </div>
+        )
+      })}
     </div>
   )
 }

@@ -484,7 +484,11 @@ public class TerminalSession {
                 lastEventTime = System.currentTimeMillis();   // 任何输出都刷新看门狗
 
                 // 高频噪声：thinking_tokens 计数、task_progress 只刷新时间不打日志
-                boolean noisy = line.contains("\"thinking_tokens\"") || line.contains("\"task_progress\"");
+                // stream_event（--include-partial-messages 的 token 级增量）每个 token 一行：
+                // 以前逐行 INFO → 控制台 + SseLogAppender（同步、加锁、逐个 SSE 客户端网络写）
+                // 全部跑在本 reader 线程上，日志页开着时直接拖慢 stdout 消费 → CLI 输出反压，整轮变慢。
+                boolean noisy = line.contains("\"type\":\"stream_event\"")
+                        || line.contains("\"thinking_tokens\"") || line.contains("\"task_progress\"");
                 if (!noisy) {
                     log.info("[Terminal] << {}", line.substring(0, Math.min(400, line.length())));
                 }

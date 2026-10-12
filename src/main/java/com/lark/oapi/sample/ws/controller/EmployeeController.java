@@ -38,17 +38,20 @@ public class EmployeeController {
     private final EmployeeDemandRepository demandRepo;
     private final com.lark.oapi.sample.ws.repository.EmployeeMessageRepository msgRepo;
     private final BotInstanceRepository instanceRepo;
+    private final com.lark.oapi.sample.ws.service.EmployeeEventBus eventBus;
 
     public EmployeeController(EmployeeService employeeService,
                               DigitalEmployeeRepository employeeRepo,
                               EmployeeDemandRepository demandRepo,
                               com.lark.oapi.sample.ws.repository.EmployeeMessageRepository msgRepo,
-                              BotInstanceRepository instanceRepo) {
+                              BotInstanceRepository instanceRepo,
+                              com.lark.oapi.sample.ws.service.EmployeeEventBus eventBus) {
         this.employeeService = employeeService;
         this.employeeRepo = employeeRepo;
         this.demandRepo = demandRepo;
         this.msgRepo = msgRepo;
         this.instanceRepo = instanceRepo;
+        this.eventBus = eventBus;
     }
 
     // ===== 员工 CRUD =====
@@ -114,6 +117,12 @@ public class EmployeeController {
             log.error("[员工API] 创建失败", ex);
             return badRequest("创建失败: " + ex.getMessage());
         }
+    }
+
+    /** 实时执行事件流（SSE）：先回放最近事件，再推送 turn/thinking/text/tool_start/tool_end/done/error/status/message */
+    @GetMapping(value = "/{id}/events", produces = org.springframework.http.MediaType.TEXT_EVENT_STREAM_VALUE)
+    public org.springframework.web.servlet.mvc.method.annotation.SseEmitter events(@PathVariable Long id) {
+        return eventBus.subscribe(id);
     }
 
     /** 员工详情 = 员工 + 全部需求（RUNNING 内嵌实时进度快照 + 实例名回填） */

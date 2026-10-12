@@ -60,6 +60,7 @@ public class EmployeeService {
     private final BotInstanceRepository instanceRepo;
     private final ClaudeCodeService claudeCodeService;
     private final FeishuBotService feishuBotService;
+    private final EmployeeEventBus eventBus;
 
     /** demandId → 实时进度快照（内存态，终态即移除） */
     private final Map<Long, ProgressSnapshot> progress = new ConcurrentHashMap<>();
@@ -69,13 +70,25 @@ public class EmployeeService {
                            EmployeeMessageRepository msgRepo,
                            BotInstanceRepository instanceRepo,
                            ClaudeCodeService claudeCodeService,
-                           FeishuBotService feishuBotService) {
+                           FeishuBotService feishuBotService,
+                           EmployeeEventBus eventBus) {
         this.employeeRepo = employeeRepo;
         this.demandRepo = demandRepo;
         this.msgRepo = msgRepo;
         this.instanceRepo = instanceRepo;
         this.claudeCodeService = claudeCodeService;
         this.feishuBotService = feishuBotService;
+        this.eventBus = eventBus;
+    }
+
+    /** 需求状态变更 → SSE（前端据此局部刷新列表，不必等轮询） */
+    private void publishStatus(EmployeeDemand d) {
+        JsonObject o = new JsonObject();
+        o.addProperty("status", d.getStatus());
+        o.addProperty("title", d.getTitle());
+        if (d.getInstanceId() != null) o.addProperty("instanceId", d.getInstanceId());
+        if (d.getErrorMessage() != null) o.addProperty("error", d.getErrorMessage());
+        eventBus.publish(d.getEmployeeId(), "status", d.getId(), "demand", o);
     }
 
     // ===== 员工 CRUD =====
@@ -267,6 +280,7 @@ public class EmployeeService {
         demandRepo.save(d);
         log.info("[员工] 需求下发: emp={}, demand={}, instance={}", employeeId, d.getId(),
                 instanceId != null ? "指定#" + instanceId : "自动分派");
+        publishStatus(d);
         scheduleQueues(employeeId);
         return d;
     }
@@ -324,8 +338,9 @@ public class EmployeeService {
         demandRepo.save(d);
         log.info("[员工] 需求开工: emp={}, demand={}, instance={}「{}」", emp.getId(), d.getId(), instanceId, inst.getName());
 
+        publishStatus(d);
         String prompt = personaPrompt(emp, d);
-        ProgressListener listener = new ProgressListener(d.getId(), instanceId);
+        ProgressListener listener = new ProgressListener(emp.getId(), d.getId(), instanceId);
         final Long demandId = d.getId();
         final Long empId = emp.getId();
         Thread.ofVirtual().name("emp-demand-" + demandId).start(() -> {
@@ -358,6 +373,7 @@ public class EmployeeService {
             d.setResult(result);
             d.setFinishedAt(LocalDateTime.now());
             demandRepo.save(d);
+            publishStatus(d);
             log.info("[员工] 需求完成: demand={}, 结果 {} 字", demandId, result.length());
             notifyDemandFinished(d, result);
         });
@@ -370,6 +386,7 @@ public class EmployeeService {
             d.setErrorMessage(truncate(error, 1000));
             d.setFinishedAt(LocalDateTime.now());
             demandRepo.save(d);
+            publishStatus(d);
             DigitalEmployee emp = employeeRepo.findById(d.getEmployeeId()).orElse(null);
             if (emp != null) {
                 postMessage(emp, "FAILED", "❌ 需求「" + d.getTitle() + "」执行失败：" + d.getErrorMessage()
@@ -413,6 +430,7 @@ public class EmployeeService {
             }
             default -> throw new IllegalArgumentException("当前状态不可取消: " + d.getStatus());
         }
+        publishStatus(d);
         scheduleQueues(d.getEmployeeId());
     }
 
@@ -447,6 +465,7 @@ public class EmployeeService {
         d.setStartedAt(null);
         d.setFinishedAt(null);
         demandRepo.save(d);
+        publishStatus(d);
         scheduleQueues(d.getEmployeeId());
         return d;
     }
@@ -511,6 +530,10 @@ public class EmployeeService {
         boolean fromBoss = "boss".equals(msg.getSender());
         if (fromBoss) msg.setReadFlag(true);
         msgRepo.save(msg);
+        JsonObject mev = new JsonObject();
+        mev.addProperty("type", type);
+        mev.addProperty("sender", msg.getSender());
+        eventBus.publish(emp.getId(), "message", demandId, "chat", mev);
         log.info("[员工] 消息: emp={}, type={}, sender={}, demand={}", emp.getName(), type, msg.getSender(), demandId);
         if (!fromBoss) {
             Thread.ofVirtual().name("emp-notify-" + msg.getId()).start(() -> {
@@ -615,7 +638,7 @@ public class EmployeeService {
                 String dir = firstNonBlank(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
                 String reply = claudeCodeService.chat(instId, "employee-" + empId + "-chat",
                         chatPrompt(emp, text.trim(), ctxTitle), null, dir, inst.getClaudeModel(),
-                        new ProgressListener(null, instId, turn.snap));
+                        new ProgressListener(empId, null, instId, turn.snap));
                 String content = reply == null || reply.isBlank() ? "（无回复内容）" : reply;
                 postMessage(emp, "CHAT", content, demandId, instId);   // 员工回复：落库 + 飞书推送
             } catch (Exception e) {
@@ -817,6 +840,12 @@ public class EmployeeService {
         o.addProperty("instanceId", t.instanceId);
         o.addProperty("elapsedMs", System.currentTimeMillis() - t.startMs);
         return o;
+    }
+
+    /** SSE 心跳（20s），防反向代理空闲断开 */
+    @Scheduled(fixedDelay = 20_000)
+    public void sseHeartbeat() {
+        try { eventBus.heartbeat(); } catch (Exception ignored) {}
     }
 
     /** 通知巡检（每分钟）：排队卡住检测 + 定期汇报 */
@@ -1035,18 +1064,25 @@ public class EmployeeService {
 
     // ===== 实时进度 =====
 
-    /** 进度快照（内存态）：TurnListener 回调采集，前端轮询读取 */
+    /** 进度快照（内存态）：TurnListener 回调采集；详情接口内嵌 + SSE 增量推送 */
     public static class ProgressSnapshot {
         public volatile String phase = "排队中";      // 排队中|思考中|工具执行中|生成回复|已结束
         public volatile String currentTool;
+        public volatile String currentToolDetail;
         public volatile boolean queued;               // 实例会话忙，本需求在排队
         public volatile boolean turnStarted;          // 本需求的 turn 已真正开始（取消时才允许 abort）
         public volatile long startMs = System.currentTimeMillis();
+        public volatile long queuedAtMs = System.currentTimeMillis();
         public volatile String answerTail = "";
         public volatile String errorTail;
-        public final ArrayDeque<String[]> tools = new ArrayDeque<>();   // 最近8条 {name,status,elapsedMs}
+        public volatile int toolCount;
+        /** 最近工具步骤（按 tool_use_id 原地更新，不再 start/end 各插一条导致重复） */
+        public final java.util.LinkedHashMap<String, ToolStep> tools = new java.util.LinkedHashMap<>();
         final StringBuilder answer = new StringBuilder();
     }
+
+    private static final int SNAP_TOOLS_CAP = 30;
+    private static final int ANSWER_TAIL_CAP = 1500;
 
     /** demandId → 进度 JSON（无快照返回 null） */
     public JsonObject progressJson(Long demandId, Long instanceId) {
@@ -1059,50 +1095,108 @@ public class EmployeeService {
         JsonObject o = new JsonObject();
         o.addProperty("phase", snap.phase);
         o.addProperty("currentTool", snap.currentTool != null ? snap.currentTool : "");
+        o.addProperty("currentToolDetail", snap.currentToolDetail != null ? snap.currentToolDetail : "");
         o.addProperty("queued", snap.queued);
         o.addProperty("turnStarted", snap.turnStarted);
         o.addProperty("elapsedMs", System.currentTimeMillis() - snap.startMs);
+        o.addProperty("startMs", snap.startMs);
         o.addProperty("answerTail", snap.answerTail);
+        o.addProperty("toolCount", snap.toolCount);
         if (snap.errorTail != null) o.addProperty("errorTail", snap.errorTail);
         TerminalSession s = instanceId != null ? claudeCodeService.getSession(instanceId) : null;
         o.addProperty("queueDepth", s != null ? s.getQueuedCount() : 0);
         JsonArray tools = new JsonArray();
         synchronized (snap.tools) {
-            for (String[] t : snap.tools) {
-                JsonObject to = new JsonObject();
-                to.addProperty("name", t[0]);
-                to.addProperty("status", t[1]);
-                to.addProperty("elapsedMs", Long.parseLong(t[2]));
-                tools.add(to);
-            }
+            for (ToolStep t : snap.tools.values()) tools.add(toolJson(t));
         }
         o.add("tools", tools);
         return o;
     }
 
-    /** 轮次监听器 → 快照采集；demandId 非空时在 onTurnStart 检查需求是否已被取消（排队期间取消 → 立即中止自己的轮次） */
+    private static JsonObject toolJson(ToolStep t) {
+        JsonObject to = new JsonObject();
+        to.addProperty("toolId", t.id);
+        to.addProperty("name", t.name != null ? t.name : "");
+        to.addProperty("detail", t.detail != null ? t.detail : "");
+        to.addProperty("status", t.status != null ? t.status.name().toLowerCase() : "running");
+        to.addProperty("elapsedMs", t.elapsedMs());
+        to.addProperty("startMs", t.startMs);
+        to.addProperty("subAgent", t.subAgent);
+        return to;
+    }
+
+    /**
+     * 轮次监听器 → 快照采集 + SSE 事件发布；demandId 非空时在 onTurnStart 检查需求是否已被取消。
+     * 回调运行在 Claude stdout reader 线程上：这里只做内存操作 + 非阻塞入队（EventBus 异步发送），
+     * 文本增量按 300ms/400 字合并后再推，避免每个 token 一条事件。
+     */
     private class ProgressListener implements TurnListener {
+        private static final long TEXT_FLUSH_MS = 300;
+        private static final long THINK_FLUSH_MS = 1500;
+
+        private final Long employeeId;
         private final Long demandId;      // null = 聊天轮次（无需求取消检查）
         private final Long instanceId;
         private final ProgressSnapshot snap;
+        private final String scope;
+        private final StringBuilder textBuf = new StringBuilder();
+        private long lastTextFlush;
+        private long lastThinkPub;
+        private final StringBuilder thinkBuf = new StringBuilder();
 
-        ProgressListener(Long demandId, Long instanceId) {
-            this(demandId, instanceId, new ProgressSnapshot());
+        ProgressListener(Long employeeId, Long demandId, Long instanceId) {
+            this(employeeId, demandId, instanceId, new ProgressSnapshot());
             progress.put(demandId, snap);
         }
 
-        ProgressListener(Long demandId, Long instanceId, ProgressSnapshot snapshot) {
+        ProgressListener(Long employeeId, Long demandId, Long instanceId, ProgressSnapshot snapshot) {
+            this.employeeId = employeeId;
             this.demandId = demandId;
             this.instanceId = instanceId;
             this.snap = snapshot;
+            this.scope = demandId != null ? "demand" : "chat";
+        }
+
+        private void pub(String kind, JsonObject data) {
+            try { eventBus.publish(employeeId, kind, demandId, scope, data); } catch (Exception ignored) {}
+        }
+
+        private JsonObject obj(String k, String v) {
+            JsonObject o = new JsonObject();
+            if (k != null) o.addProperty(k, v);
+            return o;
+        }
+
+        private synchronized void flushText(boolean force) {
+            long now = System.currentTimeMillis();
+            if (textBuf.length() == 0) return;
+            if (!force && now - lastTextFlush < TEXT_FLUSH_MS && textBuf.length() < 400) return;
+            pub("text", obj("delta", textBuf.toString()));
+            textBuf.setLength(0);
+            lastTextFlush = now;
+        }
+
+        private synchronized void flushThinking(boolean force) {
+            long now = System.currentTimeMillis();
+            if (thinkBuf.length() == 0) return;
+            if (!force && now - lastThinkPub < THINK_FLUSH_MS) return;
+            String t = thinkBuf.toString();
+            pub("thinking", obj("delta", t.length() > 600 ? t.substring(t.length() - 600) : t));
+            thinkBuf.setLength(0);
+            lastThinkPub = now;
         }
 
         @Override
         public void onTurnStart() {
+            long waited = System.currentTimeMillis() - snap.queuedAtMs;
             snap.turnStarted = true;
             snap.queued = false;
             snap.phase = "思考中";
             snap.startMs = System.currentTimeMillis();
+            JsonObject o = obj("phase", "思考中");
+            o.addProperty("waitedMs", waited);
+            if (instanceId != null) o.addProperty("instanceId", instanceId);
+            pub("turn", o);
             if (demandId == null) return;   // 聊天轮次不做需求取消检查
             // 排队期间需求被取消/员工被删 → 轮次开始的瞬间中止（此刻实例的当前轮次就是我们，安全）
             try {
@@ -1118,11 +1212,22 @@ public class EmployeeService {
         public void onQueued() {
             snap.queued = true;
             snap.phase = "排队中";
+            TerminalSession s = instanceId != null ? claudeCodeService.getSession(instanceId) : null;
+            JsonObject o = obj("phase", "排队中");
+            o.addProperty("queueDepth", s != null ? s.getQueuedCount() + 1 : 1);
+            o.addProperty("reason", "实例正在处理其他任务（飞书私聊/E2E/其他员工），本任务排队等待");
+            pub("queued", o);
         }
 
         @Override
         public void onThinkingDelta(String delta) {
-            if (snap.turnStarted) snap.phase = "思考中";
+            if (!snap.turnStarted) return;
+            if (!"思考中".equals(snap.phase)) {
+                snap.phase = "思考中";
+                flushText(true);
+            }
+            synchronized (this) { thinkBuf.append(delta); }
+            flushThinking(false);
         }
 
         @Override
@@ -1131,43 +1236,72 @@ public class EmployeeService {
             synchronized (snap.answer) {
                 snap.answer.append(delta);
                 int len = snap.answer.length();
-                snap.answerTail = len > 400 ? snap.answer.substring(len - 400) : snap.answer.toString();
+                snap.answerTail = len > ANSWER_TAIL_CAP ? snap.answer.substring(len - ANSWER_TAIL_CAP) : snap.answer.toString();
             }
+            flushThinking(true);
+            synchronized (this) { textBuf.append(delta); }
+            flushText(false);
         }
 
         @Override
         public void onToolStart(ToolStep step) {
+            flushThinking(true);
+            flushText(true);
             snap.phase = "工具执行中";
             snap.currentTool = step.name;
-            addTool(step);
+            snap.currentToolDetail = step.detail;
+            snap.toolCount++;
+            putTool(step);
+            pub("tool_start", toolJson(step));
         }
 
         @Override
         public void onToolEnd(ToolStep step) {
             snap.currentTool = null;
-            addTool(step);
+            snap.currentToolDetail = null;
+            snap.phase = "思考中";
+            putTool(step);
+            pub("tool_end", toolJson(step));
         }
 
         @Override
         public void onTurnComplete(TurnResult result) {
+            flushThinking(true);
+            flushText(true);
             snap.phase = "已结束";
             snap.currentTool = null;
+            JsonObject o = new JsonObject();
+            o.addProperty("durationMs", result.durationMs);
+            o.addProperty("toolCount", result.toolSteps.size());
+            o.addProperty("toolElapsedMs", result.toolElapsedMs);
+            o.addProperty("thinkingMs", result.thinkingMs);
+            o.addProperty("costUsd", result.costUsd);
+            o.addProperty("inputTokens", result.inputTokens);
+            o.addProperty("outputTokens", result.outputTokens);
+            o.addProperty("cacheReadTokens", result.cacheReadTokens);
+            o.addProperty("isError", result.isError);
+            if (result.model != null) o.addProperty("model", result.model);
+            pub("done", o);
         }
 
         @Override
         public void onTurnError(String message, boolean aborted) {
+            flushText(true);
             snap.phase = "已结束";
             snap.currentTool = null;
             snap.errorTail = message;
+            JsonObject o = obj("message", message);
+            o.addProperty("aborted", aborted);
+            pub("error", o);
         }
 
-        private void addTool(ToolStep step) {
+        private void putTool(ToolStep step) {
             synchronized (snap.tools) {
-                snap.tools.addLast(new String[]{
-                        step.name != null ? step.name : "",
-                        step.status != null ? step.status.name().toLowerCase() : "running",
-                        String.valueOf(step.elapsedMs())});
-                while (snap.tools.size() > 8) snap.tools.removeFirst();
+                String key = step.id != null ? step.id : String.valueOf(System.nanoTime());
+                snap.tools.put(key, step);
+                while (snap.tools.size() > SNAP_TOOLS_CAP) {
+                    snap.tools.remove(snap.tools.keySet().iterator().next());
+                }
             }
         }
     }

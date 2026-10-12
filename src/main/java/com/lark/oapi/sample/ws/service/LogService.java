@@ -19,19 +19,38 @@ public class LogService {
 
     private final LinkedList<LogEntry> history = new LinkedList<>();
     private final List<SseEmitter> emitters = new CopyOnWriteArrayList<>();
+    private final java.util.concurrent.ExecutorService sender =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "log-sse-sender");
+                t.setDaemon(true);
+                return t;
+            });
 
-    public synchronized void addLog(LogEntry entry) {
-        history.addLast(entry);
-        while (history.size() > MAX_HISTORY) {
-            history.removeFirst();
-        }
-        for (SseEmitter emitter : emitters) {
-            try {
-                emitter.send(SseEmitter.event().data(entry));
-            } catch (Exception e) {
-                // 不在此处打日志，避免触发 SseLogAppender 循环
-                emitters.remove(emitter);
+    /**
+     * 日志入队：调用方（任意业务线程，包括 Claude stdout reader）只做内存操作；
+     * SSE 网络写由专用单线程异步完成——慢/断线的日志页客户端不再阻塞业务线程。
+     */
+    public void addLog(LogEntry entry) {
+        synchronized (this) {
+            history.addLast(entry);
+            while (history.size() > MAX_HISTORY) {
+                history.removeFirst();
             }
+        }
+        if (emitters.isEmpty()) return;
+        try {
+            sender.execute(() -> {
+                for (SseEmitter emitter : emitters) {
+                    try {
+                        emitter.send(SseEmitter.event().data(entry));
+                    } catch (Exception e) {
+                        // 不在此处打日志，避免触发 SseLogAppender 循环
+                        emitters.remove(emitter);
+                    }
+                }
+            });
+        } catch (Exception ignored) {
+            // 队列已关闭（停机中）
         }
     }
 
