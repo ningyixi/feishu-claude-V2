@@ -20,8 +20,8 @@ public class WebSocketConfig implements WebSocketConfigurer {
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(terminalHandler, "/ws/terminal")
-                .setAllowedOrigins("*");
+                .setAllowedOriginPatterns("*");   // 真正的 Origin 校验在 OriginGuardFilter（同源 + 白名单）
         registry.addHandler(e2eHandler, "/ws/e2e")
-                .setAllowedOrigins("*");
+                .setAllowedOriginPatterns("*");   // 真正的 Origin 校验在 OriginGuardFilter（同源 + 白名单）
     }
 }
