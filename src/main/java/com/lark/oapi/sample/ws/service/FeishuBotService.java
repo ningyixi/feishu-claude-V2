@@ -129,7 +129,9 @@ public class FeishuBotService {
                     @Override
                     public void handle(P2MessageReceiveV1 event) throws Exception {
                         var eventData = event.getEvent();
-                        String openId = eventData.getSender().getSenderId().getOpenId();
+                        // 机器人发送方的 sender_id 可能为空：判空防 NPE（否则整个事件处理抛异常）
+                        var sid = eventData.getSender() != null ? eventData.getSender().getSenderId() : null;
+                        String openId = sid != null ? sid.getOpenId() : null;
                         String messageId = eventData.getMessage().getMessageId();
                         String msgType = eventData.getMessage().getMessageType();
                         String rawContent = eventData.getMessage().getContent();
@@ -143,6 +145,26 @@ public class FeishuBotService {
                             log.info("[Feishu][{}] 重复投递，忽略: messageId={}", instance.getName(), messageId);
                             return;
                         }
+                        // 机器人互 @ 防死循环：发送方是机器人（sender_type=app，或配置的已知机器人 open_id）则计数，
+                        // 连续超过上限就不再回复，直到真人发言
+                        String senderType = eventData.getSender().getSenderType();
+                        String loopKey = BotLoopGuard.key(instanceId, chatId, eventData.getMessage().getThreadId());
+                        if (isBotSender(senderType, openId)) {
+                            BotLoopGuard.Verdict v = botLoopGuard.noteBotTurn(loopKey, System.currentTimeMillis());
+                            if (!v.allowed()) {
+                                log.warn("[Feishu][{}] 机器人互聊防循环触发：chat={} 连续 {} 条机器人消息（上限 {}），暂停回复直到有人发言",
+                                        instance.getName(), chatId, v.count(), v.limit());
+                                if (v.justTripped()) {
+                                    final String notifyOpenId = openId;
+                                    Thread.ofVirtual().start(() -> replyText(instanceId, notifyOpenId, chatType, chatId,
+                                            "⏸ 检测到机器人之间连续对话，为避免死循环已暂停回复；有人发言后自动恢复。"));
+                                }
+                                return;
+                            }
+                        } else {
+                            botLoopGuard.reset(loopKey);
+                        }
+
                         // 长时间断线后重连会补投积压的旧消息：超过 30 分钟的不再执行（避免半夜醒来跑一堆过期指令）
                         String createTime = eventData.getMessage().getCreateTime();
                         if (isExpired(createTime)) {
@@ -301,6 +323,34 @@ public class FeishuBotService {
     private static final int MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
     // ===== 入站消息幂等（参考 larksuite/openclaw-lark src/messaging/inbound/dedup.ts） =====
+
+    @org.springframework.beans.factory.annotation.Value("${feishu.loop-guard.max-bot-turns:10}")
+    private int loopGuardMaxTurns = 10;
+    @org.springframework.beans.factory.annotation.Value("${feishu.loop-guard.idle-reset-minutes:10}")
+    private long loopGuardIdleMinutes = 10;
+    /** 额外视为机器人的 open_id（逗号分隔，如自家其他实例机器人；sender_type=app 的天然识别） */
+    @org.springframework.beans.factory.annotation.Value("${feishu.loop-guard.bot-open-ids:}")
+    private String loopGuardBotOpenIds = "";
+    private volatile BotLoopGuard botLoopGuard = new BotLoopGuard(10, 10 * 60_000L);
+    private volatile java.util.Set<String> knownBotOpenIds = java.util.Set.of();
+
+    @jakarta.annotation.PostConstruct
+    void initLoopGuard() {
+        botLoopGuard = new BotLoopGuard(loopGuardMaxTurns, loopGuardIdleMinutes * 60_000L);
+        knownBotOpenIds = java.util.Arrays.stream(loopGuardBotOpenIds.split(","))
+                .map(String::trim).filter(x -> !x.isEmpty()).collect(java.util.stream.Collectors.toUnmodifiableSet());
+        log.info("[Feishu] 机器人互聊防循环: 连续上限 {} 条, 空闲 {} 分钟重置, 额外机器人 open_id {} 个",
+                loopGuardMaxTurns, loopGuardIdleMinutes, knownBotOpenIds.size());
+    }
+
+    /** 飞书事件 sender_type：user=真人，app=机器人（含其他应用机器人）；另可配置已知机器人 open_id 兜底 */
+    boolean isBotSender(String senderType, String openId) {
+        return isBotSenderType(senderType) || (openId != null && knownBotOpenIds.contains(openId));
+    }
+
+    static boolean isBotSenderType(String senderType) {
+        return senderType != null && "app".equalsIgnoreCase(senderType.trim());
+    }
 
     private static final long MSG_EXPIRY_MS = 30L * 60 * 1000;
     private final MessageDedup dedup = new MessageDedup(12L * 3600 * 1000, 5000);

@@ -31,3 +31,10 @@ logging:
 app:
   security:
     panel-password: ${PANEL_PASSWORD:}
+
+# 机器人互 @ 防死循环：同一群/话题连续收到这么多条机器人消息（中间无人发言）就暂停回复，有人发言自动恢复
+feishu:
+  loop-guard:
+    max-bot-turns: 10
+    idle-reset-minutes: 10
+    bot-open-ids: ""   # 额外视为机器人的 open_id（逗号分隔）；sender_type=app 的消息已自动识别
