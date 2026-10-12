@@ -99,6 +99,11 @@ public class TerminalSession {
 
     public int getSandboxLevel() { return sandboxLevel; }
 
+    /** 额外授权目录（多工作区需求：除 cwd 外的其它仓库，拼成 --add-dir） */
+    private List<String> extraDirs = List.of();
+    public void setExtraDirs(List<String> dirs) { this.extraDirs = dirs != null ? List.copyOf(dirs) : List.of(); }
+    public List<String> getExtraDirs() { return extraDirs; }
+
     // ===== 生命周期 =====
 
     /** 启动 Claude CLI 常驻进程 */
@@ -476,6 +481,9 @@ public class TerminalSession {
         // 0=全权限 bypassPermissions（现状默认）；1=宽松（白名单+自动拒绝）；2=严格（--restricted 结构圈禁）。
         // 详见 SandboxPolicy 与 docs/沙箱方案与威胁模型.md。
         SandboxPolicy.appendFlags(cmd, sandboxLevel);
+        for (String d : extraDirs) {
+            if (d != null && !d.isBlank()) { cmd.add("--add-dir"); cmd.add(d); }
+        }
         if (!model.isBlank()) {
             cmd.add("--model");
             cmd.add(model);

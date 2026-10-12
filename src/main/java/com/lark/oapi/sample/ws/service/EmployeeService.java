@@ -62,6 +62,7 @@ public class EmployeeService {
     private final FeishuBotService feishuBotService;
     private final EmployeeEventBus eventBus;
     private final GitPrService gitPrService;
+    private final WorkspaceGitService workspaceGit;
 
     /** demandId → 实时进度快照（内存态，终态即移除） */
     private final Map<Long, ProgressSnapshot> progress = new ConcurrentHashMap<>();
@@ -73,7 +74,8 @@ public class EmployeeService {
                            ClaudeCodeService claudeCodeService,
                            FeishuBotService feishuBotService,
                            EmployeeEventBus eventBus,
-                           GitPrService gitPrService) {
+                           GitPrService gitPrService,
+                           WorkspaceGitService workspaceGit) {
         this.employeeRepo = employeeRepo;
         this.demandRepo = demandRepo;
         this.msgRepo = msgRepo;
@@ -82,6 +84,93 @@ public class EmployeeService {
         this.feishuBotService = feishuBotService;
         this.eventBus = eventBus;
         this.gitPrService = gitPrService;
+        this.workspaceGit = workspaceGit;
+    }
+
+    // ===== 需求工作区（多仓库：每个 = 代码路径 + 跟踪的远端分支） =====
+
+    /** 校验并规范化工作区列表（路径去重）；有误抛 IllegalArgumentException（带第几行） */
+    public List<WorkspaceGitService.Workspace> validateWorkspaces(List<WorkspaceGitService.Workspace> in) {
+        List<WorkspaceGitService.Workspace> out = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        if (in == null) return out;
+        int i = 0;
+        for (WorkspaceGitService.Workspace w : in) {
+            i++;
+            String err = workspaceGit.validate(w.path, w.branch);
+            if (err != null) throw new IllegalArgumentException("工作区 #" + i + "：" + err);
+            String key = new java.io.File(w.path.trim()).getAbsoluteFile().toPath().normalize().toString();
+            if (!seen.add(key)) throw new IllegalArgumentException("工作区 #" + i + "：路径重复 " + w.path);
+            out.add(new WorkspaceGitService.Workspace(w.path.trim(), w.branch.trim()));
+        }
+        return out;
+    }
+
+    public String validateWorkspace(String path, String branch) { return workspaceGit.validate(path, branch); }
+
+    private void wsStep(Long empId, Long demandId, String text) {
+        JsonObject o = new JsonObject();
+        o.addProperty("text", text);
+        eventBus.publish(empId, "pr", demandId, "demand", o);
+    }
+
+    /** 开工前：逐个工作区 fetch + 更新跟踪分支 + 新建工作分支。返回 null = 全部就绪，否则错误汇总 */
+    private String prepareWorkspaces(DigitalEmployee emp, EmployeeDemand d, List<WorkspaceGitService.Workspace> ws, String tag) {
+        List<String> errs = new ArrayList<>();
+        for (WorkspaceGitService.Workspace w : ws) {
+            String e = workspaceGit.prepare(w, emp.getName(), tag, s -> wsStep(emp.getId(), d.getId(), s));
+            if (e != null) {
+                errs.add(w.label() + "：" + e);
+                wsStep(emp.getId(), d.getId(), "❌ [" + w.label() + "] " + e);
+            }
+        }
+        saveWorkspaces(d.getId(), ws);
+        return errs.isEmpty() ? null : String.join("；", errs);
+    }
+
+    /** 完工后：逐个工作区 提交 → 合并回跟踪分支 → git qpr；结果写时间线/需求汇报/聊天框+飞书 */
+    private void finishWorkspaces(DigitalEmployee emp, Long demandId, List<WorkspaceGitService.Workspace> ws, String trigger) {
+        EmployeeDemand d0 = demandRepo.findById(demandId).orElse(null);
+        String title = d0 != null ? d0.getTitle() : ("需求 " + demandId);
+        String msg = "feishu-claude: " + title + "（数字员工 " + emp.getName() + "，需求 #" + demandId + "）";
+        List<String> lines = new ArrayList<>();
+        for (WorkspaceGitService.Workspace w : ws) {
+            if (!"PREPARED".equals(w.status)) continue;
+            workspaceGit.finish(w, msg, s -> wsStep(emp.getId(), demandId, s));
+            JsonObject done = WorkspaceGitService.toJson(w);
+            eventBus.publish(emp.getId(), "ws_done", demandId, "demand", done);
+            lines.add(w.summary());
+        }
+        if (lines.isEmpty()) return;
+        saveWorkspaces(demandId, ws);
+        String summary = String.join("\n", lines);
+        postMessage(emp, "SHELL", "🤖【自动流程 · " + trigger + "】工作区提交结果：\n" + summary, demandId, d0 != null ? d0.getInstanceId() : null);
+        demandRepo.findById(demandId).ifPresent(d -> {
+            d.setResult((d.getResult() != null ? d.getResult() : "") + "\n\n---\n**工作区提交（" + trigger + "）**\n" + summary);
+            d.setTimelineJson(eventBus.demandTimelineJson(d.getEmployeeId(), d.getId()));
+            demandRepo.save(d);
+        });
+    }
+
+    private void saveWorkspaces(Long demandId, List<WorkspaceGitService.Workspace> ws) {
+        demandRepo.findById(demandId).ifPresent(d -> {
+            d.setWorkspacesJson(WorkspaceGitService.toJson(ws));
+            demandRepo.save(d);
+        });
+    }
+
+    /** 工作区 prompt 段：告知所有路径与分支纪律 */
+    static String workspaceSection(List<WorkspaceGitService.Workspace> ws) {
+        if (ws.isEmpty()) return "";
+        StringBuilder sb = new StringBuilder("\n【本次工作区】（覆盖默认规范第 2 条的「实例工作目录」；改动只能落在这些目录里）\n");
+        for (WorkspaceGitService.Workspace w : ws) {
+            sb.append("- ").append(w.path).append("  —— 已切到工作分支 ").append(w.workBranch != null ? w.workBranch : "(待创建)")
+              .append("（基于 ").append(w.branch).append("）\n");
+        }
+        sb.append("当前目录是第一个工作区，其余已通过 --add-dir 授权，请用绝对路径访问。")
+          .append("**不要切换/新建分支、不要 commit 之外的 git 历史操作、不要执行 git qpr / repo upload / git push**——")
+          .append("系统会在你完成后自动提交、合并回跟踪分支并执行 git qpr 推到对应远端分支。\n");
+        return sb.toString();
     }
 
     public DigitalEmployee setPrBaseBranch(Long empId, String base) {
@@ -316,6 +405,12 @@ public class EmployeeService {
     // ===== 需求下发与调度 =====
 
     public EmployeeDemand dispatchDemand(Long employeeId, String requirement, String title, Long instanceId) {
+        return dispatchDemand(employeeId, requirement, title, instanceId, List.of());
+    }
+
+    public EmployeeDemand dispatchDemand(Long employeeId, String requirement, String title, Long instanceId,
+                                         List<WorkspaceGitService.Workspace> workspaces) {
+        List<WorkspaceGitService.Workspace> ws = validateWorkspaces(workspaces);
         DigitalEmployee emp = employeeRepo.findById(employeeId)
                 .orElseThrow(() -> new IllegalArgumentException("员工不存在: " + employeeId));
         if (requirement == null || requirement.isBlank()) throw new IllegalArgumentException("请填写需求内容");
@@ -329,6 +424,7 @@ public class EmployeeService {
         d.setTitle(!t.isBlank() ? t
                 : requirement.trim().replaceAll("\\s+", " ").substring(0, Math.min(30, requirement.trim().length())));
         d.setRequestedInstanceId(instanceId);
+        if (!ws.isEmpty()) d.setWorkspacesJson(WorkspaceGitService.toJson(ws));
         d.setStatus("QUEUED");
         demandRepo.save(d);
         log.info("[员工] 需求下发: emp={}, demand={}, instance={}", employeeId, d.getId(),
@@ -392,20 +488,32 @@ public class EmployeeService {
         log.info("[员工] 需求开工: emp={}, demand={}, instance={}「{}」", emp.getId(), d.getId(), instanceId, inst.getName());
 
         publishStatus(d);
-        String prompt = personaPrompt(emp, d);
         ProgressListener listener = new ProgressListener(emp.getId(), d.getId(), instanceId);
         final Long demandId = d.getId();
         final Long empId = emp.getId();
+        final List<WorkspaceGitService.Workspace> ws = WorkspaceGitService.parse(d.getWorkspacesJson());
         Thread.ofVirtual().name("emp-demand-" + demandId).start(() -> {
             String dir = firstNonBlank(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
+            List<String> extra = new ArrayList<>();
             try {
+                if (!ws.isEmpty()) {
+                    String err = prepareWorkspaces(emp, d, ws, "d" + demandId);
+                    if (err != null) { markFailed(demandId, "工作区准备失败：" + err); return; }
+                    dir = ws.get(0).path;
+                    for (int i = 1; i < ws.size(); i++) extra.add(ws.get(i).path);
+                }
+                String prompt = personaPrompt(emp, d) + workspaceSection(ws);
                 // 每个需求一个全新的独立会话：不排在飞书私聊/E2E 后面，也不继承之前需求累积的上下文
                 String reply = claudeCodeService.chatInLane(demandLane(demandId), instanceId,
-                        prompt, dir, inst.getClaudeModel(), listener);
+                        prompt, dir, extra, inst.getClaudeModel(), listener);
                 if (reply != null && (reply.startsWith("❌") || reply.startsWith("⏰"))) {
                     markFailed(demandId, reply);
                 } else {
                     markDone(demandId, reply != null ? reply : "");
+                    // 工作区收尾在需求线程里同步做完再调度下一个需求，避免下一个需求同时动同一仓库
+                    if (!ws.isEmpty() && demandRepo.findById(demandId).map(x -> "DONE".equals(x.getStatus())).orElse(false)) {
+                        finishWorkspaces(emp, demandId, ws, "需求完成");
+                    }
                 }
             } catch (Exception e) {
                 log.warn("[员工] 需求执行异常: demand={}, {}", demandId, e.getMessage());
@@ -439,7 +547,9 @@ public class EmployeeService {
             notifyDemandFinished(d, result);
             // 自动 PR：需求完成即提交。持有 E2E 权限的员工按 SOP 会建 E2E 任务，由 E2E 完结时提交，避免重复
             DigitalEmployee owner = employeeRepo.findById(d.getEmployeeId()).orElse(null);
-            if (owner != null && owner.isAutoPr() && !owner.permList().contains("e2e") && d.getInstanceId() != null) {
+            // 配置了工作区的需求由 finishWorkspaces 处理（每个有改动的工作区都 git qpr），这里只管兜底流程
+            if (owner != null && owner.isAutoPr() && !owner.permList().contains("e2e") && d.getInstanceId() != null
+                    && WorkspaceGitService.parse(d.getWorkspacesJson()).isEmpty()) {
                 submitPrAsync(owner, d.getInstanceId(), d.getId(), "d" + d.getId(), d.getTitle(), "需求完成");
             }
         });
@@ -698,21 +808,37 @@ public class EmployeeService {
 
         final Long instId = target;
         final String ctxTitle = demandTitle;
+        final List<WorkspaceGitService.Workspace> ws = demandId != null && demandTitle != null
+                ? WorkspaceGitService.parse(demandRepo.findById(demandId).map(EmployeeDemand::getWorkspacesJson).orElse(null))
+                : new ArrayList<>();
         ChatTurn turn = new ChatTurn(instId, demandId);
         chatTurns.put(empId, turn);
         Thread.ofVirtual().name("emp-chat-" + empId).start(() -> {
             try {
                 BotInstance inst = instanceRepo.findById(instId).orElseThrow();
                 String dir = firstNonBlank(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
+                List<String> extra = new ArrayList<>();
+                if (!ws.isEmpty()) {
+                    // 追问复用需求的工作区：重新 fetch + 新工作分支，结束后同样合并 + git qpr
+                    EmployeeDemand dd = demandRepo.findById(demandId).orElseThrow();
+                    String err = prepareWorkspaces(emp, dd, ws, "d" + demandId + "-f");
+                    if (err != null) {
+                        postMessage(emp, "CHAT", "❌ 追问前准备工作区失败：" + err, demandId, instId);
+                        return;
+                    }
+                    dir = ws.get(0).path;
+                    for (int i = 1; i < ws.size(); i++) extra.add(ws.get(i).path);
+                }
                 // 带需求追问且该需求会话还在 → 直接在需求会话里问（记忆最全）；否则用员工聊天会话
                 String lane = demandId != null && claudeCodeService.hasLiveLane(demandLane(demandId))
                         ? demandLane(demandId) : chatLane(empId, instId);
                 turn.lane = lane;
                 String reply = claudeCodeService.chatInLane(lane, instId,
-                        chatPrompt(emp, text.trim(), ctxTitle), dir, inst.getClaudeModel(),
+                        chatPrompt(emp, text.trim(), ctxTitle) + workspaceSection(ws), dir, extra, inst.getClaudeModel(),
                         new ProgressListener(empId, null, instId, turn.snap, lane));
                 String content = reply == null || reply.isBlank() ? "（无回复内容）" : reply;
                 postMessage(emp, "CHAT", content, demandId, instId);   // 员工回复：落库 + 飞书推送
+                if (!ws.isEmpty()) finishWorkspaces(emp, demandId, ws, "追问完成");
             } catch (Exception e) {
                 log.warn("[员工] 聊天执行失败: emp={}, {}", empId, e.getMessage());
                 try {

@@ -19,7 +19,7 @@ class GitPrServiceTest {
     GitPrService svc;
     File work;
 
-    static String sh(File dir, String... cmd) throws Exception {
+    public static String sh(File dir, String... cmd) throws Exception {
         ProcessBuilder pb = new ProcessBuilder(cmd).directory(dir).redirectErrorStream(true);
         pb.environment().put("GIT_AUTHOR_NAME", "t"); pb.environment().put("GIT_AUTHOR_EMAIL", "t@t");
         pb.environment().put("GIT_COMMITTER_NAME", "t"); pb.environment().put("GIT_COMMITTER_EMAIL", "t@t");

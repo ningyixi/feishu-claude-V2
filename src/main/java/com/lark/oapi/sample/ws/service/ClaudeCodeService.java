@@ -6,6 +6,7 @@ import org.springframework.stereotype.Service;
 
 import jakarta.annotation.PreDestroy;
 import java.io.IOException;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -144,8 +145,14 @@ public class ClaudeCodeService {
      */
     public String chatInLane(String lane, Long instanceId, String message, String workingDir, String model,
                              TurnListener listener) {
+        return chatInLane(lane, instanceId, message, workingDir, List.of(), model, listener);
+    }
+
+    /** @param extraDirs 额外授权目录（--add-dir），多工作区需求用 */
+    public String chatInLane(String lane, Long instanceId, String message, String workingDir, List<String> extraDirs,
+                             String model, TurnListener listener) {
         try {
-            TerminalSession s = getOrCreateLane(lane, instanceId, workingDir, model);
+            TerminalSession s = getOrCreateLane(lane, instanceId, workingDir, extraDirs != null ? extraDirs : List.of(), model);
             laneLastUsed.put(lane, System.currentTimeMillis());
             log.info("[ClaudeCode][lane {}] 发送消息 (instance={})", lane, instanceId);
             try {
@@ -160,19 +167,19 @@ public class ClaudeCodeService {
         }
     }
 
-    private synchronized TerminalSession getOrCreateLane(String lane, Long instanceId, String workingDir, String model)
-            throws IOException {
+    private synchronized TerminalSession getOrCreateLane(String lane, Long instanceId, String workingDir,
+                                                         List<String> extraDirs, String model) throws IOException {
         int sandboxLevel = instanceRepo.findById(instanceId)
                 .map(com.lark.oapi.sample.ws.model.entity.BotInstance::getSandboxLevel)
                 .orElse(SandboxPolicy.LEVEL_FULL);
         TerminalSession s = lanes.get(lane);
         if (s != null && s.isAlive() && nullSafeEquals(s.getWorkingDir(), workingDir == null ? "" : workingDir)
-                && s.getSandboxLevel() == sandboxLevel) {
+                && s.getSandboxLevel() == sandboxLevel && s.getExtraDirs().equals(extraDirs)) {
             return s;
         }
         String inherit = null;
         if (s != null) {
-            if (!s.isAlive() && s.getSandboxLevel() == sandboxLevel
+            if (!s.isAlive() && s.getSandboxLevel() == sandboxLevel && s.getExtraDirs().equals(extraDirs)
                     && nullSafeEquals(s.getWorkingDir(), workingDir == null ? "" : workingDir)) {
                 inherit = s.getClaudeSessionId();   // 进程崩溃 → 新进程 --resume 接回上下文
             }
@@ -181,6 +188,7 @@ public class ClaudeCodeService {
         evictIdleLanes(LANE_IDLE_CAP - 1);
         s = new TerminalSession("lane:" + lane, workingDir, model, sandboxLevel);
         s.inheritSessionId(inherit);
+        s.setExtraDirs(extraDirs);
         s.start();
         lanes.put(lane, s);
         log.info("[ClaudeCode] 创建独立会话 lane={}, instance={}, dir={}", lane, instanceId, workingDir);

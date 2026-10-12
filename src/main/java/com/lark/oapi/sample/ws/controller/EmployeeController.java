@@ -276,6 +276,27 @@ public class EmployeeController {
 
     // ===== 需求 =====
 
+    private static java.util.List<com.lark.oapi.sample.ws.service.WorkspaceGitService.Workspace> workspaces(JsonObject body) {
+        java.util.List<com.lark.oapi.sample.ws.service.WorkspaceGitService.Workspace> out = new java.util.ArrayList<>();
+        if (!body.has("workspaces") || !body.get("workspaces").isJsonArray()) return out;
+        for (var e : body.getAsJsonArray("workspaces")) {
+            JsonObject o = e.getAsJsonObject();
+            out.add(new com.lark.oapi.sample.ws.service.WorkspaceGitService.Workspace(opt(o, "path"), opt(o, "branch")));
+        }
+        return out;
+    }
+
+    /** 下发对话框里逐行校验工作区：路径存在且是 git 仓库、远端分支可解析 */
+    @PostMapping(value = "/workspaces/validate", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> validateWorkspace(@RequestBody String rawBody) {
+        JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+        String err = employeeService.validateWorkspace(opt(body, "path"), opt(body, "branch"));
+        JsonObject o = new JsonObject();
+        o.addProperty("ok", err == null);
+        if (err != null) o.addProperty("error", err);
+        return ResponseEntity.ok(o.toString());
+    }
+
     /** 下发需求（自动入队并立即调度） */
     @PostMapping(value = "/{id}/demands", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> dispatch(@PathVariable Long id, @RequestBody String rawBody) {
@@ -283,7 +304,8 @@ public class EmployeeController {
             JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
             Long instanceId = body.has("instanceId") && !body.get("instanceId").isJsonNull()
                     ? body.get("instanceId").getAsLong() : null;
-            EmployeeDemand d = employeeService.dispatchDemand(id, opt(body, "requirement"), opt(body, "title"), instanceId);
+            EmployeeDemand d = employeeService.dispatchDemand(id, opt(body, "requirement"), opt(body, "title"), instanceId,
+                    workspaces(body));
             return ResponseEntity.ok(demandJson(d, instanceNames()).toString());
         } catch (IllegalArgumentException ex) {
             return badRequest(ex.getMessage());
@@ -344,6 +366,8 @@ public class EmployeeController {
 
     private JsonObject demandJson(EmployeeDemand d, Map<Long, String> instNames) {
         JsonObject o = new JsonObject();
+        o.add("workspaces", JsonParser.parseString(com.lark.oapi.sample.ws.service.WorkspaceGitService.toJson(
+                com.lark.oapi.sample.ws.service.WorkspaceGitService.parse(d.getWorkspacesJson()))));
         o.addProperty("id", d.getId());
         o.addProperty("employeeId", d.getEmployeeId());
         o.addProperty("title", d.getTitle());

@@ -49,6 +49,14 @@ public class EmployeeDemand {
     @Column(name = "timeline_json")
     private String timelineJson;
 
+    /** 本需求的工作区（JSON 数组：path + 远端分支 + 运行时状态），见 WorkspaceGitService；空 = 用实例目录 */
+    @Lob
+    @Column(name = "workspaces_json")
+    private String workspacesJson;
+
+    public String getWorkspacesJson() { return workspacesJson; }
+    public void setWorkspacesJson(String v) { this.workspacesJson = v; }
+
     public String getTimelineJson() { return timelineJson; }
     public void setTimelineJson(String timelineJson) { this.timelineJson = timelineJson; }
 
