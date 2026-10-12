@@ -1113,3 +1113,8 @@ body {
   .emp-col-right { overflow: visible; }
   .emp-col-right > .card:first-child, .emp-col-right > .card:last-child { max-height: none; overflow: visible; }
 }
+
+/* ===== 登录 ===== */
+.login-wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
+.login-card { width: 100%; max-width: 360px; padding: 28px 26px; }
+.nav-logout { margin-top: auto; cursor: pointer; background: none; border: none; }

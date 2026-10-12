@@ -5,6 +5,7 @@ import E2ETest from './pages/E2ETest'
 import Hooks from './pages/Hooks'
 import Supplier from './pages/Supplier'
 import Employees from './pages/Employees'
+import Login from './pages/Login'
 
 const NAV = [
   { to: '/', label: '📡', title: '实例' },
@@ -15,6 +16,22 @@ const NAV = [
 ]
 
 export default function App() {
+  const [authed, setAuthed] = useState(null)   // null=检查中
+  useEffect(() => {
+    fetch('/api/auth/me').then(r => r.json()).then(d => setAuthed(!!d.authenticated)).catch(() => setAuthed(false))
+    const onUnauth = () => setAuthed(false)
+    window.addEventListener('panel-unauthorized', onUnauth)
+    return () => window.removeEventListener('panel-unauthorized', onUnauth)
+  }, [])
+  if (authed === null) return null
+  if (!authed) return <Login onDone={() => setAuthed(true)} />
+  return <Panel onLogout={async () => {
+    await fetch('/api/auth/logout', { method: 'POST' }).catch(() => {})
+    setAuthed(false)
+  }} />
+}
+
+function Panel({ onLogout }) {
   // 数字员工未读上报数 → 👔 图标右上角红点（仿飞书消息角标），15s 轮询
   const [empUnread, setEmpUnread] = useState(0)
 
@@ -46,6 +63,10 @@ export default function App() {
               <span className="nav-label">{n.title}</span>
             </NavLink>
           ))}
+          <button className="nav-item nav-logout" onClick={onLogout} title="退出登录">
+            <span className="nav-icon">🚪</span>
+            <span className="nav-label">退出</span>
+          </button>
         </nav>
         <main className="main">
           <Routes>
