@@ -44,6 +44,14 @@ public class EmployeeDemand {
     @Lob
     private String result;
 
+    /** 执行时间线（SSE 事件的压缩快照，JSON 数组；需求结束时落库，重启后仍可回看执行过程） */
+    @Lob
+    @Column(name = "timeline_json")
+    private String timelineJson;
+
+    public String getTimelineJson() { return timelineJson; }
+    public void setTimelineJson(String timelineJson) { this.timelineJson = timelineJson; }
+
     @Column(name = "error_message", length = 1000)
     private String errorMessage;
 

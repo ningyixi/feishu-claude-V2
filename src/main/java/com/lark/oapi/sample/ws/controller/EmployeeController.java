@@ -125,6 +125,14 @@ public class EmployeeController {
         return eventBus.subscribe(id);
     }
 
+    /** 已结束需求的执行时间线（落库快照；展开需求时按需拉取） */
+    @GetMapping(value = "/demands/{did}/timeline", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> timeline(@PathVariable Long did) {
+        return demandRepo.findById(did)
+                .map(d -> ResponseEntity.ok(d.getTimelineJson() != null ? d.getTimelineJson() : "[]"))
+                .orElse(ResponseEntity.notFound().build());
+    }
+
     /** 员工详情 = 员工 + 全部需求（RUNNING 内嵌实时进度快照 + 实例名回填） */
     @GetMapping(value = "/{id}", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> detail(@PathVariable Long id) {

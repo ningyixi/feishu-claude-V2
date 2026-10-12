@@ -379,8 +379,9 @@ public class EmployeeService {
             d.setStatus("DONE");
             d.setResult(result);
             d.setFinishedAt(LocalDateTime.now());
-            demandRepo.save(d);
             publishStatus(d);
+            d.setTimelineJson(eventBus.demandTimelineJson(d.getEmployeeId(), d.getId()));
+            demandRepo.save(d);
             log.info("[员工] 需求完成: demand={}, 结果 {} 字", demandId, result.length());
             notifyDemandFinished(d, result);
         });
@@ -392,8 +393,9 @@ public class EmployeeService {
             d.setStatus("FAILED");
             d.setErrorMessage(truncate(error, 1000));
             d.setFinishedAt(LocalDateTime.now());
-            demandRepo.save(d);
             publishStatus(d);
+            d.setTimelineJson(eventBus.demandTimelineJson(d.getEmployeeId(), d.getId()));
+            demandRepo.save(d);
             DigitalEmployee emp = employeeRepo.findById(d.getEmployeeId()).orElse(null);
             if (emp != null) {
                 postMessage(emp, "FAILED", "❌ 需求「" + d.getTitle() + "」执行失败：" + d.getErrorMessage()

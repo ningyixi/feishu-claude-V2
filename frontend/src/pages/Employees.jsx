@@ -537,12 +537,12 @@ function EmployeeDetail({ empId, onBack, showToast }) {
                     <b style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>需求内容</b>
                     <div style={{ whiteSpace: 'pre-wrap', marginTop: 2 }}>{d.requirement}</div>
                   </div>
-                  {timelines['d' + d.id]?.length > 0 && (
+                  {timelines['d' + d.id]?.length > 0 ? (
                     <div style={{ marginBottom: 8 }}>
                       <b style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>执行过程</b>
                       <LiveTimeline events={timelines['d' + d.id]} running={d.status === 'RUNNING'} />
                     </div>
-                  )}
+                  ) : ['DONE', 'FAILED'].includes(d.status) && <SavedTimeline demandId={d.id} />}
                   {d.errorMessage && (
                     <div style={{ color: 'var(--error)', marginBottom: 8, fontSize: 12 }}>⚠ {d.errorMessage}</div>
                   )}
@@ -989,6 +989,33 @@ function LiveTimeline({ events, running }) {
           </div>
         )
       })}
+    </div>
+  )
+}
+
+/** 已结束需求的执行过程（从落库快照还原，重启/刷新后也能回看） */
+function SavedTimeline({ demandId }) {
+  const [events, setEvents] = useState(null)
+  useEffect(() => {
+    fetch(`/api/employees/demands/${demandId}/timeline`).then(r => r.ok ? r.json() : []).then(raw => {
+      const list = []
+      for (const ev of raw || []) {
+        if (ev.kind === 'tool_start') list.push({ kind: 'tool', toolId: ev.toolId, name: ev.name, detail: ev.detail, status: 'running', ts: ev.ts })
+        else if (ev.kind === 'tool_end') {
+          const i = list.findIndex(x => x.kind === 'tool' && x.toolId === ev.toolId)
+          const item = { kind: 'tool', toolId: ev.toolId, name: ev.name, detail: ev.detail, status: ev.status, elapsedMs: ev.elapsedMs, ts: i >= 0 ? list[i].ts : ev.ts }
+          if (i >= 0) list[i] = item; else list.push(item)
+        } else if (ev.kind === 'text' || ev.kind === 'thinking') list.push({ kind: ev.kind, text: ev.delta || '', ts: ev.ts })
+        else list.push(ev)
+      }
+      setEvents(list)
+    }).catch(() => setEvents([]))
+  }, [demandId])
+  if (!events || events.length === 0) return null
+  return (
+    <div style={{ marginBottom: 8 }}>
+      <b style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>执行过程（已保存）</b>
+      <LiveTimeline events={events} running={false} />
     </div>
   )
 }

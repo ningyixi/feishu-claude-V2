@@ -96,6 +96,31 @@ public class EmployeeEventBus {
         }));
     }
 
+    /** 取某需求的全部事件（文本/思考增量合并，限 300 条、单条文本 4000 字）→ JSON 数组，用于落库 */
+    public String demandTimelineJson(Long employeeId, Long demandId) {
+        ArrayDeque<JsonObject> buf = replay.get(employeeId);
+        com.google.gson.JsonArray out = new com.google.gson.JsonArray();
+        if (buf == null) return out.toString();
+        synchronized (buf) {
+            JsonObject last = null;
+            for (JsonObject e : buf) {
+                if (!e.has("demandId") || e.get("demandId").getAsLong() != demandId) continue;
+                String kind = e.get("kind").getAsString();
+                if ("message".equals(kind)) continue;
+                if (("text".equals(kind) || "thinking".equals(kind)) && last != null
+                        && kind.equals(last.get("kind").getAsString())) {
+                    String merged = last.get("delta").getAsString() + (e.has("delta") ? e.get("delta").getAsString() : "");
+                    last.addProperty("delta", merged.length() > 4000 ? merged.substring(merged.length() - 4000) : merged);
+                    continue;
+                }
+                last = e.deepCopy();
+                out.add(last);
+            }
+        }
+        while (out.size() > 300) out.remove(0);
+        return out.toString();
+    }
+
     public void clear(Long employeeId) {
         replay.remove(employeeId);
     }
