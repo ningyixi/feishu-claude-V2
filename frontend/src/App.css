@@ -1079,3 +1079,27 @@ body {
 .tl-tool.error .tl-body b { color: #dc2626; }
 .tl-error .tl-body { color: #dc2626; }
 .tl-done .tl-body { color: #16a34a; }
+
+/* ===== 数字员工详情：全屏两栏（左聊天 / 右实例+需求） ===== */
+.main:has(.emp-detail) { max-width: none; padding: 12px 16px; overflow: hidden; height: 100vh; }
+.emp-detail { height: calc(100vh - 24px); display: flex; flex-direction: column; min-height: 0; }
+.emp-detail > div:first-child { flex: 0 0 auto; }
+.emp-detail-grid {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: 3fr 2fr; gap: 14px;
+}
+.emp-col-left, .emp-col-right { min-height: 0; min-width: 0; }
+.emp-col-left { display: flex; flex-direction: column; }
+.emp-col-right { overflow-y: auto; padding-right: 2px; }
+.emp-col-right > .card { margin-bottom: 14px; }
+.emp-chat-card { flex: 1; min-height: 0; display: flex; flex-direction: column; margin-bottom: 0; }
+.emp-chat-card .emp-msgs { flex: 1; min-height: 0; max-height: none; overflow-y: auto; }
+.emp-chat-card .emp-chat-input { flex: 0 0 auto; }
+
+@media (max-width: 900px) {
+  .main:has(.emp-detail) { height: auto; overflow-y: auto; }
+  .emp-detail { height: auto; }
+  .emp-detail-grid { grid-template-columns: 1fr; }
+  .emp-col-right { overflow: visible; }
+  .emp-chat-card { height: 70vh; }
+}

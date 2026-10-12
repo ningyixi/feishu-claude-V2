@@ -427,7 +427,7 @@ function EmployeeDetail({ empId, onBack, showToast }) {
   })()
 
   return (
-    <div>
+    <div className="emp-detail">
       {/* 头部 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, flexWrap: 'wrap' }}>
         <button className="btn" onClick={onBack}>← 返回</button>
@@ -456,12 +456,16 @@ function EmployeeDetail({ empId, onBack, showToast }) {
         <button className="btn btn-primary" onClick={() => setDispatching(true)}>📮 下发需求</button>
       </div>
 
+      <div className="emp-detail-grid">
+      <div className="emp-col-left">
       {/* 💬 双向聊天框：员工上报 + 老板直接对话派活 + 🖥 Shell 直通命令（打开即已读） */}
       <EmpMsgPanel empId={empId} messages={data.messages} unreadCount={data.unreadCount}
         chatProgress={data.chatProgress} shellProgress={data.shellProgress} emp={emp}
         chatTimeline={timelines.chat}
         defaultShellInstance={defaultShellInstance} replyTo={replyTo}
         clearReplyTo={() => setReplyTo(null)} showToast={showToast} />
+      </div>
+      <div className="emp-col-right">
 
       {/* 实例工位：哪个实例正在做哪个需求 */}
       <div className="card" style={{ padding: '14px 16px' }}>
@@ -569,6 +573,8 @@ function EmployeeDetail({ empId, onBack, showToast }) {
           )
         })}
       </div>
+      </div>
+      </div>
 
       {editing && <EmployeeForm initial={emp} onCancel={() => setEditing(false)}
         onDone={() => { setEditing(false); load() }} showToast={showToast} />}
@@ -611,7 +617,7 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
 
   const busy = !!chatProgress || !!shellProgress
   return (
-    <div className="card" style={{ padding: '14px 16px' }}>
+    <div className="card emp-chat-card" style={{ padding: '14px 16px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 13, fontWeight: 700 }}>💬 聊天框</span>
         {/* 模式切换：对话（经 Claude，可干活）/ Shell（直通命令行，确定性执行） */}
@@ -660,7 +666,7 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
         </div>
       )}
       {!(messages?.length > 0) && !busy && (
-        <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '6px 0' }}>
+        <div className="emp-msgs" style={{ fontSize: 12, color: 'var(--text-dim)', padding: '6px 0' }}>
           员工的上报（完成/失败/卡住/定期汇报）会出现在这里。
         </div>
       )}
