@@ -392,9 +392,17 @@ public class TerminalSession {
      */
     private static void injectClaudeEnv(ProcessBuilder pb) {
         try {
-            java.nio.file.Path settings = java.nio.file.Path.of(
-                    System.getProperty("user.home"), ".claude", "settings.json");
-            if (!java.nio.file.Files.exists(settings)) return;
+            // 配置目录：优先 CLAUDE_CONFIG_DIR 环境变量（用户可能已把配置转移，如 Z:\YIXI\claude\config），
+            // 回退 ~/.claude/settings.json（老位置）
+            java.nio.file.Path home = java.nio.file.Path.of(System.getProperty("user.home"), ".claude", "settings.json");
+            String cfgDir = System.getenv("CLAUDE_CONFIG_DIR");
+            java.nio.file.Path settings = (cfgDir != null && !cfgDir.isBlank())
+                    ? java.nio.file.Path.of(cfgDir, "settings.json")
+                    : home;
+            if (!java.nio.file.Files.exists(settings)) {
+                if (settings.equals(home) || !java.nio.file.Files.exists(home)) return;
+                settings = home;   // CLAUDE_CONFIG_DIR 指向的目录没有 settings.json → 回退老位置
+            }
             String json = java.nio.file.Files.readString(settings, java.nio.charset.StandardCharsets.UTF_8);
             com.google.gson.JsonObject root = com.google.gson.JsonParser.parseString(json).getAsJsonObject();
             if (!root.has("env") || !root.get("env").isJsonObject()) return;
@@ -406,7 +414,7 @@ public class TerminalSession {
                 }
             }
             if (n > 0) {
-                log.info("[Terminal] 已注入 settings.json env 块 {} 个环境变量到 CLI 进程（值不落日志）", n);
+                log.info("[Terminal] 已注入 {} 的 env 块 {} 个环境变量到 CLI 进程（值不落日志）", settings, n);
             }
         } catch (Exception ex) {
             log.warn("[Terminal] settings.json env 注入失败（CLI 将按自身认证逻辑运行）: {}", ex.getMessage());
