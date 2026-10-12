@@ -544,6 +544,20 @@ function EmployeeDetail({ empId, onBack, showToast }) {
                     <b style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>需求内容</b>
                     <div style={{ whiteSpace: 'pre-wrap', marginTop: 2 }}>{d.requirement}</div>
                   </div>
+                  {d.workspaces?.length > 0 && (
+                    <div style={{ marginBottom: 8, fontSize: 12.5 }}>
+                      <b style={{ color: 'var(--text-dim)' }}>工作区</b>
+                      {d.workspaces.map((w, i) => (
+                        <div key={i} style={{ marginTop: 2 }}>
+                          {w.status === 'OK' ? '✅' : w.status === 'NO_CHANGES' ? '➖' : w.status === 'FAILED' ? '❌' : '📁'}{' '}
+                          <code>{w.path}</code> · {w.branch}
+                          {w.workBranch ? <span style={{ color: 'var(--text-dim)' }}> · {w.workBranch}</span> : null}
+                          {w.url ? <> · <a href={w.url} target="_blank" rel="noreferrer">{w.url}</a></> : null}
+                          {w.error ? <div style={{ color: '#dc2626' }}>{w.error}</div> : null}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {timelines['d' + d.id]?.length > 0 ? (
                     <div style={{ marginBottom: 8 }}>
                       <b style={{ fontSize: 12.5, color: 'var(--text-dim)' }}>执行过程</b>
@@ -789,9 +803,29 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
   const [title, setTitle] = useState('')
   const [instanceId, setInstanceId] = useState('')   // '' = 自动分派
   const [saving, setSaving] = useState(false)
+  const [workspaces, setWorkspaces] = useState([])   // [{ path, branch, error }]
+  const setWs = (i, patch) => setWorkspaces(ws => ws.map((w, j) => j === i ? { ...w, ...patch } : w))
+
+  async function validateWs(i) {
+    const w = workspaces[i]
+    if (!w || !w.path.trim() || !w.branch.trim()) return
+    try {
+      const r = await fetch('/api/employees/workspaces/validate', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: w.path.trim(), branch: w.branch.trim() }),
+      })
+      const d = await r.json()
+      setWs(i, { error: d.ok ? '' : d.error, ok: !!d.ok })
+    } catch { /* 提交时后端还会再校验 */ }
+  }
 
   async function submit() {
     if (!requirement.trim()) { showToast('请填写需求内容', 'error'); return }
+    for (let i = 0; i < workspaces.length; i++) {
+      const w = workspaces[i]
+      if (!w.path.trim()) { showToast(`工作区 #${i + 1}：代码路径必填`, 'error'); return }
+      if (!w.branch.trim()) { showToast(`工作区 #${i + 1}：远端分支必填`, 'error'); return }
+    }
     setSaving(true)
     try {
       const res = await fetch(`/api/employees/${emp.id}/demands`, {
@@ -800,6 +834,7 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
           requirement: requirement.trim(),
           title: title.trim() || null,
           instanceId: instanceId ? Number(instanceId) : null,
+          workspaces: workspaces.map(w => ({ path: w.path.trim(), branch: w.branch.trim() })),
         }),
       })
       const d = await res.json()
@@ -833,6 +868,30 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
             需求自动入队开工；绑定多个实例时可同时各做一个需求（每实例同一时刻一个）。
           </div>
+        </div>
+        <div className="form-group">
+          <label className="form-label">工作区 <span style={{ color: 'var(--text-dim)', fontWeight: 400, fontSize: 12 }}>
+            可选；如前端 + 后端。每个 = 本地仓库路径 + 它跟踪的远端分支。留空 = 用实例工作目录</span></label>
+          {workspaces.map((w, i) => (
+            <div key={i} style={{ marginBottom: 6 }}>
+              <div style={{ display: 'flex', gap: 6 }}>
+                <input className="form-input" style={{ flex: 3 }} value={w.path} placeholder="代码路径，如 /home/me/proj/frontend"
+                  onChange={e => setWs(i, { path: e.target.value, error: '', ok: false })} onBlur={() => validateWs(i)} />
+                <input className="form-input" style={{ flex: 2 }} value={w.branch} placeholder="远端分支，如 origin/dev"
+                  onChange={e => setWs(i, { branch: e.target.value, error: '', ok: false })} onBlur={() => validateWs(i)} />
+                <button className="btn" title="移除" onClick={() => setWorkspaces(ws => ws.filter((_, j) => j !== i))}>✕</button>
+              </div>
+              {w.error ? <div style={{ fontSize: 12, color: '#dc2626', marginTop: 2 }}>{w.error}</div>
+                : w.ok ? <div style={{ fontSize: 12, color: '#16a34a', marginTop: 2 }}>✓ git 仓库，分支可用</div> : null}
+            </div>
+          ))}
+          <button className="btn" onClick={() => setWorkspaces(ws => [...ws, { path: '', branch: '', error: '' }])}>＋ 添加工作区</button>
+          {workspaces.length > 0 && (
+            <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 6, lineHeight: 1.6 }}>
+              开工前逐个 fetch 远端分支、更新本地跟踪分支并新建工作分支 <code>feishu-claude/员工-需求-时间</code>；完成后提交、合并回跟踪分支，
+              在每个有改动的工作区执行 <code>git qpr</code>（无改动跳过）。追问会复用这些工作区。
+            </div>
+          )}
         </div>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
           <button className="btn" onClick={onCancel}>取消</button>
@@ -931,6 +990,7 @@ const TL_META = {
   error: { icon: '❌', color: '#dc2626' },
   pr: { icon: '🔀', color: '#0891b2' },
   pr_done: { icon: '🔀', color: '#16a34a' },
+  ws_done: { icon: '📦', color: '#16a34a' },
 }
 const STATUS_TEXT = { QUEUED: '进入队列', RUNNING: '开工', DONE: '已完成', FAILED: '失败', CANCELLED: '已取消', INTERRUPTED: '被中断' }
 
@@ -981,6 +1041,10 @@ function LiveTimeline({ events, running }) {
           case 'thinking': body = <span className="tl-text tl-think">{e.text}</span>; break
           case 'text': body = <span className="tl-text">{e.text}</span>; break
           case 'pr': body = <span className="tl-text">{e.text}</span>; break
+          case 'ws_done': body = <>{e.status === 'OK' ? '已 git qpr' : e.status === 'NO_CHANGES' ? '无改动，跳过' : '失败'}
+            <code className="tl-detail">{e.path}{e.workBranch ? ` · ${e.workBranch} → ${e.trackBranch}` : ''}</code>
+            {e.url ? <a href={e.url} target="_blank" rel="noreferrer" className="tl-meta">{e.url}</a> : null}
+            {e.error ? <span className="tl-meta" style={{ color: '#dc2626' }}>{e.error}</span> : null}</>; break
           case 'pr_done': body = <>{e.status === 'OK' ? 'PR 已提交' : e.status === 'NO_CHANGES' ? '无改动，跳过 PR' : 'PR 提交失败'}
             {e.branch ? <code className="tl-detail">{e.branch}{e.base ? ` → ${e.base}` : ''}</code> : null}
             {e.url ? <a href={e.url} target="_blank" rel="noreferrer" className="tl-meta">{e.url}</a> : null}
