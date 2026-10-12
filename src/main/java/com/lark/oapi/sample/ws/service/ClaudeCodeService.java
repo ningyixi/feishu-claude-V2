@@ -104,13 +104,18 @@ public class ClaudeCodeService {
             session.destroy();
         }
 
-        // 旧的进程可能已死，清理掉
+        // 旧的进程可能已死，清理掉；配置没变（只是进程崩溃）→ 继承 session_id，新进程 --resume 接回上下文
+        String inherit = null;
         if (session != null) {
+            boolean sameConfig = nullSafeEquals(session.getWorkingDir(), workingDir == null ? "" : workingDir)
+                    && session.getSandboxLevel() == sandboxLevel;
+            if (sameConfig && !session.isAlive()) inherit = session.getClaudeSessionId();
             session.destroy();
         }
 
         String sessionKey = instanceId + ":" + (workingDir != null ? workingDir : "");
         session = new TerminalSession(sessionKey, workingDir, model, sandboxLevel);
+        session.inheritSessionId(inherit);
         session.start();
         sessions.put(instanceId, session);
         log.info("[ClaudeCode] 创建新终端: instanceId={}, dir={}, 沙箱={}", instanceId, workingDir, SandboxPolicy.label(sandboxLevel));
@@ -165,9 +170,17 @@ public class ClaudeCodeService {
                 && s.getSandboxLevel() == sandboxLevel) {
             return s;
         }
-        if (s != null) s.destroy();
+        String inherit = null;
+        if (s != null) {
+            if (!s.isAlive() && s.getSandboxLevel() == sandboxLevel
+                    && nullSafeEquals(s.getWorkingDir(), workingDir == null ? "" : workingDir)) {
+                inherit = s.getClaudeSessionId();   // 进程崩溃 → 新进程 --resume 接回上下文
+            }
+            s.destroy();
+        }
         evictIdleLanes(LANE_IDLE_CAP - 1);
         s = new TerminalSession("lane:" + lane, workingDir, model, sandboxLevel);
+        s.inheritSessionId(inherit);
         s.start();
         lanes.put(lane, s);
         log.info("[ClaudeCode] 创建独立会话 lane={}, instance={}, dir={}", lane, instanceId, workingDir);

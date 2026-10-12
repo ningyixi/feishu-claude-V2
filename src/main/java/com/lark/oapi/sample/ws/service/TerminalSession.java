@@ -57,6 +57,11 @@ public class TerminalSession {
     private volatile BufferedWriter writer;
     private volatile BufferedReader reader;
     private volatile String claudeSessionId;
+    /** 进程崩溃/看门狗重启时用 --resume 接回原会话上下文（-Dterminal.resumeOnRestart=false 关闭） */
+    private static final boolean RESUME_ON_RESTART = Boolean.parseBoolean(System.getProperty("terminal.resumeOnRestart", "true"));
+    /** 本次进程启动是否带了 --resume；若进程在收到 init 前就退出，视为恢复失败，下次改为全新会话 */
+    private volatile String resumingFrom;
+    private volatile boolean initSeen;
     private volatile String detectedModel;
     private volatile boolean alive;
     private volatile long lastEventTime;
@@ -102,7 +107,15 @@ public class TerminalSession {
             return;
         }
 
+        // 曾经拿到过 session_id（说明是重启而非首次启动）→ 尝试接回上下文，避免崩溃一次就"失忆"
+        resumingFrom = RESUME_ON_RESTART && claudeSessionId != null && !claudeSessionId.isBlank() ? claudeSessionId : null;
+        initSeen = false;
         List<String> command = buildCommand();
+        if (resumingFrom != null) {
+            command.add("--resume");
+            command.add(resumingFrom);
+            log.info("[Terminal] 重启并恢复会话上下文: --resume {}", resumingFrom);
+        }
         log.info("[Terminal] 启动常驻进程: {}", String.join(" ", command));
 
         ProcessBuilder pb = new ProcessBuilder(command);
@@ -126,10 +139,22 @@ public class TerminalSession {
             log.error("[Terminal] 进程启动失败: command={}", command, e);
             throw e;
         }
+        if (resumingFrom != null) {
+            // --resume 指向的会话不存在/损坏时 CLI 会立刻退出：等一小会儿确认，失败就改起全新会话，不把错误甩给本轮消息
+            try { process.waitFor(1500, TimeUnit.MILLISECONDS); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+            if (!process.isAlive()) {
+                log.warn("[Terminal] --resume {} 启动即退出（exit={}），改为全新会话", resumingFrom, process.exitValue());
+                claudeSessionId = null;
+                resumingFrom = null;
+                start();
+                return;
+            }
+        }
         writer = new BufferedWriter(new OutputStreamWriter(process.getOutputStream(), StandardCharsets.UTF_8));
         reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8));
         lastEventTime = System.currentTimeMillis();
 
+        alive = true;   // 必须先于 reader 线程置位，否则 readerLoop 首次检查 alive 可能直接退出
         Thread.ofVirtual().name("stderr-" + sessionKey).start(this::readStderr);
         readerThread = Thread.ofVirtual().name("reader-" + sessionKey).start(this::readerLoop);
 
@@ -215,6 +240,11 @@ public class TerminalSession {
     }
 
     public String getClaudeSessionId() { return claudeSessionId; }
+
+    /** 替换一个已死的旧会话对象时，把它的 session_id 交给新对象，start() 会用 --resume 接回上下文 */
+    public void inheritSessionId(String id) {
+        if (id != null && !id.isBlank() && claudeSessionId == null) claudeSessionId = id;
+    }
     public String getWorkingDir() { return workingDir; }
     public String getModel() { return model != null && !model.isBlank() ? model : detectedModel; }
 
@@ -511,6 +541,10 @@ public class TerminalSession {
             log.info("[Terminal] reader 读取结束: {}", e.getMessage());
         } finally {
             alive = false;
+            if (resumingFrom != null && !initSeen) {
+                log.warn("[Terminal] --resume {} 失败（进程在 init 前退出），下次启动改为全新会话", resumingFrom);
+                claudeSessionId = null;
+            }
             // 进程退出：未完成轮次以错误收尾（不阻塞 future）
             Turn t = currentTurn;
             if (t != null && !t.future.isDone()) {
@@ -542,6 +576,7 @@ public class TerminalSession {
     private void handleSystem(JsonObject event, String subtype) {
         switch (subtype) {
             case "init" -> {
+                initSeen = true;
                 if (event.has("session_id")) claudeSessionId = event.get("session_id").getAsString();
                 if (event.has("model") && !event.get("model").isJsonNull()) detectedModel = event.get("model").getAsString();
                 log.info("[Terminal] [init] session_id={}, model={}", claudeSessionId, detectedModel);
