@@ -152,6 +152,7 @@ public class ShellService {
 
     private void killShell() {
         if (shellProcess != null && shellProcess.isAlive()) {
+            TerminalSession.killDescendants(shellProcess);
             shellProcess.destroyForcibly();
         }
         alive = false;

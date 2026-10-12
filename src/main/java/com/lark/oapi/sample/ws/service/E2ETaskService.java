@@ -650,11 +650,13 @@ public class E2ETaskService {
             try (BufferedReader r = new BufferedReader(
                     new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
                 String line;
-                while ((line = r.readLine()) != null && out.length() < GIT_OUTPUT_CAP) {
-                    out.append(line).append("\n");
+                // 超出上限后继续读完丢弃：提前停读会让子进程写满管道阻塞，直到超时
+                while ((line = r.readLine()) != null) {
+                    if (out.length() < GIT_OUTPUT_CAP) out.append(line).append("\n");
                 }
             }
             if (!p.waitFor(GIT_TIMEOUT_SEC, TimeUnit.SECONDS)) {
+                TerminalSession.killDescendants(p);
                 p.destroyForcibly();
                 return "（git 命令超时）";
             }

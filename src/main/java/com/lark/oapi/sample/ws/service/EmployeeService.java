@@ -806,7 +806,7 @@ public class EmployeeService {
         });
 
         boolean finished = p.waitFor(SHELL_TIMEOUT_SEC, java.util.concurrent.TimeUnit.SECONDS);
-        if (!finished) p.destroyForcibly();
+        if (!finished) { TerminalSession.killDescendants(p); p.destroyForcibly(); }
         reader.join(5_000);
         long elapsed = (System.currentTimeMillis() - t0) / 1000;
         String output = out.toString();

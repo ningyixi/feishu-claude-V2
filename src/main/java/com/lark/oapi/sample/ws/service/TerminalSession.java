@@ -147,6 +147,7 @@ public class TerminalSession {
         }
         closeQuietly(writer);
         if (process != null) {
+            killDescendants(process);   // Windows 下实际是 cmd.exe → node(claude)，只杀父进程会遗留孤儿
             process.destroy();
             try {
                 if (!process.waitFor(5, TimeUnit.SECONDS)) {
@@ -473,6 +474,13 @@ public class TerminalSession {
 
     // ===== 内部：stdout 事件读取循环 =====
 
+    /** 强杀整棵子进程树（claude 会再起 node / bash 工具子进程，父进程退出不会带走它们） */
+    static void killDescendants(Process p) {
+        try {
+            p.descendants().forEach(ProcessHandle::destroyForcibly);
+        } catch (Exception ignored) {}
+    }
+
     private void readerLoop() {
         try {
             String line;
@@ -715,6 +723,7 @@ public class TerminalSession {
         alive = false;
         closeQuietly(writer);
         if (process != null) {
+            killDescendants(process);
             process.destroyForcibly();
             try { process.waitFor(3, TimeUnit.SECONDS); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
         }
