@@ -41,6 +41,11 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
     private final E2EOrchestrator orchestrator;
     /** taskId → 观众会话集合 */
     private final Map<String, Set<WebSocketSession>> viewers = new ConcurrentHashMap<>();
+    /** 列表页（/ws/e2e?lobby=1）订阅者：任何群聊有新消息/状态变化都推一条精简 task_activity，供侧栏排序与未读计数 */
+    private final Set<WebSocketSession> lobby = ConcurrentHashMap.newKeySet();
+    /** 会产生"新消息"或状态变化的事件；delta/thinking/tool 这类高频增量不推给列表 */
+    private static final Set<String> LOBBY_EVENTS = Set.of("user_message", "system", "turn_start", "complete", "error",
+            "stage", "pipeline_reset", "ask", "ask_resolved", "a2a_task", "round_report");
 
     public E2EWebSocketHandler(E2ETaskService taskService, E2EOrchestrator orchestrator) {
         this.taskService = taskService;
@@ -52,6 +57,10 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
     public void afterConnectionEstablished(WebSocketSession rawSession) throws Exception {
         String taskId = queryParam(rawSession.getUri(), "taskId");
         WebSocketSession session = new ConcurrentWebSocketSessionDecorator(rawSession, SEND_TIME_LIMIT_MS, BUFFER_SIZE_LIMIT);
+        if (taskId == null && "1".equals(queryParam(rawSession.getUri(), "lobby"))) {
+            lobby.add(session);
+            return;
+        }
 
         E2ETaskService.E2ETask task = taskId != null ? taskService.getTask(taskId) : null;
         if (task == null) {
@@ -96,6 +105,7 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
+        lobby.removeIf(s -> s.getId().equals(session.getId()));
         String taskId = queryParam(session.getUri(), "taskId");
         if (taskId != null) {
             Set<WebSocketSession> set = viewers.get(taskId);
@@ -109,6 +119,8 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
     /** 广播任务事件给所有观众（实现 E2ETaskService.Broadcaster） */
     @Override
     public void broadcast(String taskId, JsonObject event) {
+        String type = event.has("type") ? event.get("type").getAsString() : "";
+        if (!lobby.isEmpty() && LOBBY_EVENTS.contains(type)) notifyLobby(taskId);
         Set<WebSocketSession> set = viewers.get(taskId);
         if (set == null || set.isEmpty()) return;
         String payload = event.toString();
@@ -118,6 +130,24 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
             } catch (Exception e) {
                 log.warn("[E2E WS] 推送失败，移除观众: {}", e.getMessage());
                 set.remove(s);
+            }
+        }
+    }
+
+    /** 推给列表订阅者：该群聊的最新摘要（排序时间、消息数、最后一条预览、状态） */
+    public void notifyLobby(String taskId) {
+        E2ETaskService.E2ETask task = taskService.getTask(taskId);
+        JsonObject ev = new JsonObject();
+        ev.addProperty("type", task != null ? "task_activity" : "task_removed");
+        ev.addProperty("taskId", taskId);
+        if (task != null) ev.add("task", taskJson(task));
+        String payload = ev.toString();
+        for (WebSocketSession s : lobby) {
+            try {
+                if (s.isOpen()) s.sendMessage(new TextMessage(payload));
+                else lobby.remove(s);
+            } catch (Exception e) {
+                lobby.remove(s);
             }
         }
     }
@@ -148,6 +178,20 @@ public class E2EWebSocketHandler extends TextWebSocketHandler implements E2ETask
         if (task.creatorEmployeeId != null) t.addProperty("creatorEmployeeId", task.creatorEmployeeId);
         t.addProperty("creatorEmployeeName", task.creatorEmployeeName != null ? task.creatorEmployeeName : "");
         t.addProperty("createdAt", task.createdAt);
+        // 侧栏：消息数（未读计数基准）、最后活动时间、最后一条预览
+        java.util.List<E2ETaskService.TurnRecord> tr = task.transcript;
+        t.addProperty("messageCount", tr.size());
+        E2ETaskService.TurnRecord last = tr.isEmpty() ? null : tr.get(tr.size() - 1);
+        t.addProperty("lastActivityAt", last != null ? Math.max(last.startMs, task.createdAt) : task.createdAt);
+        if (last != null) {
+            String body = "agent".equals(last.kind)
+                    ? (last.errorMessage != null ? "❌ " + last.errorMessage : last.answer.length() > 0 ? last.answer.toString() : "正在回复…")
+                    : last.userText;
+            String who = "system".equals(last.kind) ? "" : "user".equals(last.kind)
+                    ? (last.authorName != null && !last.authorName.isBlank() ? last.authorName : "用户") : last.authorLabel();
+            String pv = (who.isEmpty() ? "" : who + "：") + (body == null ? "" : body.replaceAll("\\s+", " ").trim());
+            t.addProperty("lastPreview", pv.length() > 80 ? pv.substring(0, 80) + "…" : pv);
+        }
         t.addProperty("busy", task.busy);
         // active = 整条流水线进行中（含阶段间隙/成员长执行），黄点闪到 DONE/FAILED 为止
         t.addProperty("active", task.busy || (task.pipelineStarted && !task.pipelineDone && !task.cancelled));

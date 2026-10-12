@@ -27,10 +27,17 @@ public class E2EController {
 
     private final E2ETaskService taskService;
     private final E2EOrchestrator orchestrator;
+    private final org.springframework.beans.factory.ObjectProvider<com.lark.oapi.sample.ws.config.E2EWebSocketHandler> wsHandler;
+
+    private void lobby(String taskId) {
+        try { var h = wsHandler.getIfAvailable(); if (h != null) h.notifyLobby(taskId); } catch (Exception ignored) {}
+    }
     private final com.lark.oapi.sample.ws.service.EmployeeService employeeService;
 
     public E2EController(E2ETaskService taskService, E2EOrchestrator orchestrator,
-                         com.lark.oapi.sample.ws.service.EmployeeService employeeService) {
+                         com.lark.oapi.sample.ws.service.EmployeeService employeeService,
+                         org.springframework.beans.factory.ObjectProvider<com.lark.oapi.sample.ws.config.E2EWebSocketHandler> wsHandler) {
+        this.wsHandler = wsHandler;
         this.taskService = taskService;
         this.orchestrator = orchestrator;
         this.employeeService = employeeService;
@@ -80,6 +87,7 @@ public class E2EController {
 
             E2ETaskService.E2ETask task = taskService.createTask(members, requirement, autoFix, maxRounds, commMode,
                     creatorEmployeeId, creatorName);
+            lobby(task.id);
             return ResponseEntity.ok(E2EWebSocketHandler.taskJson(task).toString());
         } catch (SecurityException e) {
             return forbidden(e.getMessage());
@@ -124,6 +132,7 @@ public class E2EController {
     public ResponseEntity<String> delete(@PathVariable String id) {
         if (taskService.getTask(id) == null) return ResponseEntity.notFound().build();
         taskService.destroyTask(id);
+        lobby(id);
         return ResponseEntity.ok("{\"ok\":true}");
     }
 

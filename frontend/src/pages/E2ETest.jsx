@@ -60,6 +60,11 @@ export default function E2ETest() {
   const [modal, setModal] = useState(null)
   const [toast, setToast] = useState(null)
   const [showCreate, setShowCreate] = useState(false)
+  const [search, setSearch] = useState('')
+  const [bumped, setBumped] = useState({})           // taskId → 本地收到活动的时间（排序用）
+  const [lastRead, setLastRead] = useState(loadLastRead)   // taskId → 已读消息数（localStorage 持久化）
+  const [mobileChat, setMobileChat] = useState(false) // 窄屏：列表视图 / 聊天视图
+  const [showSide, setShowSide] = useState(() => localStorage.getItem('e2e.showPipeline') !== '0')
 
   const wsRef = useRef(null)
   const deltaBuf = useRef({})
@@ -67,7 +72,61 @@ export default function E2ETest() {
   const scrollRef = useRef(null)
   const stickBottom = useRef(true)
 
-  useEffect(() => { loadInstances(); loadTasks() }, [])
+  useEffect(() => {
+    loadInstances(); loadTasks()
+    const t = setInterval(loadTasks, 20000)   // 兜底：列表 WS 断线期间也能慢慢跟上
+    return () => clearInterval(t)
+  }, [])
+
+  // ===== 列表实时：/ws/e2e?lobby=1 推每个群聊的活动摘要（新群聊/新消息 → 置顶 + 未读） =====
+  useEffect(() => {
+    let ws, timer, closed = false
+    const connect = () => {
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+      ws = new WebSocket(`${proto}://${window.location.host}/ws/e2e?lobby=1`)
+      ws.onmessage = ev => {
+        let e
+        try { e = JSON.parse(ev.data) } catch { return }
+        if (e.type === 'task_activity' && e.task) {
+          setTasks(prev => {
+            const i = prev.findIndex(t => t.id === e.taskId)
+            if (i < 0) return [e.task, ...prev]
+            const arr = [...prev]; arr[i] = e.task; return arr
+          })
+          setBumped(b => ({ ...b, [e.taskId]: Date.now() }))
+        } else if (e.type === 'task_removed') {
+          setTasks(prev => prev.filter(t => t.id !== e.taskId))
+        }
+      }
+      ws.onclose = () => { if (!closed) timer = setTimeout(connect, 3000) }
+    }
+    connect()
+    return () => { closed = true; clearTimeout(timer); if (ws) { ws.onclose = null; ws.close() } }
+  }, [])
+
+  // 首次使用：把现有群聊都记为已读，避免一进来全是红点
+  useEffect(() => {
+    if (localStorage.getItem(LAST_READ_KEY) != null || tasks.length === 0) return
+    const seed = {}
+    tasks.forEach(t => { seed[t.id] = t.messageCount || 0 })
+    setLastRead(seed)
+  }, [tasks])
+  useEffect(() => {
+    if (Object.keys(lastRead).length) localStorage.setItem(LAST_READ_KEY, JSON.stringify(lastRead))
+  }, [lastRead])
+  // 当前打开的群聊：一直保持已读
+  const activeCount = Math.max(turns.filter(Boolean).length,
+    tasks.find(t => t.id === activeTaskId)?.messageCount || 0)
+  useEffect(() => {
+    if (!activeTaskId || document.hidden) return
+    setLastRead(r => (r[activeTaskId] || 0) >= activeCount ? r : { ...r, [activeTaskId]: activeCount })
+  }, [activeTaskId, activeCount])
+
+  function openTask(id) {
+    stickBottom.current = true
+    setActiveTaskId(id)
+    setMobileChat(true)
+  }
 
   async function loadInstances() {
     try { setInstances(await (await fetch('/api/instances')).json()) }
@@ -288,7 +347,7 @@ export default function E2ETest() {
     if (!confirm('删除此测试任务？群聊记录将丢失（各实例自己的飞书会话不受影响）。')) return
     try {
       await fetch(`/api/e2e/tasks/${id}`, { method: 'DELETE' })
-      if (activeTaskId === id) setActiveTaskId(null)
+      if (activeTaskId === id) { setActiveTaskId(null); setMobileChat(false) }
       loadTasks()
       showToast('任务已删除', 'success')
     } catch (e) { showToast('删除失败', 'error') }
@@ -309,46 +368,71 @@ export default function E2ETest() {
 
   const pipeline = taskInfo?.pipeline
 
+  const q = search.trim().toLowerCase()
+  const sorted = tasks
+    .map(t => ({ t, at: Math.max(t.lastActivityAt || 0, t.createdAt || 0, bumped[t.id] || 0) }))
+    .filter(({ t }) => !q || (t.requirement || '').toLowerCase().includes(q) || (t.id || '').toLowerCase().includes(q)
+      || (t.creatorEmployeeName || '').toLowerCase().includes(q) || (t.lastPreview || '').toLowerCase().includes(q)
+      || (t.members || []).some(m => (m.name || '').toLowerCase().includes(q)))
+    .sort((x, y) => y.at - x.at)
+  const unreadOf = t => t.id === activeTaskId ? 0 : Math.max(0, (t.messageCount || 0) - (lastRead[t.id] ?? 0))
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 64px)', overflow: 'hidden', gap: 12 }}>
-      {/* 顶部：任务标签条 + 新建（紧凑单行） */}
-      <div className="card" style={{ padding: '8px 14px', flexShrink: 0, marginBottom: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-          <h1 className="page-title" style={{ margin: 0, fontSize: 16 }}>🧪 E2E 测试群聊</h1>
-          {tasks.length > 0 && (
-            <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', flex: 1 }}>
-              {tasks.map(t => (
-                <span key={t.id} onClick={() => setActiveTaskId(t.id)}
-                  className={'task-tab' + (t.id === activeTaskId ? ' active' : '')}
-                  title={`需求: ${t.requirement}\n成员: ${t.members.map(m => m.roleEmoji + m.name).join(' / ')}\n${t.commMode === 'a2a' ? '🔗 A2A 任务信封（跨目录可用）' : t.sharedDir ? '共享目录: ' + t.sharedDir : '成员目录不同（群聊全文模式）'}\n创建者: ${t.creatorEmployeeId ? '👔 数字员工「' + (t.creatorEmployeeName || t.creatorEmployeeId) + '」' : '👑 admin'}`}>
-                  {t.pendingQuestion
-                    ? <span title="流水线暂停，等你回答提问">⏸</span>
-                    : (t.busy || t.active) && <span className="task-dot" />}
-                  {t.creatorEmployeeId
-                    ? <span title={`由数字员工「${t.creatorEmployeeName || t.creatorEmployeeId}」创建`}>👔</span>
-                    : <span title="由管理员创建">👑</span>}
-                  {t.members.map(m => m.roleEmoji).join('')} {truncate(t.requirement, 14)}
-                  {t.pipeline?.stage === 'DONE' && <span style={{ color: '#16a34a' }}>✓</span>}
-                  {t.pipeline?.stage === 'FAILED' && <span style={{ color: '#dc2626' }}>✗</span>}
-                  {t.interrupted && <span style={{ color: '#d97706' }} title="应用重启中断，可读档续跑">⚠</span>}
-                  <button className="task-del" onClick={e => handleDelete(t.id, e)}>×</button>
-                </span>
-              ))}
+    <div className={'e2e-shell' + (mobileChat ? ' show-chat' : '') + (taskInfo && showSide ? ' with-side' : '')}>
+      {/* 左：群聊列表（按最近活动排序，未读红点） */}
+      <aside className="card e2e-list">
+        <div className="e2e-list-head">
+          <h1 className="page-title" style={{ margin: 0, fontSize: 15 }}>🧪 E2E 群聊</h1>
+          <button className="btn btn-primary" style={{ fontSize: 12.5, padding: '4px 10px' }}
+            onClick={() => setShowCreate(true)}>+ 新建群聊</button>
+        </div>
+        <div style={{ padding: '0 10px 8px' }}>
+          <input className="form-input e2e-search" placeholder="🔍 搜索需求 / 成员 / 消息" value={search}
+            onChange={e => setSearch(e.target.value)} />
+        </div>
+        <div className="e2e-list-items">
+          {sorted.length === 0 && (
+            <div style={{ padding: 20, textAlign: 'center', color: 'var(--text-dim)', fontSize: 12.5 }}>
+              {tasks.length ? '没有匹配的群聊' : '还没有群聊，点「+ 新建群聊」开始'}
             </div>
           )}
-          <div style={{ flex: 1 }} />
-          <button className="btn btn-primary" style={{ fontSize: 13, padding: '5px 14px' }}
-            onClick={() => setShowCreate(true)}>+ 新建群聊任务</button>
+          {sorted.map(({ t, at }) => {
+            const unread = unreadOf(t)
+            const st = taskStatus(t)
+            return (
+              <div key={t.id} className={'e2e-item' + (t.id === activeTaskId ? ' active' : '') + (unread > 0 ? ' has-unread' : '')} onClick={() => openTask(t.id)}
+                title={`需求: ${t.requirement}\n成员: ${(t.members || []).map(m => m.roleEmoji + m.name).join(' / ')}\n创建者: ${t.creatorEmployeeId ? '👔 数字员工「' + (t.creatorEmployeeName || t.creatorEmployeeId) + '」' : '👑 admin'}`}>
+                <div className="e2e-avatar" style={{ background: avatarColor(t.id) }}>
+                  {avatarText(t)}
+                  <span className="e2e-avatar-tag">{t.creatorEmployeeId ? '👔' : '👑'}</span>
+                </div>
+                <div className="e2e-item-main">
+                  <div className="e2e-item-row">
+                    <span className="e2e-item-title">{t.requirement || t.id}</span>
+                    <span className="e2e-item-time">{fmtRel(at)}</span>
+                  </div>
+                  <div className="e2e-item-row">
+                    <span className="e2e-item-preview">{t.lastPreview || (t.members || []).map(m => m.roleEmoji + m.name).join(' · ')}</span>
+                    {st && <span className={'e2e-status ' + st.cls}>{st.label}</span>}
+                  </div>
+                </div>
+                {unread > 0 && <span className="e2e-unread">{unread > 99 ? '99+' : unread}</span>}
+                <button className="task-del e2e-item-del" title="删除群聊" onClick={e => handleDelete(t.id, e)}>×</button>
+              </div>
+            )
+          })}
         </div>
-      </div>
+      </aside>
 
-      {/* 主体行：左群聊（占满剩余高度） + 右流水线状态栏 */}
-      <div style={{ flex: 1, display: 'flex', gap: 12, minHeight: 0 }}>
+      {/* 中：当前群聊（消息独立滚动、输入框固定底部） */}
+      <div className="e2e-main">
         <div className="card chat-area" style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 0, marginBottom: 0 }}>
           <div className="chat-header" style={{ padding: '7px 14px' }}>
+            <button className="btn e2e-back" onClick={() => setMobileChat(false)} title="返回群聊列表">‹ 返回</button>
             {taskInfo ? (
               <>
-                <span>💬 <code>{taskInfo.id}</code></span>
+                <span className="e2e-chat-title" title={taskInfo.requirement}>💬 {truncate(taskInfo.requirement, 40) || taskInfo.id}</span>
+                <code style={{ fontSize: 11, color: 'var(--text-dim)' }}>{taskInfo.id}</code>
                 {taskInfo.creatorEmployeeId
                   ? <span className="hook-badge" title="由数字员工创建">👔 {taskInfo.creatorEmployeeName || `员工#${taskInfo.creatorEmployeeId}`}</span>
                   : <span className="hook-badge dim" title="由管理员创建">👑 admin</span>}
@@ -361,7 +445,13 @@ export default function E2ETest() {
                   <span style={{ color: '#2563eb', fontSize: 12, fontWeight: 700 }} title="同群续派的第 N 轮任务">🔁 第 {taskInfo.pipeline.runIndex} 轮</span>
                 )}
                 {(taskInfo.busy || (taskInfo.pipelineStarted && !taskInfo.pipelineDone)) && <span className="spinner" title="流水线执行中" />}
+                {taskStatus(taskInfo) && <span className={'e2e-status ' + taskStatus(taskInfo).cls}>{taskStatus(taskInfo).label}</span>}
                 <span className={'conn-badge ' + (connected ? 'on' : 'off')}>{connected ? '● 已连接' : '○ 未连接'}</span>
+                <button className="btn" style={{ fontSize: 12, padding: '3px 10px' }}
+                  onClick={() => { const v = !showSide; setShowSide(v); localStorage.setItem('e2e.showPipeline', v ? '1' : '0') }}>
+                  {showSide ? '收起流水线' : '📊 流水线'}</button>
+                <button className="btn" style={{ fontSize: 12, padding: '3px 10px', color: 'var(--error)' }}
+                  onClick={e => handleDelete(taskInfo.id, e)}>删除</button>
               </>
             ) : <span style={{ color: 'var(--text-dim)', fontSize: 13 }}>选择或新建一个群聊任务开始</span>}
           </div>
@@ -438,7 +528,7 @@ export default function E2ETest() {
         </div>
 
         {/* 右侧流水线状态栏（独立滚动，不占聊天高度；历史轮次归档在上、当前轮在下递增） */}
-        {taskInfo && (
+        {taskInfo && showSide && (
           <div className="card pipeline-side" style={{ marginBottom: 0 }}>
             {(pipeline?.history || []).map(h => <RunBlock key={h.runIndex} run={h} />)}
             {(pipeline?.history?.length || 0) > 0 && (
@@ -460,7 +550,7 @@ export default function E2ETest() {
           <div className="modal-box" style={{ maxWidth: 1500, width: 'min(1500px, 96vw)' }} onClick={ev => ev.stopPropagation()}>
             <div className="modal-title">🧪 新建 E2E 测试群聊任务</div>
             <CreatePanel instances={instances} onClose={() => setShowCreate(false)}
-              onCreated={async (id) => { setShowCreate(false); await loadTasks(); setActiveTaskId(id) }}
+              onCreated={async (id) => { setShowCreate(false); await loadTasks(); openTask(id) }}
               setModal={setModal} showToast={showToast} />
           </div>
         </div>
@@ -484,6 +574,46 @@ export default function E2ETest() {
 }
 
 function truncate(s, n) { return !s ? '' : (s.length <= n ? s : s.slice(0, n) + '…') }
+
+const LAST_READ_KEY = 'e2e.lastRead'
+function loadLastRead() {
+  try { return JSON.parse(localStorage.getItem(LAST_READ_KEY) || '{}') || {} } catch { return {} }
+}
+
+/** 微信式相对时间：刚刚 / N 分钟前 / 今天 HH:mm / 昨天 / M/D */
+function fmtRel(ts) {
+  if (!ts) return ''
+  const d = new Date(ts), now = new Date()
+  const diff = now - d
+  if (diff < 60_000) return '刚刚'
+  if (diff < 3600_000) return Math.floor(diff / 60_000) + ' 分钟前'
+  const sameDay = d.toDateString() === now.toDateString()
+  if (sameDay) return d.toTimeString().slice(0, 5)
+  const y = new Date(now); y.setDate(now.getDate() - 1)
+  if (d.toDateString() === y.toDateString()) return '昨天'
+  return d.getFullYear() === now.getFullYear() ? `${d.getMonth() + 1}/${d.getDate()}` : `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`
+}
+
+const AVATAR_COLORS = ['#3370ff', '#7c3aed', '#0891b2', '#16a34a', '#d97706', '#db2777', '#4f46e5', '#0d9488']
+function avatarColor(id) {
+  let h = 0
+  for (const c of String(id || '')) h = (h * 31 + c.charCodeAt(0)) >>> 0
+  return AVATAR_COLORS[h % AVATAR_COLORS.length]
+}
+function avatarText(t) {
+  const s = (t.requirement || t.id || '?').replace(/^[\s\p{P}\p{S}]+/u, '')
+  return (s[0] || '?').toUpperCase()
+}
+
+function taskStatus(t) {
+  if (!t) return null
+  if (t.pendingQuestion) return { label: '⏸ 待回答', cls: 'ask' }
+  if (t.interrupted) return { label: '⚠ 中断', cls: 'warn' }
+  if (t.pipeline?.stage === 'DONE') return { label: '✓ 完成', cls: 'ok' }
+  if (t.pipeline?.stage === 'FAILED') return { label: '✗ 失败', cls: 'fail' }
+  if (t.busy || t.active) return { label: '进行中', cls: 'run' }
+  return null
+}
 
 // ===== 创建面板 =====
 
