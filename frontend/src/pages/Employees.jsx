@@ -591,9 +591,11 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
   const [sending, setSending] = useState(false)
   const [mode, setMode] = useState('chat')            // chat | shell
   const [shellInstance, setShellInstance] = useState('')
+  // 只在用户停留在底部附近时自动跟随；往上翻看历史时不被拽回去（自己发消息时强制回到底部）
+  const stickRef = useRef(true)
   useEffect(() => {
-    if (boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight
-  }, [messages?.length, chatProgress?.phase, chatProgress?.answerTail, shellProgress?.elapsedMs])
+    if (boxRef.current && stickRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight
+  }, [messages?.length, chatProgress?.phase, chatProgress?.answerTail, shellProgress?.elapsedMs, chatTimeline?.length])
 
   async function send() {
     const t = text.trim()
@@ -611,6 +613,7 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
       const d = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(d.error || '发送失败')
       setText('')
+      stickRef.current = true
       if (mode === 'chat' && replyTo) clearReplyTo()
     } catch (e) { showToast(e.message, 'error') } finally { setSending(false) }
   }
@@ -633,7 +636,8 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
         </span>
       </div>
       {(messages?.length > 0 || busy) && (
-        <div className="emp-msgs" ref={boxRef}>
+        <div className="emp-msgs" ref={boxRef}
+          onScroll={e => { const b = e.currentTarget; stickRef.current = b.scrollHeight - b.scrollTop - b.clientHeight < 60 }}>
           {[...(messages || [])].reverse().map(m => m.sender === 'boss'
             ? <BossBubble key={m.id} m={m} />
             : <MsgBubble key={m.id} m={m} emp={emp} />)}
