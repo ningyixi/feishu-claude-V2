@@ -43,7 +43,7 @@ public class E2EController {
      * 直接 @RequestBody JsonObject 会被静默反序列化成空对象（members 丢失）。
      */
     @PostMapping(value = "/tasks", produces = "application/json;charset=UTF-8")
-    public ResponseEntity<String> create(@RequestBody String rawBody) {
+    public ResponseEntity<String> create(@RequestBody String rawBody, jakarta.servlet.http.HttpServletRequest req) {
         try {
             JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
             List<E2ETaskService.MemberSpec> members = new java.util.ArrayList<>();
@@ -63,8 +63,10 @@ public class E2EController {
             String commMode = body.has("commMode") && !body.get("commMode").isJsonNull()
                     ? body.get("commMode").getAsString() : "filesystem";
             // 创建者：数字员工（校验 e2e 权限）或管理员用户（缺省）
-            Long creatorEmployeeId = body.has("creatorEmployeeId") && !body.get("creatorEmployeeId").isJsonNull()
-                    ? body.get("creatorEmployeeId").getAsLong() : null;
+            // 身份来自员工令牌 / 面板登录，请求体 creatorEmployeeId 只做一致性校验
+            Long creatorEmployeeId = com.lark.oapi.sample.ws.config.RequestIdentity.creator(req,
+                    body.has("creatorEmployeeId") && !body.get("creatorEmployeeId").isJsonNull()
+                            ? body.get("creatorEmployeeId").getAsLong() : null);
             String creatorName = null;
             if (creatorEmployeeId != null) {
                 creatorName = employeeService.requirePermission(creatorEmployeeId, "e2e").getName();
@@ -79,6 +81,8 @@ public class E2EController {
             E2ETaskService.E2ETask task = taskService.createTask(members, requirement, autoFix, maxRounds, commMode,
                     creatorEmployeeId, creatorName);
             return ResponseEntity.ok(E2EWebSocketHandler.taskJson(task).toString());
+        } catch (SecurityException e) {
+            return forbidden(e.getMessage());
         } catch (IllegalArgumentException | IllegalStateException e) {
             return badRequest(e.getMessage());
         } catch (Exception e) {
@@ -137,15 +141,18 @@ public class E2EController {
      * 数字员工调用（带 creatorEmployeeId）时：需 e2e 权限，且只能启动自己创建的任务。
      */
     @PostMapping(value = "/tasks/{id}/start", produces = "application/json;charset=UTF-8")
-    public ResponseEntity<String> start(@PathVariable String id, @RequestBody(required = false) String rawBody) {
+    public ResponseEntity<String> start(@PathVariable String id, @RequestBody(required = false) String rawBody,
+                                        jakarta.servlet.http.HttpServletRequest req) {
         E2ETaskService.E2ETask task = taskService.getTask(id);
         if (task == null) return ResponseEntity.notFound().build();
         try {
-            Long empId = parseCreator(rawBody);
+            Long empId = com.lark.oapi.sample.ws.config.RequestIdentity.creator(req, parseCreator(rawBody));
             if (empId != null) {
                 employeeService.requirePermission(empId, "e2e");
                 assertTaskCreator(task, empId);
             }
+        } catch (SecurityException e) {
+            return forbidden(e.getMessage());
         } catch (IllegalArgumentException e) {
             return badRequest(e.getMessage());
         }
@@ -158,7 +165,8 @@ public class E2EController {
      * 数字员工发言带 creatorEmployeeId（需 e2e 权限 + 只能操作自己创建的任务），群聊里显示 👔 员工身份。
      */
     @PostMapping(value = "/tasks/{id}/message", produces = "application/json;charset=UTF-8")
-    public ResponseEntity<String> message(@PathVariable String id, @RequestBody String rawBody) {
+    public ResponseEntity<String> message(@PathVariable String id, @RequestBody String rawBody,
+                                          jakarta.servlet.http.HttpServletRequest req) {
         E2ETaskService.E2ETask task = taskService.getTask(id);
         if (task == null) return ResponseEntity.notFound().build();
         try {
@@ -167,8 +175,8 @@ public class E2EController {
             if (text.isBlank()) return badRequest("消息内容不能为空");
             String to = body.has("to") && !body.get("to").isJsonNull() ? body.get("to").getAsString() : "auto";
             String authorName = "用户";
-            Long empId = body.has("creatorEmployeeId") && !body.get("creatorEmployeeId").isJsonNull()
-                    ? body.get("creatorEmployeeId").getAsLong() : null;
+            Long empId = com.lark.oapi.sample.ws.config.RequestIdentity.creator(req, body.has("creatorEmployeeId") && !body.get("creatorEmployeeId").isJsonNull()
+                    ? body.get("creatorEmployeeId").getAsLong() : null);
             if (empId != null) {
                 var emp = employeeService.requirePermission(empId, "e2e");
                 assertTaskCreator(task, empId);
@@ -176,9 +184,17 @@ public class E2EController {
             }
             orchestrator.postUserMessage(task, text, to, authorName);
             return ResponseEntity.ok("{\"ok\":true}");
+        } catch (SecurityException e) {
+            return forbidden(e.getMessage());
         } catch (IllegalArgumentException e) {
             return badRequest(e.getMessage());
         }
+    }
+
+    private static ResponseEntity<String> forbidden(String msg) {
+        JsonObject o = new JsonObject();
+        o.addProperty("error", msg);
+        return ResponseEntity.status(403).body(o.toString());
     }
 
     private Long parseCreator(String rawBody) {

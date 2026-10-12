@@ -56,10 +56,13 @@ public class SkillHookController {
     }
 
     @PostMapping
-    public ResponseEntity<?> create(@RequestBody SkillHook body) {
+    public ResponseEntity<?> create(@RequestBody SkillHook body, jakarta.servlet.http.HttpServletRequest req) {
         try {
             validate(body);
             // 创建者：数字员工（校验 hook 权限，Jackson 已把 creatorEmployeeId 绑进实体）或管理员用户
+            // 身份来自员工令牌 / 面板登录（以前 JSON 里的 creatorEmployeeId 绑不到实体，员工创建会被当成 admin）
+            body.setCreatedByEmployeeId(com.lark.oapi.sample.ws.config.RequestIdentity.creator(req, body.getCreatedByEmployeeId()));
+            body.setCreatedByEmployeeName(null);
             if (body.getCreatedByEmployeeId() != null) {
                 var emp = employeeService.requirePermission(body.getCreatedByEmployeeId(), "hook");
                 body.setCreatedByEmployeeName(emp.getName());
@@ -71,6 +74,8 @@ public class SkillHookController {
             log.info("[Hook] 创建: id={}, name={}, trigger={}, creator={}", saved.getId(), saved.getName(), saved.getTriggerType(),
                     saved.getCreatedByEmployeeId() != null ? "员工#" + saved.getCreatedByEmployeeId() : "admin");
             return ResponseEntity.ok(hookMap(saved));
+        } catch (SecurityException e) {
+            return ResponseEntity.status(403).body(Map.of("error", e.getMessage()));
         } catch (IllegalArgumentException e) {
             return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
         }

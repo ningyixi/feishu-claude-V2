@@ -43,7 +43,7 @@ public class SupplierJobController {
     }
 
     @PostMapping(value = "/api/supplier-jobs", produces = "application/json;charset=UTF-8")
-    public ResponseEntity<String> create(@RequestBody String rawBody) {
+    public ResponseEntity<String> create(@RequestBody String rawBody, jakarta.servlet.http.HttpServletRequest req) {
         try {
             JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
             SupplierJob draft = new SupplierJob();
@@ -60,8 +60,11 @@ public class SupplierJobController {
                 draft.setInstanceId(body.get("instanceId").getAsLong());
             }
             // 创建者：数字员工（校验 supplier 权限）或管理员用户（缺省）
-            if (body.has("creatorEmployeeId") && !body.get("creatorEmployeeId").isJsonNull()) {
-                var emp = employeeService.requirePermission(body.get("creatorEmployeeId").getAsLong(), "supplier");
+            Long creator = com.lark.oapi.sample.ws.config.RequestIdentity.creator(req,
+                    body.has("creatorEmployeeId") && !body.get("creatorEmployeeId").isJsonNull()
+                            ? body.get("creatorEmployeeId").getAsLong() : null);
+            if (creator != null) {
+                var emp = employeeService.requirePermission(creator, "supplier");
                 draft.setCreatedByEmployeeId(emp.getId());
                 draft.setCreatedByEmployeeName(emp.getName());
             }
@@ -71,6 +74,9 @@ public class SupplierJobController {
             }
             SupplierJob job = jobService.createJob(draft);
             return ResponseEntity.ok(detailJson(job));
+        } catch (SecurityException e) {
+            JsonObject fo = new JsonObject(); fo.addProperty("error", e.getMessage());
+            return ResponseEntity.status(403).body(fo.toString());
         } catch (IllegalArgumentException e) {
             return err(e.getMessage());
         } catch (Exception e) {

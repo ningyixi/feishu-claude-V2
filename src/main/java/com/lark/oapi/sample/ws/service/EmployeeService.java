@@ -63,6 +63,7 @@ public class EmployeeService {
     private final EmployeeEventBus eventBus;
     private final GitPrService gitPrService;
     private final WorkspaceGitService workspaceGit;
+    private final EmployeeTokenService employeeTokens;
 
     /** demandId → 实时进度快照（内存态，终态即移除） */
     private final Map<Long, ProgressSnapshot> progress = new ConcurrentHashMap<>();
@@ -75,7 +76,8 @@ public class EmployeeService {
                            FeishuBotService feishuBotService,
                            EmployeeEventBus eventBus,
                            GitPrService gitPrService,
-                           WorkspaceGitService workspaceGit) {
+                           WorkspaceGitService workspaceGit,
+                           EmployeeTokenService employeeTokens) {
         this.employeeRepo = employeeRepo;
         this.demandRepo = demandRepo;
         this.msgRepo = msgRepo;
@@ -85,6 +87,7 @@ public class EmployeeService {
         this.eventBus = eventBus;
         this.gitPrService = gitPrService;
         this.workspaceGit = workspaceGit;
+        this.employeeTokens = employeeTokens;
     }
 
     // ===== 需求工作区（多仓库：每个 = 代码路径 + 跟踪的远端分支） =====
@@ -308,6 +311,7 @@ public class EmployeeService {
     public void deleteEmployee(Long id) {
         DigitalEmployee e = employeeRepo.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("员工不存在: " + id));
+        employeeTokens.revoke(id);
         // 运行中的需求 best-effort 中止（不再调度新的）
         for (EmployeeDemand d : demandRepo.findByEmployeeIdOrderByCreatedAtAsc(id)) {
             if ("RUNNING".equals(d.getStatus())) {
@@ -556,7 +560,7 @@ public class EmployeeService {
                 String prompt = personaPrompt(emp, d) + workspaceSection(ws);
                 // 每个需求一个全新的独立会话：不排在飞书私聊/E2E 后面，也不继承之前需求累积的上下文
                 String reply = claudeCodeService.chatInLane(demandLane(demandId), instanceId,
-                        prompt, dir, extra, inst.getClaudeModel(), listener);
+                        prompt, dir, extra, employeeTokens.sessionEnv(empId), inst.getClaudeModel(), listener);
                 if (reply != null && (reply.startsWith("❌") || reply.startsWith("⏰"))) {
                     markFailed(demandId, reply);
                 } else {
@@ -885,7 +889,8 @@ public class EmployeeService {
                         ? demandLane(demandId) : chatLane(empId, instId);
                 turn.lane = lane;
                 String reply = claudeCodeService.chatInLane(lane, instId,
-                        chatPrompt(emp, text.trim(), ctxTitle) + workspaceSection(ws), dir, extra, inst.getClaudeModel(),
+                        chatPrompt(emp, text.trim(), ctxTitle) + workspaceSection(ws), dir, extra,
+                        employeeTokens.sessionEnv(empId), inst.getClaudeModel(),
                         new ProgressListener(empId, null, instId, turn.snap, lane));
                 String content = reply == null || reply.isBlank() ? "（无回复内容）" : reply;
                 postMessage(emp, "CHAT", content, demandId, instId);   // 员工回复：落库 + 飞书推送
@@ -1273,37 +1278,38 @@ public class EmployeeService {
                 + emp.getWorkSpec().trim() + "\n";
     }
 
-    /** 权限段：授权了哪些创建类 API（curl 调用契约 + creatorEmployeeId 必带），未授权明确禁止 */
+    /** 权限段：授权了哪些创建类 API（身份来自会话令牌 X-Employee-Token），未授权明确禁止 */
     private String permissionSection(DigitalEmployee emp) {
         List<String> perms = emp.permList();
         if (perms.isEmpty()) {
             return "\n【系统权限】你当前没有任何创建权限（E2E 测试任务/Hook/供应商工作都不能创建）；"
                     + "需求若涉及这些操作，把要创建的内容写进「需要老板支持」。\n\n";
         }
-        StringBuilder sb = new StringBuilder("\n【系统权限】你被授权在本系统（http://localhost:8080）用 curl 调 REST API 创建以下对象。"
-                + "**请求体 JSON 必须带 \"creatorEmployeeId\": " + emp.getId() + "**（标记创建者是你；服务端会校验，缺失或无权限会被 400 拒绝）：\n");
+        StringBuilder sb = new StringBuilder("\n【系统权限】你被授权调用本系统 REST API（地址在环境变量 $FEISHU_API）创建以下对象。\n"
+                + "**身份认证（必须）**：你的会话环境里有专属令牌 $FEISHU_EMPLOYEE_TOKEN，服务端只凭它认定你是员工#" + emp.getId()
+                + "；不带令牌的本机写请求一律 403 拒绝。推荐用已放在 PATH 里的助手：`fc-api POST /api/e2e/tasks '<json>'`（自动带令牌）；"
+                + "或用 curl：`curl -sS -X POST \"$FEISHU_API/api/e2e/tasks\" -H \"X-Employee-Token: $FEISHU_EMPLOYEE_TOKEN\" "
+                + "-H 'Content-Type: application/json' -d '<json>'`。请求体里的 creatorEmployeeId 可省略（若写必须等于 " + emp.getId()
+                + "，否则拒绝）。不要打印、外传或写入文件你的令牌。\n");
         if (perms.contains("e2e")) {
             sb.append("- E2E 测试任务（创建→启动→群聊→结果回推 全链路）:\n")
               .append("  ① 创建: POST /api/e2e/tasks，body 示例: {\"members\":[{\"instanceId\":1,\"role\":\"programmer\"},"
                     + "{\"instanceId\":1,\"role\":\"designer\"},{\"instanceId\":1,\"role\":\"executor\"}],\"requirement\":\"被测需求描述\","
-                    + "\"autoFix\":true,\"maxRounds\":3,\"commMode\":\"filesystem\",\"creatorEmployeeId\":").append(emp.getId()).append("}"
+                    + "\"autoFix\":true,\"maxRounds\":3,\"commMode\":\"filesystem\"}"
                     + "（可先 GET /api/instances 查实例；同一实例可兼任多角色；commMode 可选 filesystem/a2a；响应含任务 id）\n")
-              .append("  ② 启动流水线: POST /api/e2e/tasks/{id}/start，body {\"creatorEmployeeId\":").append(emp.getId()).append("}（幂等）\n")
-              .append("  ③ 群聊发言: POST /api/e2e/tasks/{id}/message，body {\"text\":\"...\",\"to\":\"auto\",\"creatorEmployeeId\":")
-              .append(emp.getId()).append("}——to=auto 驱动流水线/回答成员提问，to=programmer|designer|executor 单聊某成员；你的发言会以 👔 数字员工身份显示在群聊里\n")
+              .append("  ② 启动流水线: POST /api/e2e/tasks/{id}/start，body {}（幂等）\n")
+              .append("  ③ 群聊发言: POST /api/e2e/tasks/{id}/message，body {\"text\":\"...\",\"to\":\"auto\"}——to=auto 驱动流水线/回答成员提问，to=programmer|designer|executor 单聊某成员；你的发言会以 👔 数字员工身份显示在群聊里\n")
               .append("  ④ 查状态: GET /api/e2e/tasks/{id}（pipeline.stage=DONE/FAILED 即出结果）；流水线结束后系统也会自动把结果推送到你的上报频道，不必长时间轮询等待\n")
               .append("  注意：只能启动/发言你自己创建的任务；E2E 执行可能耗时较长，创建并启动后即可先汇报\"已创建并启动，任务id=xxx\"，不要阻塞等待结果。\n");
         }
         if (perms.contains("hook")) {
             sb.append("- 创建 Hook 任务: POST /api/hooks，body 示例: {\"name\":\"...\",\"instanceIds\":\"1,2\",\"maintainerInstanceId\":1,"
-                    + "\"skillDir\":\"D:\\\\skills\\\\xxx\",\"triggerType\":\"AFTER_CHAT\",\"cronExpr\":\"\",\"enabled\":true,"
-                    + "\"creatorEmployeeId\":").append(emp.getId()).append("}"
+                    + "\"skillDir\":\"D:\\\\skills\\\\xxx\",\"triggerType\":\"AFTER_CHAT\",\"cronExpr\":\"\",\"enabled\":true}"
                     + "（triggerType 可选 AFTER_CHAT/CRON；CRON 时 cronExpr 必填，如 \"0 0 3 * * ?\"）\n");
         }
         if (perms.contains("supplier")) {
             sb.append("- 创建供应商工作: POST /api/supplier-jobs，body 示例: {\"name\":\"...\",\"supplierName\":\"...\",\"supplierCode\":\"...\","
-                    + "\"libraryPath\":\"...\",\"docs\":[],\"skills\":[],\"instanceId\":1,\"templateId\":1,"
-                    + "\"creatorEmployeeId\":").append(emp.getId()).append("}"
+                    + "\"libraryPath\":\"...\",\"docs\":[],\"skills\":[],\"instanceId\":1,\"templateId\":1}"
                     + "（可先 GET /api/workflows 查模板、GET /api/instances 查实例）\n");
         }
         sb.append("未被授权的操作一律禁止尝试。创建成功后在汇报里写明创建了什么对象（含返回的 id）。\n\n");

@@ -42,6 +42,7 @@ public class SkillHook {
 
     /** 创建者：数字员工 id（null = 管理员用户在面板创建） */
     @Column(name = "created_by_employee_id")
+    @com.fasterxml.jackson.annotation.JsonAlias("creatorEmployeeId")
     private Long createdByEmployeeId;
 
     /** 创建者姓名快照（员工被删/改名后标签仍可展示） */

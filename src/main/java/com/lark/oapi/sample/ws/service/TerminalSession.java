@@ -104,6 +104,11 @@ public class TerminalSession {
     public void setExtraDirs(List<String> dirs) { this.extraDirs = dirs != null ? List.copyOf(dirs) : List.of(); }
     public List<String> getExtraDirs() { return extraDirs; }
 
+    /** 额外环境变量（数字员工会话：身份令牌等）；非员工会话为空，且会主动清掉继承来的令牌变量 */
+    private java.util.Map<String, String> extraEnv = java.util.Map.of();
+    public void setExtraEnv(java.util.Map<String, String> env) { this.extraEnv = env != null ? java.util.Map.copyOf(env) : java.util.Map.of(); }
+    public java.util.Map<String, String> getExtraEnv() { return extraEnv; }
+
     // ===== 生命周期 =====
 
     /** 启动 Claude CLI 常驻进程 */
@@ -131,6 +136,15 @@ public class TerminalSession {
             }
         }
         pb.redirectErrorStream(false);
+        pb.environment().remove(EmployeeTokenService.ENV_TOKEN);
+        pb.environment().remove(EmployeeTokenService.ENV_ID);
+        for (var e : extraEnv.entrySet()) {
+            if ("FEISHU_API_BIN".equals(e.getKey())) {
+                String path = pb.environment().getOrDefault("PATH", pb.environment().getOrDefault("Path", ""));
+                pb.environment().put("PATH", e.getValue() + File.pathSeparator + path);
+            }
+            pb.environment().put(e.getKey(), e.getValue());
+        }
 
         // 严格沙箱档（--restricted）会忽略 user/project/local settings 文件（防供应链提权），
         // 网关凭证（ANTHROPIC_AUTH_TOKEN/BASE_URL 等，通常配在 ~/.claude/settings.json 的 env 块）

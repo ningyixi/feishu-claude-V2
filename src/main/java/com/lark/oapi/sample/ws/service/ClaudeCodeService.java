@@ -151,8 +151,15 @@ public class ClaudeCodeService {
     /** @param extraDirs 额外授权目录（--add-dir），多工作区需求用 */
     public String chatInLane(String lane, Long instanceId, String message, String workingDir, List<String> extraDirs,
                              String model, TurnListener listener) {
+        return chatInLane(lane, instanceId, message, workingDir, extraDirs, Map.of(), model, listener);
+    }
+
+    /** @param env 额外环境变量（数字员工身份令牌等），lane 首次创建时注入；变化会重建进程 */
+    public String chatInLane(String lane, Long instanceId, String message, String workingDir, List<String> extraDirs,
+                             Map<String, String> env, String model, TurnListener listener) {
         try {
-            TerminalSession s = getOrCreateLane(lane, instanceId, workingDir, extraDirs != null ? extraDirs : List.of(), model);
+            TerminalSession s = getOrCreateLane(lane, instanceId, workingDir, extraDirs != null ? extraDirs : List.of(),
+                    env != null ? env : Map.of(), model);
             laneLastUsed.put(lane, System.currentTimeMillis());
             log.info("[ClaudeCode][lane {}] 发送消息 (instance={})", lane, instanceId);
             try {
@@ -168,13 +175,13 @@ public class ClaudeCodeService {
     }
 
     private synchronized TerminalSession getOrCreateLane(String lane, Long instanceId, String workingDir,
-                                                         List<String> extraDirs, String model) throws IOException {
+                                                         List<String> extraDirs, Map<String, String> env, String model) throws IOException {
         int sandboxLevel = instanceRepo.findById(instanceId)
                 .map(com.lark.oapi.sample.ws.model.entity.BotInstance::getSandboxLevel)
                 .orElse(SandboxPolicy.LEVEL_FULL);
         TerminalSession s = lanes.get(lane);
         if (s != null && s.isAlive() && nullSafeEquals(s.getWorkingDir(), workingDir == null ? "" : workingDir)
-                && s.getSandboxLevel() == sandboxLevel && s.getExtraDirs().equals(extraDirs)) {
+                && s.getSandboxLevel() == sandboxLevel && s.getExtraDirs().equals(extraDirs) && s.getExtraEnv().equals(env)) {
             return s;
         }
         String inherit = null;
@@ -189,6 +196,7 @@ public class ClaudeCodeService {
         s = new TerminalSession("lane:" + lane, workingDir, model, sandboxLevel);
         s.inheritSessionId(inherit);
         s.setExtraDirs(extraDirs);
+        s.setExtraEnv(env);
         s.start();
         lanes.put(lane, s);
         log.info("[ClaudeCode] 创建独立会话 lane={}, instance={}, dir={}", lane, instanceId, workingDir);
