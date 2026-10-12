@@ -1103,3 +1103,13 @@ body {
   .emp-col-right { overflow: visible; }
   .emp-chat-card { height: 70vh; }
 }
+
+/* 右栏：实例工位固定在顶部，仅需求列表滚动 */
+.emp-col-right { display: flex; flex-direction: column; overflow: hidden; padding-right: 0; }
+.emp-col-right > .card:first-child { flex: none; max-height: 55%; overflow-y: auto; }
+.emp-col-right > .card:last-child { flex: 1; min-height: 0; overflow-y: auto; margin-bottom: 0; }
+.emp-col-right .emp-station .live-timeline { max-height: 140px; }
+@media (max-width: 900px) {
+  .emp-col-right { overflow: visible; }
+  .emp-col-right > .card:first-child, .emp-col-right > .card:last-child { max-height: none; overflow: visible; }
+}
