@@ -797,6 +797,29 @@ function ProgressView({ p }) {  const phaseIcon = { '排队中': '⏳', '思考�
   )
 }
 
+/** 路径规范化（与后端 PathMatch 一致）：\ → /、合并分隔符、去末尾 /、Windows 路径大小写不敏感 */
+export function normPath(p) {
+  if (!p) return ''
+  let s = p.trim().replace(/\\/g, '/')
+  const unc = s.startsWith('//')
+  s = s.replace(/\/+/g, '/').replace(/(^|\/)\.\//g, '$1')
+  if (s.endsWith('/.')) s = s.slice(0, -2)
+  while (s.length > 1 && s.endsWith('/') && !/^[A-Za-z]:\/$/.test(s)) s = s.slice(0, -1)
+  if (unc) s = '/' + s
+  return unc || /^[A-Za-z]:(\/.*)?$/.test(s) ? s.toLowerCase() : s
+}
+const covers = (a, b) => !!a && !!b && (a === b || b.startsWith(a.endsWith('/') ? a : a + '/'))
+export function pathMatches(instDir, wsPath) {
+  const a = normPath(instDir), b = normPath(wsPath)
+  return covers(a, b) || covers(b, a)
+}
+/** 2 = 与主工作区一致，1 = 与其它工作区一致，0 = 都不一致 */
+export function matchScore(instDir, paths) {
+  if (!paths.length || !instDir) return 0
+  if (pathMatches(instDir, paths[0])) return 2
+  return paths.some(p => pathMatches(instDir, p)) ? 1 : 0
+}
+
 /** 下发需求弹窗 */
 function DemandForm({ emp, onCancel, onDone, showToast }) {
   const [requirement, setRequirement] = useState('')
@@ -805,6 +828,22 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
   const [saving, setSaving] = useState(false)
   const [workspaces, setWorkspaces] = useState([])   // [{ path, branch, error }]
   const setWs = (i, patch) => setWorkspaces(ws => ws.map((w, j) => j === i ? { ...w, ...patch } : w))
+  const [instTouched, setInstTouched] = useState(false)
+  const [confirmMismatch, setConfirmMismatch] = useState(false)
+  const wsPaths = workspaces.map(w => w.path.trim()).filter(Boolean)
+  const insts = emp.instances || []
+  const scored = insts.map(i => ({ ...i, score: matchScore(i.workingDir, wsPaths) }))
+  const bestScore = Math.max(0, ...scored.map(i => i.score))
+  const recommended = bestScore > 0 ? scored.filter(i => i.score === bestScore) : []
+  const selected = scored.find(i => String(i.id) === String(instanceId))
+  const mismatch = wsPaths.length > 0 && (selected ? selected.score === 0 : bestScore === 0)
+  // 自动推荐：老板没手动选过实例时，跟着工作区路径自动选目录一致的实例（唯一最佳才自动选，多个则保持自动分派）
+  useEffect(() => {
+    if (instTouched) return
+    if (recommended.length === 1) setInstanceId(String(recommended[0].id))
+    else setInstanceId('')
+  }, [wsPaths.join('|')])   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { setConfirmMismatch(false) }, [instanceId, wsPaths.join('|')])
 
   async function validateWs(i) {
     const w = workspaces[i]
@@ -826,6 +865,7 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
       if (!w.path.trim()) { showToast(`工作区 #${i + 1}：代码路径必填`, 'error'); return }
       if (!w.branch.trim()) { showToast(`工作区 #${i + 1}：远端分支必填`, 'error'); return }
     }
+    if (mismatch && !confirmMismatch) { showToast('执行实例的工作目录与工作区路径不一致，请改选实例或勾选确认', 'error'); return }
     setSaving(true)
     try {
       const res = await fetch(`/api/employees/${emp.id}/demands`, {
@@ -835,6 +875,7 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
           title: title.trim() || null,
           instanceId: instanceId ? Number(instanceId) : null,
           workspaces: workspaces.map(w => ({ path: w.path.trim(), branch: w.branch.trim() })),
+          confirmMismatch: mismatch && confirmMismatch,
         }),
       })
       const d = await res.json()
@@ -861,10 +902,30 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
         </div>
         <div className="form-group">
           <label className="form-label">执行实例</label>
-          <select className="form-input" value={instanceId} onChange={e => setInstanceId(e.target.value)}>
-            <option value="">🔄 自动分派（挑空闲的绑定实例）</option>
-            {(emp.instances || []).map(i => <option key={i.id} value={i.id}>📡 指定: {i.name}</option>)}
+          <select className="form-input" value={instanceId} onChange={e => { setInstTouched(true); setInstanceId(e.target.value) }}>
+            <option value="">🔄 自动分派（{wsPaths.length ? '挑目录与工作区一致的空闲实例' : '挑空闲的绑定实例'}）</option>
+            {scored.map(i => <option key={i.id} value={i.id}>
+              📡 指定: {i.name}{i.workingDir ? ` — ${i.workingDir}` : ''}{wsPaths.length ? (i.score === 2 ? '  ✓ 推荐（覆盖主工作区）' : i.score === 1 ? '  ✓ 与某个工作区一致' : '  ✗ 目录不一致') : ''}
+            </option>)}
           </select>
+          {mismatch && (
+            <div style={{ marginTop: 6, padding: '8px 10px', borderRadius: 8, background: '#fef2f2', color: '#b91c1c', fontSize: 12.5, lineHeight: 1.6 }}>
+              ⚠️ {selected
+                ? <>所选实例「{selected.name}」的工作目录（{selected.workingDir || '未配置'}）与任何工作区路径都不一致。</>
+                : <>该员工绑定的实例中没有工作目录与工作区路径一致的。</>}
+              写代码的实例目录应等于、包含或位于工作区内（主工作区为第一行），否则 Claude 的权限与上下文会对不上。
+              {recommended.length > 0 && <> 推荐：{recommended.map(r => r.name).join('、')}。</>}
+              <label style={{ display: 'flex', gap: 6, alignItems: 'center', marginTop: 4, cursor: 'pointer' }}>
+                <input type="checkbox" checked={confirmMismatch} onChange={e => setConfirmMismatch(e.target.checked)} />
+                我确认目录不一致也照常下发
+              </label>
+            </div>
+          )}
+          {!mismatch && wsPaths.length > 1 && (
+            <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
+              主工作区（第一行）作为 Claude 当前目录，其余工作区通过 --add-dir 授权访问。
+            </div>
+          )}
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
             需求自动入队开工；绑定多个实例时可同时各做一个需求（每实例同一时刻一个）。
           </div>
@@ -895,7 +956,7 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
         </div>
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 16 }}>
           <button className="btn" onClick={onCancel}>取消</button>
-          <button className="btn btn-primary" onClick={submit} disabled={saving}>{saving ? '下发中…' : '下发需求'}</button>
+          <button className="btn btn-primary" onClick={submit} disabled={saving || (mismatch && !confirmMismatch)}>{saving ? '下发中…' : '下发需求'}</button>
         </div>
       </div>
     </div>
