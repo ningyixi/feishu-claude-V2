@@ -1,0 +1,33 @@
+{
+  "id": "supplier-workbench-kb",
+  "name": "supplier-workbench-kb",
+  "title": "供应商工作台优化：知识库+统一补充入口+执行规范",
+  "description": "为供应商建立知识库(URL/PDF/解析MD/聊天记录)，统一随时补充入口，接口实测规范化(Postman)，执行动作走trellis任务管理",
+  "status": "planning",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "yixi.ning",
+  "assignee": "yixi.ning",
+  "createdAt": "2026-10-28",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "10-28-kb-core",
+    "10-28-kb-web",
+    "10-28-kb-consume",
+    "10-28-postman-spec",
+    "10-28-trellis-runtime",
+    "10-28-steering-ui"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}
