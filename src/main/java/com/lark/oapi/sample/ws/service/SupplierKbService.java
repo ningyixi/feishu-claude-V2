@@ -69,8 +69,10 @@ public class SupplierKbService {
     // ===== 入库 =====
 
     /**
-     * 新增条目。url/pdf → 排队异步解析；chat/note → 原文直接落盘为 DONE。
-     * @param value url=链接, pdf=本地绝对路径, chat/note=文本内容
+     * 新增条目。
+     * url/pdf → 状态 RAW（只存原文引用，**用户在面板点"解析"后才生成 Markdown 产物**）；
+     * md → 本地 Markdown 文件，入库即产物（DONE，无需解析）；chat/note → 原文直接落盘为 DONE。
+     * @param value url=链接, pdf/md=本地绝对路径, chat/note=文本内容
      */
     public SupplierKbEntry add(String kbCode, String type, String value, String title) {
         if (kbCode == null || kbCode.isBlank()) throw new IllegalArgumentException("kbCode 不能为空");
@@ -82,11 +84,10 @@ public class SupplierKbService {
         e.setTitle(title != null && !title.isBlank() ? title.trim() : deriveTitle(type, value));
         switch (type) {
             case "url" -> {
-                DocParser.assertSafeUrl(value.trim());   // 入库即拦一次，解析时还会逐跳复核
+                DocParser.assertSafeUrl(value.trim());   // 入库即拦 SSRF（解析时还会逐跳复核）
                 e.setSource(value.trim());
-                e.setStatus("PENDING");
+                e.setStatus("RAW");                      // 手动解析语义：先只存引用
                 repo.save(e);
-                afterCommit(() -> parseNow(e.getId()));
             }
             case "pdf" -> {
                 Path p = Paths.get(value.trim());
@@ -96,9 +97,29 @@ public class SupplierKbService {
                     if (Files.size(p) > DocParser.MAX_PDF_BYTES) throw new IllegalArgumentException("PDF 超过 50MB 上限");
                 } catch (IOException ex) { throw new IllegalArgumentException("PDF 不可读: " + ex.getMessage()); }
                 e.setSource(value.trim());
-                e.setStatus("PENDING");
+                e.setStatus("RAW");                      // 点"解析"后才提取
                 repo.save(e);
-                afterCommit(() -> parseNow(e.getId()));
+            }
+            case "md" -> {
+                Path p = Paths.get(value.trim());
+                String fn = p.getFileName().toString().toLowerCase();
+                if (!Files.isRegularFile(p)) throw new IllegalArgumentException("Markdown 文件不存在: " + value);
+                if (!(fn.endsWith(".md") || fn.endsWith(".markdown") || fn.endsWith(".txt")))
+                    throw new IllegalArgumentException("仅接受 .md/.markdown/.txt 文件");
+                try {
+                    if (Files.size(p) > 10L * 1024 * 1024) throw new IllegalArgumentException("MD 超过 10MB 上限");
+                    e.setSource(value.trim());
+                    e.setStatus("PENDING");
+                    repo.save(e);
+                    String md = "> 来源MD文件: " + value.trim() + "\n\n" + Files.readString(p, StandardCharsets.UTF_8);
+                    writeMd(e, DocParser.chunk(md.strip() + "\n"), meta(o -> o.addProperty("chars", md.length())));
+                    e.setStatus("DONE");
+                    repo.save(e);
+                } catch (IOException ex) {
+                    e.setStatus("FAILED");
+                    e.setError("读取 MD 文件失败: " + ex.getMessage());
+                    repo.save(e);
+                }
             }
             case "chat", "note" -> {
                 e.setSource("");   // 文本内容直接进 md，source 留空
@@ -191,7 +212,13 @@ public class SupplierKbService {
                 String type = o.has("type") ? o.get("type").getAsString() : "url";
                 String value = o.has("value") ? o.get("value").getAsString() : "";
                 if (value.isBlank()) continue;
-                String mapped = "path".equals(type) ? "pdf" : "url";
+                String mapped;
+                if ("url".equals(type)) {
+                    mapped = "url";
+                } else {
+                    String low = value.trim().toLowerCase();   // 本地路径按扩展名分流（bug 修复：.md 曾被误当 pdf 拒收）
+                    mapped = (low.endsWith(".md") || low.endsWith(".markdown") || low.endsWith(".txt")) ? "md" : "pdf";
+                }
                 if (repo.existsByKbCodeAndTypeAndSource(kbCode, mapped, value.trim())) continue;
                 if (removedRepo.existsByKbCodeAndTypeAndSource(kbCode, mapped, value.trim())) continue;   // 已删除过的不再带回
                 try {
@@ -210,8 +237,9 @@ public class SupplierKbService {
         List<SupplierKbEntry> entries = list(kbCode);
         if (entries.isEmpty()) return "（该供应商知识库为空 — 按任务中给出的来源抓取/阅读，读完建议把要点沉淀回知识库）";
         StringBuilder sb = new StringBuilder();
-        sb.append("【供应商知识库 · ").append(kbCode).append("】以下条目已统一解析为本地 Markdown（含 PDF 页码/原文行号定位）。\n");
-        sb.append("规则：① 优先直接 Read 下列 .md 文件获取内容；② 禁止对状态=已解析 的条目来源再 WebFetch/重复抓取；"
+        sb.append("【供应商知识库 · ").append(kbCode).append("】本库条目如下（解析产物为本地 Markdown，含 PDF 页码/原文行号定位）。\n");
+        sb.append("规则：① 状态=已解析 的条目优先直接 Read 其 .md 文件，禁止再 WebFetch/重复抓取其来源；"
+                + "② 状态=未解析 的条目需要内容时：url 用 WebFetch 抓 来源、pdf/md 本地路径直接 Read 来源文件，用完建议在产物末尾列出「建议解析入库」；"
                 + "③ 状态=解析失败 的条目在报告中如实标注；④ 发现知识库缺失的新文档/沟通结论，在产物末尾列出「建议入库」清单。\n\n");
         int i = 1;
         for (SupplierKbEntry e : entries) {
@@ -220,6 +248,7 @@ public class SupplierKbService {
                 case "DONE" -> sb.append(" — 已解析，文件: ").append(prettyPath(e.getMdPath()));
                 case "FAILED" -> sb.append(" — ✗解析失败: ").append(e.getError());
                 case "PARSING", "PENDING" -> sb.append(" — 解析中…");
+                case "RAW" -> sb.append(" — 未解析");
                 default -> sb.append(" — ").append(e.getStatus());
             }
             if (!e.getSource().isBlank()) sb.append("（来源: ").append(e.getSource()).append('）');
@@ -320,9 +349,9 @@ public class SupplierKbService {
     private static String deriveTitle(String type, String value) {
         return switch (type) {
             case "url" -> value.length() > 80 ? value.substring(0, 80) + "…" : value;
-            case "pdf" -> {
+            case "pdf", "md" -> {
                 String name = Paths.get(value).getFileName().toString();
-                yield name.endsWith(".pdf") ? name.substring(0, name.length() - 4) : name;
+                yield name.replaceAll("\\.(pdf|md|markdown|txt)$", "");
             }
             default -> {
                 String first = value.strip().lines().findFirst().orElse("记录");
@@ -335,6 +364,7 @@ public class SupplierKbService {
         return switch (type) {
             case "url" -> "🔗";
             case "pdf" -> "📕";
+            case "md" -> "📃";
             case "chat" -> "💬";
             default -> "📝";
         };

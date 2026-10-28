@@ -216,7 +216,7 @@ function CreateJob({ onBack, onCreated, showToast }) {
                   <option value="url">🔗 链接</option>
                   <option value="path">📁 本地路径</option>
                 </select>
-                <input className="form-input" style={{ flex: 1 }} placeholder={d.type === 'url' ? 'https://docs.supplier.com/api' : 'D:\\docs\\supplier-api.pdf'}
+                <input className="form-input" style={{ flex: 1 }} placeholder={d.type === 'url' ? 'https://docs.supplier.com/api' : 'D:\\docs\\supplier-api.pdf 或 .md 本地文档'}
                   value={d.value}
                   onChange={e => setForm(f => ({ ...f, docs: f.docs.map((x, xi) => xi === i ? { ...x, value: e.target.value } : x) }))} />
                 <button className="btn" style={{ flexShrink: 0, padding: '4px 10px' }}
@@ -613,15 +613,17 @@ function GameView({ jobId, onBack, showToast }) {
 // ===== 供应商知识库面板（R3：随时补充 URL/PDF/聊天记录/笔记；解析状态可视；产物可人工校正） =====
 
 const KB_TYPES = {
-  url: { icon: '🔗', label: '文档链接', ph: 'https://docs.supplier.com/api（入库自动抓取解析）' },
-  pdf: { icon: '📕', label: '本地 PDF', ph: 'D:\\docs\\supplier-api.pdf（实例可读路径）' },
+  url: { icon: '🔗', label: '文档链接', ph: 'https://docs.supplier.com/api（入库后点「解析」抓取转 MD）' },
+  pdf: { icon: '📕', label: '本地 PDF', ph: 'D:\\docs\\supplier-api.pdf（入库后点「解析」提取转 MD）' },
+  md: { icon: '📃', label: '本地 MD', ph: 'D:\\docs\\api.md（已是 Markdown，入库即产物，无需解析）' },
   chat: { icon: '💬', label: '聊天记录', ph: '粘贴与供应商对接人的沟通内容，可分多次补充…' },
   note: { icon: '📝', label: '笔记', ph: '随手记的要点、口头约定、会议结论…' },
 }
 const KB_STATUS = {
+  RAW: { label: '未解析', color: '#6b7280' },
   PENDING: { label: '排队解析', color: '#6b7280' },
   PARSING: { label: '解析中', color: '#3b82f6' },
-  DONE: { label: '已就绪', color: '#16a34a' },
+  DONE: { label: '已解析', color: '#16a34a' },
   FAILED: { label: '解析失败', color: '#dc2626' },
 }
 
@@ -650,7 +652,7 @@ function KbPanel({ kbCode, showToast }) {
     const d = await res.json().catch(() => ({}))
     if (!res.ok) return showToast(d.error || '添加失败', 'error')
     setValue(''); setTitle('')
-    showToast(type === 'chat' || type === 'note' ? '已入库，下次节点执行即可引用' : '已入库，正在后台解析…', 'success')
+    showToast(type === 'chat' || type === 'note' || type === 'md' ? '已入库，下次节点执行即可引用' : '已入库（原文）。点该行右侧「解析」生成解析文档', 'success')
     load()
   }
   async function openMd(e) {
@@ -719,7 +721,10 @@ function KbPanel({ kbCode, showToast }) {
               {e.status === 'FAILED' && <span style={{ fontSize: 11, color: 'var(--error)' }} title={e.error}>{String(e.error || '').slice(0, 40)}</span>}
               <div style={{ flex: 1 }} />
               {e.status === 'DONE' && <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => openMd(e)}>👁 产物/校正</button>}
-              {(e.type === 'url' || e.type === 'pdf') && e.status !== 'PENDING' && e.status !== 'PARSING' && (
+              {(e.type === 'url' || e.type === 'pdf') && e.status === 'RAW' && (
+                <button className="btn btn-primary" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔨 解析</button>
+              )}
+              {(e.type === 'url' || e.type === 'pdf') && (e.status === 'DONE' || e.status === 'FAILED') && (
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔄 重解析</button>
               )}
               <button className="btn" style={{ fontSize: 11, padding: '2px 8px', color: 'var(--error)', borderColor: 'rgba(220,38,38,.35)' }}
