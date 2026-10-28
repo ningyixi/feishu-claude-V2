@@ -48,6 +48,11 @@ public class SupplierJobNode {
     @Lob
     private String note = "";
 
+    /** 卡点待答（R7）：agent 输出【卡点】后的完整回复，等待玩家答复注入；空=无卡点 */
+    @Lob
+    @Column(name = "pending_question")
+    private String pendingQuestion = "";
+
     @Column(name = "started_at")
     private LocalDateTime startedAt;
 
@@ -79,6 +84,8 @@ public class SupplierJobNode {
     public void setArtifact(String artifact) { this.artifact = artifact; }
     public String getNote() { return note; }
     public void setNote(String note) { this.note = note; }
+    public String getPendingQuestion() { return pendingQuestion != null ? pendingQuestion : ""; }
+    public void setPendingQuestion(String pendingQuestion) { this.pendingQuestion = pendingQuestion; }
     public LocalDateTime getStartedAt() { return startedAt; }
     public void setStartedAt(LocalDateTime startedAt) { this.startedAt = startedAt; }
     public LocalDateTime getDoneAt() { return doneAt; }

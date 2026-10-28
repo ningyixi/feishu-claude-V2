@@ -47,17 +47,20 @@ public class SupplierJobService {
     private final WorkflowTemplateRepository templateRepo;
     private final BotInstanceRepository instanceRepo;
     private final ClaudeCodeService claudeCodeService;
+    private final SupplierKbService kbService;
 
     public SupplierJobService(SupplierJobRepository jobRepo,
                               SupplierJobNodeRepository nodeRepo,
                               WorkflowTemplateRepository templateRepo,
                               BotInstanceRepository instanceRepo,
-                              ClaudeCodeService claudeCodeService) {
+                              ClaudeCodeService claudeService,
+                              SupplierKbService kbService) {
         this.jobRepo = jobRepo;
         this.nodeRepo = nodeRepo;
         this.templateRepo = templateRepo;
         this.instanceRepo = instanceRepo;
-        this.claudeCodeService = claudeCodeService;
+        this.claudeCodeService = claudeService;
+        this.kbService = kbService;
     }
 
     // ===== 内置模板种子 =====
@@ -196,6 +199,7 @@ public class SupplierJobService {
         }
         job.setCurrentNodeId(firstNodeId);
         jobRepo.save(job);
+        kbService.syncFromJob(job);   // 旧 docs 引用并入知识库（R1，幂等）
         log.info("[SupplierJob] 存档已创建: id={}, name={}, mode={}, 节点{}个, 实例={}",
                 job.getId(), job.getName(), job.getMode(), seq, job.getInstanceId());
         return job;
@@ -214,7 +218,9 @@ public class SupplierJobService {
             log.info("[SupplierJob] 存档 {} 切换执行实例: {} -> {}", id, job.getInstanceId(), patch.getInstanceId());
             job.setInstanceId(patch.getInstanceId());
         }
-        return jobRepo.save(job);
+        SupplierJob saved = jobRepo.save(job);
+        if (patch.getDocsJson() != null) kbService.syncFromJob(saved);   // 文档变更同步知识库（幂等）
+        return saved;
     }
 
     @Transactional
@@ -237,7 +243,11 @@ public class SupplierJobService {
 
     // ===== 节点操作 =====
 
-    /** 执行 agent/agent_check 节点：发到绑定实例的飞书会话，产物写 artifact（异步） */
+    /**
+     * 执行 agent/agent_check 节点：发到绑定实例的常驻会话，产物写 artifact（异步）。
+     * 回复含【卡点】→ 保持 RUNNING 且 pendingQuestion 挂起待玩家答复（R7），
+     * 答复经 {@link #answerNode} 注入同一会话续跑。
+     */
     public void runNode(Long jobId, String nodeId, String extraInstruction) {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
         SupplierJobNode n = nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
@@ -251,37 +261,75 @@ public class SupplierJobService {
         if (job.getInstanceId() == null) {
             throw new IllegalArgumentException("存档还没绑定执行实例，请先在顶部选择实例");
         }
-        BotInstance inst = instanceRepo.findById(job.getInstanceId())
-                .orElseThrow(() -> new IllegalArgumentException("绑定实例不存在: " + job.getInstanceId()));
+        kbService.syncFromJob(job);   // 幂等：确保存量文档在知识库中有索引（执行时先查库勿重抓）
 
         String prompt = renderPrompt(n.getPrompt(), job, extraInstruction);
         n.setStatus("RUNNING");
         n.setStartedAt(n.getStartedAt() != null ? n.getStartedAt() : LocalDateTime.now());
         n.setNote("");
+        n.setPendingQuestion("");
         nodeRepo.save(n);
 
-        Thread.ofVirtual().name("job-node-" + jobId + "-" + nodeId).start(() -> {
+        deliverToInstance(job, n, "job-node-" + jobId + "-" + nodeId, prompt);
+    }
+
+    /** R7 卡点答复：把玩家回答注入执行该节点的原会话，agent 续跑（回复再卡点则继续挂起） */
+    public void answerNode(Long jobId, String nodeId, String answer) {
+        SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
+        SupplierJobNode n = nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
+                .orElseThrow(() -> new IllegalArgumentException("节点不存在: " + nodeId));
+        if (!"RUNNING".equals(n.getStatus()) || n.getPendingQuestion().isBlank()) {
+            throw new IllegalArgumentException("该节点当前没有待答复的卡点");
+        }
+        if (answer == null || answer.isBlank()) throw new IllegalArgumentException("答复内容不能为空");
+        if (job.getInstanceId() == null) throw new IllegalArgumentException("存档未绑定执行实例");
+        n.setPendingQuestion("");
+        nodeRepo.save(n);
+        deliverToInstance(job, n, "job-answer-" + jobId + "-" + nodeId,
+                "【卡点答复】玩家答复如下，优先遵循它继续未完成的工作（不要重新开始已完成的部分），完成后按动作规范输出：\n\n"
+                        + answer.strip());
+    }
+
+    /** 发消息到实例会话（虚拟线程异步）并统一处理回复 */
+    private void deliverToInstance(SupplierJob job, SupplierJobNode n, String threadName, String message) {
+        Long jobId = job.getId();
+        String nodeId = n.getNodeId();
+        BotInstance inst = instanceRepo.findById(job.getInstanceId())
+                .orElseThrow(() -> new IllegalArgumentException("绑定实例不存在: " + job.getInstanceId()));
+        Thread.ofVirtual().name(threadName).start(() -> {
             try {
                 String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
                 String reply = claudeCodeService.chat(inst.getId(), "supplier-job-" + jobId,
-                        prompt, null, dir, inst.getClaudeModel(), new NoopListener());
-                if (reply != null && reply.startsWith("❌")) {
-                    n.setNote("执行失败: " + reply);
-                    log.warn("[SupplierJob] 节点执行失败: job={}, node={}, {}", jobId, nodeId, reply);
-                } else {
-                    n.setArtifact(reply != null ? reply : "");
-                    n.setLastRunAt(LocalDateTime.now());
-                    log.info("[SupplierJob] 节点执行完成: job={}, node={}, 产物{}字（等待玩家确认）",
-                            jobId, nodeId, n.getArtifact().length());
-                }
+                        message, null, dir, inst.getClaudeModel(), new NoopListener());
+                applyNodeReply(n, reply);
             } catch (Exception e) {
                 log.error("[SupplierJob] 节点执行异常: job={}, node={}", jobId, nodeId, e);
                 n.setNote("执行异常: " + e.getMessage());
-            } finally {
-                n.setStatus("PENDING");   // 回到蓝色：执行完也要玩家点"完成"才变绿（游戏规则）
+                n.setStatus("PENDING");
                 nodeRepo.save(n);
             }
         });
+    }
+
+    /** 统一处理节点回复：❌→note；【卡点】→挂起待答；正常→artifact 落库回 PENDING（等玩家点完成） */
+    private void applyNodeReply(SupplierJobNode n, String reply) {
+        if (reply != null && reply.startsWith("❌")) {
+            n.setNote("执行失败: " + reply);
+            n.setStatus("PENDING");
+            log.warn("[SupplierJob] 节点执行失败: job={}, node={}, {}", n.getJobId(), n.getNodeId(), reply);
+        } else if (reply != null && reply.contains("【卡点】")) {
+            n.setPendingQuestion(reply);
+            // 状态保持 RUNNING：等待玩家在工作台答复后注入续跑（R7）
+            log.info("[SupplierJob] 节点卡点待答: job={}, node={}", n.getJobId(), n.getNodeId());
+        } else {
+            n.setArtifact(reply != null ? reply : "");
+            n.setPendingQuestion("");
+            n.setLastRunAt(LocalDateTime.now());
+            n.setStatus("PENDING");
+            log.info("[SupplierJob] 节点执行完成: job={}, node={}, 产物{}字（等待玩家确认）",
+                    n.getJobId(), n.getNodeId(), n.getArtifact().length());
+        }
+        nodeRepo.save(n);
     }
 
     /** 玩家确认节点完成：蓝→绿，推进当前节点 */
@@ -316,13 +364,20 @@ public class SupplierJobService {
 
     // ===== prompt 渲染 =====
 
+    /** 存档知识库归属码（控制器 detail JSON 用，前端按它拉知识库面板） */
+    public String getKbCode(SupplierJob job) { return kbService.kbCode(job); }
+
+    /** 幂等把存量 docs_json 引用并入知识库（详情打开/执行前都会调，失败静默不影响主流程） */
+    public void ensureKbSync(SupplierJob job) { kbService.syncFromJob(job); }
+
     /**
-     * 占位符：{supplierName} {supplierId} {libraryPath} {docs} {skills} {extra} {artifact:nX}
+     * 占位符：{supplierName} {supplierId} {libraryPath} {docs}=知识库索引 {skills} {extra} {artifact:nX}
+     * 末尾统一追加 ACTION_SPEC（动作规范，与前文冲突以规范为准）。
      * 若 prompt 未写 {skills} 且存档配置了 skill，则自动在末尾追加"可用技能"段（内置模板无需修改即生效）。
      */
     String renderPrompt(String template, SupplierJob job, String extra) {
         if (template == null) template = "";
-        String docs = formatDocs(job.getDocsJson());
+        String docs = kbService.indexText(kbService.kbCode(job));
         String skills = formatSkills(job.getSkillsJson());
         String out = template
                 .replace("{supplierName}", nullSafe(job.getSupplierName()))
@@ -346,25 +401,23 @@ public class SupplierJobService {
             m.appendReplacement(sb, Matcher.quoteReplacement(artifact));
         }
         m.appendTail(sb);
-        return sb.toString();
+        return sb + "\n\n" + ACTION_SPEC;
     }
 
-    private String formatDocs(String docsJson) {
-        try {
-            JsonArray arr = JsonParser.parseString(docsJson != null ? docsJson : "[]").getAsJsonArray();
-            if (arr.isEmpty()) return "（未录入文档）";
-            StringBuilder sb = new StringBuilder();
-            int i = 1;
-            for (JsonElement el : arr) {
-                JsonObject o = el.getAsJsonObject();
-                sb.append(i++).append(". [").append(str(o, "type", "url")).append("] ")
-                        .append(str(o, "value", "")).append("\n");
-            }
-            return sb.toString();
-        } catch (Exception e) {
-            return "（文档列表解析失败）";
-        }
-    }
+    /** R5/R6/R7 统一动作规范：Trellis 四段纪律 + 卡点协议 + Postman 实测协议（追加在所有 agent prompt 末尾） */
+    static final String ACTION_SPEC = """
+            【执行动作规范 · Trellis 纪律（与前文要求冲突时，以本节为准）】
+            1. Before-dev：开工前先输出「## Before-dev」，列出将阅读的知识库文件路径与将依据的 skill 要点，禁止跳过直接动手。
+            2. Implement：完成主体任务（按前文要求）。引用依据时标注来源（知识库文件/URL+定位）。
+            3. Check：输出「## Check」，对照前文任务要求逐条自查（覆盖度/是否臆造/遗漏项），用表格。
+            4. Finish：最终产物放「## Finish」段，工作台将把它存为节点工件。
+            5. 卡点协议：缺关键信息（凭证/账号/文档矛盾/无法决断的选项）时【不要猜测硬跑】。在输出中单独一行
+               「【卡点】<问题是什么；需要玩家提供什么材料或做出什么选择(A/B/C)>」然后结束本轮；
+               问题会转给玩家，答复将以「【卡点答复】」消息送达本会话，收到后继续未完成的工作。
+            6. 接口实测协议（凡真实调用供应商 HTTP 接口）：必须经 Postman 插件(MCP) 执行——
+               a) 先把待测接口整理成 Postman Collection（v2.1 JSON，命名 <供应商代码>-<yyyyMMdd>，含环境变量/鉴权配置）；
+               b) 经插件发送请求、采集真实响应；c) 工件中附 Collection 定义与逐接口"文档 vs 实际"差异对比。
+               仅当 Postman 插件确认不可用时才降级 newman CLI 回放；自由 curl 不算合规实测产物。""";
 
     /** skill 目录列表 → prompt 段落（空配置返回空串） */
     private String formatSkills(String skillsJson) {

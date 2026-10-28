@@ -38,6 +38,9 @@ feishu:
     max-bot-turns: 10
     idle-reset-minutes: 10
     bot-open-ids: ""   # 额外视为机器人的 open_id（逗号分隔）；sender_type=app 的消息已自动识别
+  # 供应商知识库解析产物目录（与 H2 同盘：本地盘，不放 Z: NAS）
+  # 跨平台部署用环境变量覆盖：FEISHU_KB_PATH=/opt/feishu-claude-data/supplier-kb
+  kb-dir: ${FEISHU_KB_PATH:D:/feishu-claude-data/supplier-kb}
 
 # 数字员工自动 PR（GitPrService）
 employee:

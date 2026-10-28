@@ -85,11 +85,14 @@ public class SupplierJobController {
         }
     }
 
-    /** 详情 = 存档 + 节点快照列表（前端轮询此接口获取执行状态） */
+    /** 详情 = 存档 + 节点快照列表（前端轮询此接口获取执行状态）。打开旧档时自动把存量 docs 并入知识库 */
     @GetMapping(value = "/api/supplier-jobs/{id}", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> detail(@PathVariable Long id) {
         return jobService.getJob(id)
-                .map(job -> ResponseEntity.ok(detailJson(job)))
+                .map(job -> {
+                    jobService.ensureKbSync(job);
+                    return ResponseEntity.ok(detailJson(job));
+                })
                 .orElse(ResponseEntity.notFound().build());
     }
 
@@ -139,6 +142,19 @@ public class SupplierJobController {
                 instruction = opt(body, "instruction");
             }
             jobService.runNode(id, nodeId, instruction);
+            return ResponseEntity.ok("{\"ok\":true}");
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        }
+    }
+
+    /** R7 卡点答复：把玩家回答注入正在执行该节点的会话（agent 续跑） */
+    @PostMapping(value = "/api/supplier-jobs/{id}/nodes/{nodeId}/answer", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> answerNode(@PathVariable Long id, @PathVariable String nodeId,
+                                             @RequestBody String rawBody) {
+        try {
+            JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            jobService.answerNode(id, nodeId, opt(body, "answer"));
             return ResponseEntity.ok("{\"ok\":true}");
         } catch (IllegalArgumentException e) {
             return err(e.getMessage());
@@ -252,6 +268,7 @@ public class SupplierJobController {
         }
         o.addProperty("createdAt", String.valueOf(job.getCreatedAt()));
         o.addProperty("updatedAt", String.valueOf(job.getUpdatedAt()));
+        o.addProperty("kbCode", jobService.getKbCode(job));   // 知识库归属码（前端面板按它拉取）
         // nodes 直接由 Jackson 混排不方便，这里手动拼
         var nodes = jobService.getNodes(job.getId());
         com.google.gson.JsonArray arr = new com.google.gson.JsonArray();
@@ -266,6 +283,7 @@ public class SupplierJobController {
             no.addProperty("status", n.getStatus());
             no.addProperty("artifact", n.getArtifact());
             no.addProperty("note", n.getNote());
+            no.addProperty("pendingQuestion", n.getPendingQuestion());
             no.addProperty("lastRunAt", String.valueOf(n.getLastRunAt()));
             no.addProperty("doneAt", String.valueOf(n.getDoneAt()));
             arr.add(no);
