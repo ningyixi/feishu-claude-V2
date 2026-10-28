@@ -297,6 +297,8 @@ function GameView({ jobId, onBack, showToast }) {
   const [instances, setInstances] = useState([])
   const [instruction, setInstruction] = useState('')
   const [steerAnswer, setSteerAnswer] = useState('')   // R7 卡点答复输入
+  const [showDetail, setShowDetail] = useState(false)  // 📋 任务详情弹窗
+  const [detailDraft, setDetailDraft] = useState(null) // {name,supplierName,supplierCode,libraryPath,skillsText}
   const [editingArtifact, setEditingArtifact] = useState(false)
   const [artifactDraft, setArtifactDraft] = useState('')
   const pollRef = useRef(null)
@@ -367,6 +369,28 @@ function GameView({ jobId, onBack, showToast }) {
     })
     load()
   }
+  function openDetail() {
+    setDetailDraft({
+      name: job.name, supplierName: job.supplierName || '', supplierCode: job.supplierCode || '',
+      libraryPath: job.libraryPath || '',
+      skillsText: safeParseNodes(job.skillsJson).map(s => (typeof s === 'string' ? s : (s?.value || s?.path || ''))).filter(Boolean).join('\n'),
+    })
+    setShowDetail(true)
+  }
+  async function saveDetail() {
+    const skills = detailDraft.skillsText.split('\n').map(x => x.trim()).filter(Boolean)
+    const res = await fetch(`/api/supplier-jobs/${jobId}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: detailDraft.name, supplierName: detailDraft.supplierName,
+        supplierCode: detailDraft.supplierCode, libraryPath: detailDraft.libraryPath,
+        skills,
+      }),
+    })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok || d.error) return showToast(d.error || '保存失败', 'error')
+    setShowDetail(false); showToast('任务信息已更新', 'success'); load()
+  }
 
   return (
     <div>
@@ -378,6 +402,7 @@ function GameView({ jobId, onBack, showToast }) {
           {job.createdByEmployeeId && <CreatorBadge id={job.createdByEmployeeId} name={job.createdByEmployeeName} />}
           <span className="hook-badge">{job.mode === 'API' ? 'API 供应商' : 'CM 供应商'}</span>
           {job.status === 'COMPLETED' && <span className="hook-badge" style={{ background: 'rgba(22,163,74,.1)', color: '#16a34a', borderColor: 'rgba(22,163,74,.3)' }}>已通关 🎉</span>}
+          <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={openDetail} title="查看/修改任务详细信息">📋 详情</button>
           <div style={{ flex: 1 }} />
           <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>进度 {doneCount}/{nodes.length}</span>
           <div className="pass-bar" style={{ maxWidth: 140 }}><div className="pass-fill" style={{ width: `${nodes.length ? doneCount / nodes.length * 100 : 0}%` }} /></div>
@@ -542,8 +567,45 @@ function GameView({ jobId, onBack, showToast }) {
         </div>
       </div>
 
+      {/* 任务详情弹窗：创建后仍可回看/修改全部录入信息 */}
+      {showDetail && detailDraft && (
+        <div className="modal-mask" onClick={() => setShowDetail(false)}>
+          <div className="modal-box" style={{ maxWidth: 680, width: 'min(680px,94vw)' }} onClick={ev => ev.stopPropagation()}>
+            <div className="modal-title">📋 任务详情 · {job.name}</div>
+            <div className="modal-body">
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+                <div className="form-group"><label className="form-label">任务名称</label>
+                  <input className="form-input" value={detailDraft.name} onChange={e => setDetailDraft(d => ({ ...d, name: e.target.value }))} /></div>
+                <div className="form-group"><label className="form-label">供应商名称</label>
+                  <input className="form-input" value={detailDraft.supplierName} onChange={e => setDetailDraft(d => ({ ...d, supplierName: e.target.value }))} /></div>
+                <div className="form-group"><label className="form-label">供应商 ID（supplierCode）</label>
+                  <input className="form-input" value={detailDraft.supplierCode} onChange={e => setDetailDraft(d => ({ ...d, supplierCode: e.target.value }))} />
+                  <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>⚠️ 修改会切换知识库归属（旧库保留在原 code 下）</div></div>
+                <div className="form-group"><label className="form-label">类库路径</label>
+                  <input className="form-input" style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} value={detailDraft.libraryPath} onChange={e => setDetailDraft(d => ({ ...d, libraryPath: e.target.value }))} /></div>
+              </div>
+              <div className="form-group"><label className="form-label">🧠 Skill 目录（每行一个路径；执行时自动注入实例）</label>
+                <textarea className="form-input" rows={4} style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }} value={detailDraft.skillsText}
+                  onChange={e => setDetailDraft(d => ({ ...d, skillsText: e.target.value }))} /></div>
+              <div className="form-group"><label className="form-label">接口文档</label>
+                <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>已统一由下方「供应商知识库」管理（补充/删除/重解析都在知识库面板操作）</div></div>
+              <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 6, fontFamily: 'var(--font-mono)' }}>
+                模式 {job.mode} · 知识库 {job.kbCode} · 创建 {String(job.createdAt).replace('T', ' ').substring(0, 16)} · 进度 {doneCount}/{nodes.length}
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', marginTop: 12 }}>
+              <button className="btn" onClick={() => setShowDetail(false)}>取消</button>
+              <button className="btn btn-primary" onClick={saveDetail}>💾 保存</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* R3 统一补充入口：供应商知识库（URL/PDF/聊天记录/笔记 随时补充） */}
       <KbPanel kbCode={job.kbCode} showToast={showToast} />
+
+      {/* 对话区：执行过程中随时问实例"现在什么情况" */}
+      <ChatPanel jobId={job.id} running={running} showToast={showToast} />
     </div>
   )
 }
@@ -696,6 +758,77 @@ function KbPanel({ kbCode, showToast }) {
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+// ===== 对话区：与执行实例随问随答（提问排队，当前执行段结束后被回答） =====
+
+function ChatPanel({ jobId, running, showToast }) {
+  const [msgs, setMsgs] = useState([])
+  const [q, setQ] = useState('')
+  const [sending, setSending] = useState(false)
+  const bodyRef = useRef(null)
+
+  const load = () => fetch(`/api/supplier-jobs/${jobId}/chat`).then(r => r.ok ? r.json() : []).then(setMsgs).catch(() => {})
+  useEffect(() => {
+    load()
+    const hasPending = msgs.some(m => m.status === 'PENDING')
+    const t = setInterval(load, hasPending || running ? 2500 : 8000)
+    return () => clearInterval(t)
+  }, [jobId, running, msgs.some(m => m.status === 'PENDING')])
+  useEffect(() => {
+    if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [msgs.length, msgs[msgs.length - 1]?.text?.length])
+
+  async function send() {
+    if (!q.trim() || sending) return
+    setSending(true)
+    const res = await fetch(`/api/supplier-jobs/${jobId}/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q }),
+    })
+    const d = await res.json().catch(() => ({}))
+    setSending(false)
+    if (!res.ok) return showToast(d.error || '发送失败', 'error')
+    setQ('')
+    load()
+  }
+
+  return (
+    <div className="card" style={{ marginTop: 14, padding: '14px 20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <span style={{ fontSize: 14, fontWeight: 700 }}>💬 对话区</span>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>随时问实例"现在什么情况"——节点执行中会排队，当前执行段结束后回复（同会话上下文，知道所有细节）</span>
+        {running && <span className="hook-badge" style={{ color: '#3b82f6' }}>执行中·提问将排队</span>}
+      </div>
+      <div ref={bodyRef} style={{ maxHeight: 320, overflowY: 'auto', marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {msgs.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '12px 0', textAlign: 'center' }}>（还没有对话 — 问点什么，比如"现在进行到哪一步了？""刚才失败的原因是什么？"）</div>}
+        {msgs.map(m => m.role === 'user' ? (
+          <div key={m.id} style={{ alignSelf: 'flex-end', maxWidth: '78%', background: 'var(--accent,#2563eb)', color: '#fff', borderRadius: '10px 10px 2px 10px', padding: '7px 11px', fontSize: 12.5, whiteSpace: 'pre-wrap' }}>
+            {m.text}
+            <div style={{ fontSize: 10, opacity: .65, marginTop: 3 }}>{String(m.createdAt).substring(11, 16)}</div>
+          </div>
+        ) : (
+          <div key={m.id} style={{ alignSelf: 'flex-start', maxWidth: '86%', background: 'rgba(107,114,128,.1)', border: '1px solid var(--border,#e5e7eb)', borderRadius: '10px 10px 10px 2px', padding: '7px 11px', fontSize: 12.5 }}>
+            {m.status === 'PENDING' ? (
+              <span style={{ color: 'var(--text-dim)' }}><span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />排队/思考中…{running ? '（节点正在执行，结束后自动回答）' : ''}</span>
+            ) : (
+              <div className="md-body" style={{ color: m.status === 'FAILED' ? 'var(--error)' : 'var(--text)' }}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
+              </div>
+            )}
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>{String(m.createdAt).substring(11, 16)}</div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <input className="form-input" style={{ flex: 1 }} placeholder="问实例现在的情况、失败原因、某个结论的依据…（回车发送）"
+          value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') send() }} />
+        <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={!q.trim() || sending} onClick={send}>
+          {sending ? '发送中…' : '📤 提问'}
+        </button>
+      </div>
     </div>
   )
 }

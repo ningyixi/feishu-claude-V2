@@ -48,19 +48,22 @@ public class SupplierJobService {
     private final BotInstanceRepository instanceRepo;
     private final ClaudeCodeService claudeCodeService;
     private final SupplierKbService kbService;
+    private final com.lark.oapi.sample.ws.repository.SupplierJobChatRepository chatRepo;
 
     public SupplierJobService(SupplierJobRepository jobRepo,
                               SupplierJobNodeRepository nodeRepo,
                               WorkflowTemplateRepository templateRepo,
                               BotInstanceRepository instanceRepo,
                               ClaudeCodeService claudeService,
-                              SupplierKbService kbService) {
+                              SupplierKbService kbService,
+                              com.lark.oapi.sample.ws.repository.SupplierJobChatRepository chatRepo) {
         this.jobRepo = jobRepo;
         this.nodeRepo = nodeRepo;
         this.templateRepo = templateRepo;
         this.instanceRepo = instanceRepo;
         this.claudeCodeService = claudeService;
         this.kbService = kbService;
+        this.chatRepo = chatRepo;
     }
 
     // ===== 内置模板种子 =====
@@ -360,6 +363,46 @@ public class SupplierJobService {
                 .orElseThrow(() -> new IllegalArgumentException("节点不存在"));
         n.setArtifact(artifact != null ? artifact : "");
         nodeRepo.save(n);
+    }
+
+    // ===== 对话区（玩家随时问执行实例"现在什么情况"） =====
+
+    /**
+     * 玩家提问：落库 user 行 + 预占 agent PENDING 行，随后以独立轮次发到实例会话。
+     * 会话串行：若节点执行中，TerminalSession 自动排队，当前执行段结束后被回答（不丢消息）。
+     */
+    public void ask(Long jobId, String question) {
+        SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
+        if (question == null || question.isBlank()) throw new IllegalArgumentException("问题不能为空");
+        if (job.getInstanceId() == null) throw new IllegalArgumentException("存档未绑定执行实例，无法提问");
+        BotInstance inst = instanceRepo.findById(job.getInstanceId())
+                .orElseThrow(() -> new IllegalArgumentException("绑定实例不存在"));
+        com.lark.oapi.sample.ws.model.entity.SupplierJobChat u = new com.lark.oapi.sample.ws.model.entity.SupplierJobChat();
+        u.setJobId(jobId); u.setRole("user"); u.setText(question.strip());
+        chatRepo.save(u);
+        com.lark.oapi.sample.ws.model.entity.SupplierJobChat a = new com.lark.oapi.sample.ws.model.entity.SupplierJobChat();
+        a.setJobId(jobId); a.setRole("agent"); a.setStatus("PENDING"); a.setText("");
+        chatRepo.save(a);
+        Thread.ofVirtual().name("job-chat-" + jobId).start(() -> {
+            try {
+                String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
+                String reply = claudeCodeService.chat(inst.getId(), "supplier-job-" + jobId,
+                        "【玩家提问】关于本次供应商接入任务（" + job.getName() + "），请就你当前掌握的情况直接、简短回答；"
+                                + "不要因此重跑或中断任何任务，只回答：\n\n" + question.strip(),
+                        null, dir, inst.getClaudeModel(), new NoopListener());
+                boolean bad = reply == null || reply.startsWith("❌");
+                a.setText(bad ? (reply == null ? "（无回复）" : reply) : reply);
+                a.setStatus(bad ? "FAILED" : "DONE");
+            } catch (Exception e) {
+                a.setText("提问投递失败: " + e.getMessage());
+                a.setStatus("FAILED");
+            }
+            chatRepo.save(a);
+        });
+    }
+
+    public List<com.lark.oapi.sample.ws.model.entity.SupplierJobChat> chatHistory(Long jobId) {
+        return chatRepo.findByJobIdOrderByIdAsc(jobId);
     }
 
     // ===== prompt 渲染 =====

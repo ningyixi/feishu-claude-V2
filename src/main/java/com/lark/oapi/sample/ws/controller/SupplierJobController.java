@@ -185,6 +185,24 @@ public class SupplierJobController {
         }
     }
 
+    /** 对话区：向执行实例提问（异步，回复随会话轮次落库） */
+    @PostMapping(value = "/api/supplier-jobs/{id}/chat", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> ask(@PathVariable Long id, @RequestBody String rawBody) {
+        try {
+            JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            jobService.ask(id, opt(body, "question"));
+            return ResponseEntity.ok("{\"ok\":true}");
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        }
+    }
+
+    /** 对话区历史（Jackson 直出实体列表） */
+    @GetMapping("/api/supplier-jobs/{id}/chat")
+    public List<com.lark.oapi.sample.ws.model.entity.SupplierJobChat> chatHistory(@PathVariable Long id) {
+        return jobService.chatHistory(id);
+    }
+
     // ===== 工作流模板 =====
 
     @GetMapping("/api/workflows")
