@@ -500,7 +500,8 @@ public class TerminalSession {
         }
         if (!model.isBlank()) {
             cmd.add("--model");
-            cmd.add(model);
+            // 网关 1M 上下文标记：裸模型名统一补 [1m] 后缀（兼容库中已存的旧配置）
+            cmd.add(model.endsWith("[1m]") ? model : model + "[1m]");
         }
         return cmd;
     }

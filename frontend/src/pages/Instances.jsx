@@ -30,22 +30,22 @@ const FIELDS = [
 const MODELS = [
   { value: '', label: '默认模型（跟随网关配置）', desc: '' },
   {
-    value: 'qwen3.8-max-anthropic',
+    value: 'qwen3.8-max-anthropic[1m]',
     label: 'Qwen3.8 Max（旗舰 · 多模态 · 推荐）',
     desc: '千问旗舰多模态模型，综合能力对标 Claude Opus 4.8、Claude Sonnet 5 和 Gemini 3.7 Flash，适合复杂推理、编程、视觉理解及长程 Agent 任务。支持图片/表情包理解。',
   },
   {
-    value: 'glm-5.3-anthropic',
+    value: 'glm-5.3-anthropic[1m]',
     label: 'GLM 5.3（编程旗舰 · 不支持图片）',
     desc: 'GLM 文本编程旗舰，编程和 Agent 能力对标 Qwen3.8-Max、Kimi K3 和 Claude Opus 4.8，适合复杂软件工程与深度推理。暂不支持多模态（发图片/表情包将无法理解）。',
   },
   {
-    value: 'glm-5.3-flash-anthropic',
+    value: 'glm-5.3-flash-anthropic[1m]',
     label: 'GLM 5.3 Flash（多模态 · 高性价比）',
     desc: 'GLM 原生多模态高性价比模型，能力对标 Gemini 3.7 Flash 和 DeepSeek V4 Pro，部分任务接近 Claude Opus 4.8，响应快、成本低。支持图片识别（实测色彩判断偶有波动，重要图片任务建议用 Qwen3.8 Max）。',
   },
   {
-    value: 'qwen3.8-flash-anthropic',
+    value: 'qwen3.8-flash-anthropic[1m]',
     label: 'Qwen3.8 Flash（轻量快速 · 多模态）',
     desc: '轻量快速模型，响应快、成本低，适合简单任务。实测支持图片/表情包识别。',
   },
