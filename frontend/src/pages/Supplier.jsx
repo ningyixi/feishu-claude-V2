@@ -611,6 +611,13 @@ function KbPanel({ kbCode, showToast }) {
     if (!res.ok) return showToast(d.error || '操作失败', 'error')
     showToast('已重新排队解析', 'success'); load()
   }
+  async function removeEntry(e) {
+    if (!confirm(`删除「${e.title || '该条目'}」？${(e.type === 'url' || e.type === 'pdf') && e.source ? '（来源仍在创建时的文档清单里，但不会再被自动同步回来）' : ''}`)) return
+    const res = await fetch(`/api/supplier-kb/entries/${e.id}`, { method: 'DELETE' })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) return showToast(d.error || '删除失败', 'error')
+    showToast('已删除', 'success'); load()
+  }
 
   return (
     <div className="card" style={{ marginTop: 14, padding: '14px 20px' }}>
@@ -653,6 +660,8 @@ function KbPanel({ kbCode, showToast }) {
               {(e.type === 'url' || e.type === 'pdf') && e.status !== 'PENDING' && e.status !== 'PARSING' && (
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔄 重解析</button>
               )}
+              <button className="btn" style={{ fontSize: 11, padding: '2px 8px', color: 'var(--error)', borderColor: 'rgba(220,38,38,.35)' }}
+                title="删除该条目" onClick={() => removeEntry(e)}>✕</button>
             </div>
           )
         })}

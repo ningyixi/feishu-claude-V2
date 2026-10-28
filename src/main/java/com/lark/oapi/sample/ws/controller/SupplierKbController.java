@@ -62,6 +62,20 @@ public class SupplierKbController {
         }
     }
 
+    /** 删除条目（元数据+产物文件；自动同步过的来源记墓碑不再带回） */
+    @DeleteMapping(value = "/entries/{id}", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> delete(@PathVariable Long id) {
+        try {
+            kbService.delete(id);
+            return ResponseEntity.ok("{\"ok\":true}");
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        } catch (Exception e) {
+            log.error("[SupplierKb] 删除失败 id={}", id, e);
+            return err("删除失败: " + e.getMessage());
+        }
+    }
+
     /** 读条目解析产物 */
     @GetMapping(value = "/entries/{id}/md", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> getMd(@PathVariable Long id) {

@@ -39,11 +39,14 @@ public class SupplierKbService {
     private static final Logger log = LoggerFactory.getLogger(SupplierKbService.class);
 
     private final SupplierKbEntryRepository repo;
+    private final com.lark.oapi.sample.ws.repository.SupplierKbRemovedRepository removedRepo;
     private final Path kbRoot;
 
     public SupplierKbService(SupplierKbEntryRepository repo,
+                             com.lark.oapi.sample.ws.repository.SupplierKbRemovedRepository removedRepo,
                              @Value("${feishu.kb-dir:D:/feishu-claude-data/supplier-kb}") String kbDir) {
         this.repo = repo;
+        this.removedRepo = removedRepo;
         this.kbRoot = Paths.get(kbDir);
     }
 
@@ -129,6 +132,30 @@ public class SupplierKbService {
         afterCommit(() -> parseNow(id));
     }
 
+    /** 删除条目：删元数据 + 落盘产物文件；有 source 的记墓碑，防止 docs_json 幂等同步再次带回 */
+    @org.springframework.transaction.annotation.Transactional
+    public void delete(Long id) {
+        SupplierKbEntry e = require(id);
+        if (e.getSource() != null && !e.getSource().isBlank()) {
+            if (!removedRepo.existsByKbCodeAndTypeAndSource(e.getKbCode(), e.getType(), e.getSource())) {
+                com.lark.oapi.sample.ws.model.entity.SupplierKbRemoved t = new com.lark.oapi.sample.ws.model.entity.SupplierKbRemoved();
+                t.setKbCode(e.getKbCode());
+                t.setType(e.getType());
+                t.setSource(e.getSource());
+                removedRepo.save(t);
+            }
+        }
+        if (e.getMdPath() != null && !e.getMdPath().isBlank()) {
+            try {
+                Files.deleteIfExists(Paths.get(e.getMdPath()));
+            } catch (IOException ex) {
+                log.warn("[SupplierKb] 产物文件删除失败（元数据已删）: {}（{}）", e.getMdPath(), ex.getMessage());
+            }
+        }
+        repo.delete(e);
+        log.info("[SupplierKb] 条目已删除: id={}, kb={}, type={}", id, e.getKbCode(), e.getType());
+    }
+
     /** 读解析产物 Markdown（前端预览/编辑，agent 之外的人工通道） */
     public String readMd(Long id) throws IOException {
         SupplierKbEntry e = require(id);
@@ -166,6 +193,7 @@ public class SupplierKbService {
                 if (value.isBlank()) continue;
                 String mapped = "path".equals(type) ? "pdf" : "url";
                 if (repo.existsByKbCodeAndTypeAndSource(kbCode, mapped, value.trim())) continue;
+                if (removedRepo.existsByKbCodeAndTypeAndSource(kbCode, mapped, value.trim())) continue;   // 已删除过的不再带回
                 try {
                     add(kbCode, mapped, value, null);
                 } catch (Exception ex) {
