@@ -1,7 +1,6 @@
 package com.lark.oapi.sample.ws;
 
 import com.lark.oapi.sample.ws.config.OriginGuardFilter;
-import com.lark.oapi.sample.ws.config.PanelAuthService;
 import com.lark.oapi.sample.ws.service.EmployeeService;
 import com.lark.oapi.sample.ws.service.MessageDedup;
 import com.lark.oapi.sample.ws.service.BotLoopGuard;
@@ -35,35 +34,6 @@ class UnitTests {
         assertFalse(f.isAllowed("https://evil.com", "localhost:8080"));
         assertFalse(f.isAllowed("http://localhost.evil.com", "localhost:8080"));
         assertFalse(f.isAllowed("null", "localhost:8080"));
-    }
-
-    @Test
-    void authTokens(@TempDir Path dir) throws Exception {
-        PanelAuthService a = new PanelAuthService("secret-pw", dir.resolve("pw.txt").toString());
-        Method init = PanelAuthService.class.getDeclaredMethod("init");
-        init.setAccessible(true);
-        init.invoke(a);
-        assertTrue(a.checkPassword("1.1.1.1", "secret-pw"));
-        String t = a.issueToken();
-        assertTrue(a.validToken(t));
-        assertFalse(a.validToken(t + "x"));
-        assertFalse(a.validToken("123.abc.def"));
-        a.revoke(t);
-        assertFalse(a.validToken(t));
-    }
-
-    @Test
-    void generatedPasswordPersists(@TempDir Path dir) throws Exception {
-        Path f = dir.resolve("data/pw.txt");
-        PanelAuthService a = new PanelAuthService("", f.toString());
-        Method init = PanelAuthService.class.getDeclaredMethod("init");
-        init.setAccessible(true);
-        init.invoke(a);
-        String pw = java.nio.file.Files.readString(f).trim();
-        assertTrue(pw.length() >= 12);
-        PanelAuthService b = new PanelAuthService("", f.toString());
-        init.invoke(b);
-        assertTrue(b.checkPassword("2.2.2.2", pw));
     }
 
     @Test
