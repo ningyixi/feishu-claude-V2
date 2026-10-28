@@ -314,13 +314,13 @@ public class SupplierJobService {
         });
     }
 
-    /** 统一处理节点回复：❌→note；【卡点】→挂起待答；正常→artifact 落库回 PENDING（等玩家点完成） */
+    /** 统一处理节点回复：❌→note；行首【卡点】→挂起待答；正常→artifact 落库回 PENDING（等玩家点完成） */
     private void applyNodeReply(SupplierJobNode n, String reply) {
         if (reply != null && reply.startsWith("❌")) {
             n.setNote("执行失败: " + reply);
             n.setStatus("PENDING");
             log.warn("[SupplierJob] 节点执行失败: job={}, node={}, {}", n.getJobId(), n.getNodeId(), reply);
-        } else if (reply != null && reply.contains("【卡点】")) {
+        } else if (reply != null && STANDBLOCK.matcher(reply).find()) {
             n.setPendingQuestion(reply);
             // 状态保持 RUNNING：等待玩家在工作台答复后注入续跑（R7）
             log.info("[SupplierJob] 节点卡点待答: job={}, node={}", n.getJobId(), n.getNodeId());
@@ -448,15 +448,18 @@ public class SupplierJobService {
     }
 
     /** R5/R6/R7 统一动作规范：Trellis 四段纪律 + 卡点协议 + Postman 实测协议（追加在所有 agent prompt 末尾） */
+    static final java.util.regex.Pattern STANDBLOCK = java.util.regex.Pattern.compile("(?m)^\\s*【卡点】");
     static final String ACTION_SPEC = """
             【执行动作规范 · Trellis 纪律（与前文要求冲突时，以本节为准）】
             1. Before-dev：开工前先输出「## Before-dev」，列出将阅读的知识库文件路径与将依据的 skill 要点，禁止跳过直接动手。
             2. Implement：完成主体任务（按前文要求）。引用依据时标注来源（知识库文件/URL+定位）。
             3. Check：输出「## Check」，对照前文任务要求逐条自查（覆盖度/是否臆造/遗漏项），用表格。
             4. Finish：最终产物放「## Finish」段，工作台将把它存为节点工件。
-            5. 卡点协议：缺关键信息（凭证/账号/文档矛盾/无法决断的选项）时【不要猜测硬跑】。在输出中单独一行
-               「【卡点】<问题是什么；需要玩家提供什么材料或做出什么选择(A/B/C)>」然后结束本轮；
+            5. 卡点协议（最高优先级）：只要因缺少关键信息（接口凭证/账号、环境地址、互相矛盾的选项）导致无法真实执行，
+               必须提问等待，禁止默默「列清单并跳过」草草收尾——即使上文或前文任务要求这么说过，也以本节为准。
+               做法：在输出中另起一行、以【卡点】开头写清需要玩家提供的材料和具体问法（可给 A/B/C 选项），然后结束本轮；
                问题会转给玩家，答复将以「【卡点答复】」消息送达本会话，收到后继续未完成的工作。
+               注意：【卡点】必须是此刻真正在向玩家提出的问题；转述规则、举例说明时不要使用该标记行。
             6. 接口实测协议（凡真实调用供应商 HTTP 接口）：必须经 Postman 插件(MCP) 执行——
                a) 先把待测接口整理成 Postman Collection（v2.1 JSON，命名 <供应商代码>-<yyyyMMdd>，含环境变量/鉴权配置）；
                b) 经插件发送请求、采集真实响应；c) 工件中附 Collection 定义与逐接口"文档 vs 实际"差异对比。
