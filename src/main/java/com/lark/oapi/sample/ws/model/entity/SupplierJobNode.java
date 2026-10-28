@@ -53,6 +53,10 @@ public class SupplierJobNode {
     @Column(name = "pending_question")
     private String pendingQuestion = "";
 
+    /** 执行中实时进度（当前工具活动摘要，如 "🔧 Bash · curl -X POST ..."），轮次结束清空 */
+    @Column(name = "progress", length = 600)
+    private String progress = "";
+
     @Column(name = "started_at")
     private LocalDateTime startedAt;
 
@@ -86,6 +90,8 @@ public class SupplierJobNode {
     public void setNote(String note) { this.note = note; }
     public String getPendingQuestion() { return pendingQuestion != null ? pendingQuestion : ""; }
     public void setPendingQuestion(String pendingQuestion) { this.pendingQuestion = pendingQuestion; }
+    public String getProgress() { return progress != null ? progress : ""; }
+    public void setProgress(String progress) { this.progress = progress; }
     public LocalDateTime getStartedAt() { return startedAt; }
     public void setStartedAt(LocalDateTime startedAt) { this.startedAt = startedAt; }
     public LocalDateTime getDoneAt() { return doneAt; }

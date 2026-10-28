@@ -302,6 +302,7 @@ public class SupplierJobController {
             no.addProperty("artifact", n.getArtifact());
             no.addProperty("note", n.getNote());
             no.addProperty("pendingQuestion", n.getPendingQuestion());
+            no.addProperty("progress", n.getProgress());
             no.addProperty("lastRunAt", String.valueOf(n.getLastRunAt()));
             no.addProperty("doneAt", String.valueOf(n.getDoneAt()));
             arr.add(no);

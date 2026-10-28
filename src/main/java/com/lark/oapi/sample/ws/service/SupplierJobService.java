@@ -303,15 +303,37 @@ public class SupplierJobService {
             try {
                 String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
                 String reply = claudeCodeService.chat(inst.getId(), "supplier-job-" + jobId,
-                        message, null, dir, inst.getClaudeModel(), new NoopListener());
+                        message, null, dir, inst.getClaudeModel(), progressListener(n));
                 applyNodeReply(n, reply);
             } catch (Exception e) {
                 log.error("[SupplierJob] 节点执行异常: job={}, node={}", jobId, nodeId, e);
                 n.setNote("执行异常: " + e.getMessage());
                 n.setStatus("PENDING");
+                n.setProgress("");
                 nodeRepo.save(n);
             }
         });
+    }
+
+    /** 执行进度监听：每个工具事件（Bash/Read/WebFetch…）写入 node.progress，前端轮询即可见"当前在做什么" */
+    private TurnListener progressListener(SupplierJobNode n) {
+        return new NoopListener() {
+            @Override public void onToolStart(ToolStep step) {
+                try {
+                    String raw = "🔧 " + step.name
+                            + (step.detail == null || step.detail.isBlank() ? "" : " · " + step.detail.strip());
+                    final String text = raw.length() > 560 ? raw.substring(0, 560) + "…" : raw;
+                    nodeRepo.findByJobIdAndNodeId(n.getJobId(), n.getNodeId()).ifPresent(fresh -> {
+                        if ("RUNNING".equals(fresh.getStatus())) {
+                            fresh.setProgress(text);
+                            nodeRepo.save(fresh);
+                        }
+                    });
+                } catch (Exception ignore) {
+                    // 进度上报失败绝不影响执行主链
+                }
+            }
+        };
     }
 
     /** 统一处理节点回复：❌→note；行首【卡点】→挂起待答；正常→artifact 落库回 PENDING（等玩家点完成） */
@@ -332,6 +354,7 @@ public class SupplierJobService {
             log.info("[SupplierJob] 节点执行完成: job={}, node={}, 产物{}字（等待玩家确认）",
                     n.getJobId(), n.getNodeId(), n.getArtifact().length());
         }
+        if (!"RUNNING".equals(n.getStatus())) n.setProgress("");   // 只有卡点挂起态保留最后进度
         nodeRepo.save(n);
     }
 

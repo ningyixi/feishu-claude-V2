@@ -465,6 +465,15 @@ function GameView({ jobId, onBack, showToast }) {
                 )}
               </div>
 
+              {/* 执行进度：转圈不再是黑盒，实时显示当前工具动作 */}
+              {cur.status === 'RUNNING' && (
+                <div style={{ marginTop: 10, fontSize: 12, color: cur.pendingQuestion ? '#b45309' : '#3b82f6', background: cur.pendingQuestion ? 'rgba(245,158,11,.08)' : 'rgba(59,130,246,.07)', border: '1px solid ' + (cur.pendingQuestion ? 'rgba(245,158,11,.3)' : 'rgba(59,130,246,.25)'), borderRadius: 6, padding: '5px 10px', wordBreak: 'break-all' }}>
+                  {cur.pendingQuestion
+                    ? <>⏸ 已挂起等你答复（停在最后一步：{cur.progress || '思考中'}）</>
+                    : <><span className="spinner" style={{ width: 9, height: 9, marginRight: 6 }} />正在：{cur.progress || '思考中（首个工具动作到达前略等）…'}</>}
+                </div>
+              )}
+
               <div style={{ fontSize: 13, color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.8, whiteSpace: 'pre-wrap' }}>
                 {cur.description}
               </div>
@@ -559,6 +568,11 @@ function GameView({ jobId, onBack, showToast }) {
                     {n.pendingQuestion ? ' · ❓待答' : ''}
                     {n.artifact ? ' · 📄有工件' : ''}
                   </div>
+                  {n.status === 'RUNNING' && n.progress && (
+                    <div style={{ fontSize: 11, color: '#3b82f6', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={n.progress}>
+                      ⏳ {n.progress}
+                    </div>
+                  )}
                 </div>
               </div>
             )
