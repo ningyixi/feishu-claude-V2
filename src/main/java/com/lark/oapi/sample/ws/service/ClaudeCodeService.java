@@ -60,12 +60,28 @@ public class ClaudeCodeService {
         try {
             TerminalSession session = getOrCreate(instanceId, workingDir, model);
             log.info("[ClaudeCode][{}] 发送消息: openId={}, 图片={}张", instanceId, openId, images != null ? images.size() : 0);
-            return session.sendMessage(message, images, listener);
+            return session.sendMessage(message, images, listener, sourceKindOf(openId));
         } catch (Exception e) {
             log.error("[ClaudeCode][{}] 对话失败", instanceId, e);
             if (listener != null) listener.onTurnError("Claude 对话失败: " + e.getMessage(), false);
             return "❌ Claude 对话失败: " + e.getMessage();
         }
+    }
+
+    /** 排队面板的来源渠道标签（按会话 key 形态启发判断） */
+    private static String sourceKindOf(String openId) {
+        if (openId == null) return "其他";
+        if (openId.startsWith("supplier-job-")) return "工作台";
+        if (openId.startsWith("ou_")) return "飞书";
+        if (openId.startsWith("chatbot") || openId.startsWith("oc_")) return "群聊";
+        if (openId.startsWith("a2a") || openId.startsWith("employee")) return "数字员工";
+        return "其他";
+    }
+
+    /** 实例当前排队快照（10-30-instance-queue-panel）；会话未建立=空闲 */
+    public java.util.List<TerminalSession.QueuedMsg> queueOf(Long instanceId) {
+        TerminalSession s = sessions.get(instanceId);
+        return s == null ? java.util.List.of() : s.queuedSnapshot();
     }
 
     /**

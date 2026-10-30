@@ -63,6 +63,7 @@ public class SkillHookService {
     private final SkillFileChangeRepository changeRepo;
     private final ChatMessageRepository chatRepo;
     private final BotInstanceRepository instanceRepo;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     /** hookId → 专属维护者会话 */
     private final Map<Long, TerminalSession> sessions = new ConcurrentHashMap<>();
@@ -73,17 +74,25 @@ public class SkillHookService {
 
     public SkillHookService(SkillHookRepository hookRepo, HookRunRepository runRepo,
                             SkillFileChangeRepository changeRepo, ChatMessageRepository chatRepo,
-                            BotInstanceRepository instanceRepo) {
+                            BotInstanceRepository instanceRepo,
+                            org.springframework.jdbc.core.JdbcTemplate jdbc) {
         this.hookRepo = hookRepo;
         this.runRepo = runRepo;
         this.changeRepo = changeRepo;
         this.chatRepo = chatRepo;
         this.instanceRepo = instanceRepo;
+        this.jdbc = jdbc;
     }
 
     /** 旧 hook 回填默认维护意图（10-30-hook-maintenance-intent），不炸存量 */
     @jakarta.annotation.PostConstruct
     public void backfillIntents() {
+        // ddl-auto:update 不会改已建列宽，早期建的 intent VARCHAR(400) 需显式扩列（用户长意图曾撑爆报 500）
+        try {
+            jdbc.execute("ALTER TABLE skill_hook ALTER COLUMN intent VARCHAR(4000)");
+        } catch (Exception e) {
+            log.debug("[Hook] intent 列扩宽跳过: {}", e.getMessage());
+        }
         try {
             for (SkillHook h : hookRepo.findAll()) {
                 if (h.getIntent().isBlank()) {

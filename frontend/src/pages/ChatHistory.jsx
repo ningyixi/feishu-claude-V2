@@ -66,10 +66,19 @@ function renderContent(content) {
   )
 }
 
+// 与后端 queuePreview 同规则归一（折叠空白+80字截断），用于排队条目与对话气泡的匹配
+function normPreview(c) {
+  const one = (c || '').trim().replace(/\s+/g, ' ')
+  return one.length > 80 ? one.slice(0, 80) + '…' : one
+}
+
 export default function ChatHistory({ instanceId, instanceName, onBack }) {
   const [messages, setMessages] = useState([])
   const [loading, setLoading] = useState(true)
   const [autoRefresh, setAutoRefresh] = useState(true)
+  const [queue, setQueue] = useState([])
+  const [flashKeys, setFlashKeys] = useState(() => new Set())   // 刚被消费的排队消息 → 进对话流高亮
+  const prevQueueRef = useRef([])
   const scrollRef = useRef(null)
 
   async function load() {
@@ -84,10 +93,31 @@ export default function ChatHistory({ instanceId, instanceName, onBack }) {
     }
   }
 
+  // 排队快照 2s 轮询；diff 出"刚消费"的条目做进流动效
+  async function loadQueue() {
+    try {
+      const res = await fetch(`/api/instances/${instanceId}/queue`)
+      if (!res.ok) return
+      const q = await res.json()
+      const prev = prevQueueRef.current
+      const nowKeys = new Set(q.map(x => x.preview))
+      const consumed = prev.filter(p => !nowKeys.has(p.preview))
+      if (consumed.length) {
+        setFlashKeys(s => { const n = new Set(s); consumed.forEach(c => n.add(c.preview)); return n })
+        setTimeout(() => setFlashKeys(s => {
+          const n = new Set(s); consumed.forEach(c => n.delete(c.preview)); return n
+        }), 2500)
+      }
+      prevQueueRef.current = q
+      setQueue(q)
+    } catch { /* 网络抖动忽略，下轮再来 */ }
+  }
+
   useEffect(() => {
-    load()
-    const interval = autoRefresh ? setInterval(load, 3000) : null
-    return () => { if (interval) clearInterval(interval) }
+    load(); loadQueue()
+    const t1 = autoRefresh ? setInterval(load, 3000) : null
+    const t2 = setInterval(loadQueue, 2000)
+    return () => { if (t1) clearInterval(t1); clearInterval(t2) }
   }, [instanceId, autoRefresh])
 
   // 自动滚动到底部
@@ -95,7 +125,9 @@ export default function ChatHistory({ instanceId, instanceName, onBack }) {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [messages])
+  }, [messages, queue])
+
+  const waitingSet = new Set(queue.map(q => q.preview))
 
   return (
     <div>
@@ -113,9 +145,12 @@ export default function ChatHistory({ instanceId, instanceName, onBack }) {
         <button className="btn" onClick={load} style={{ fontSize: '12px', padding: '4px 10px' }}>刷新</button>
       </div>
 
+      <div style={{ display: 'flex', gap: 12, alignItems: 'stretch' }}>
       <div
         ref={scrollRef}
         style={{
+          flex: 1,
+          minWidth: 0,
           height: 'calc(100vh - 150px)',
           overflowY: 'auto',
           background: 'var(--bg-card)',
@@ -134,6 +169,9 @@ export default function ChatHistory({ instanceId, instanceName, onBack }) {
 
         {messages.map((msg, i) => {
           const isUser = msg.role === 'user'
+          const np = normPreview(msg.content)
+          if (isUser && waitingSet.has(np)) return null   // 还在排队的消息：只在右列排队面板显示
+          const flashed = isUser && flashKeys.has(np)
           return (
             <div
               key={msg.id || i}
@@ -156,15 +194,17 @@ export default function ChatHistory({ instanceId, instanceName, onBack }) {
                 }}>
                   {isUser ? '👤 用户' : '🤖 机器人'} · {formatTime(msg.createdAt)}
                   {msg.chatType === 'group' && ' · 群聊'}
+                  {flashed && <span style={{ color: '#d97706', marginLeft: 6 }}>⚡ 刚消费入会话</span>}
                 </div>
                 {/* 消息气泡 */}
                 <div style={{
-                  background: isUser ? '#eff6ff' : '#f0fdf4',
-                  border: `1px solid ${isUser ? '#bfdbfe' : '#bbf7d0'}`,
+                  background: flashed ? '#fef3c7' : (isUser ? '#eff6ff' : '#f0fdf4'),
+                  border: `1px solid ${flashed ? '#f59e0b' : (isUser ? '#bfdbfe' : '#bbf7d0')}`,
                   borderRadius: '10px',
                   padding: '10px 14px',
                   fontSize: '13px',
                   color: '#1e293b',
+                  transition: 'background 1.5s ease, border-color 1.5s ease',
                 }}>
                   {renderContent(msg.content)}
                 </div>
@@ -172,6 +212,46 @@ export default function ChatHistory({ instanceId, instanceName, onBack }) {
             </div>
           )
         })}
+      </div>
+
+      {/* 右列：排队面板（10-30-instance-queue-panel） */}
+      <div style={{
+        width: 250, flexShrink: 0,
+        height: 'calc(100vh - 150px)', overflowY: 'auto',
+        background: 'var(--bg-card)', border: '1px solid var(--border)',
+        borderRadius: '8px', padding: '12px',
+      }}>
+        <div style={{ fontSize: 13, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
+          {queue.length > 0
+            ? <><span className="spinner" style={{ width: 10, height: 10 }} />⏳ 排队中 <span style={{ color: '#d97706' }}>{queue.length}</span> 条</>
+            : <>✅ 队列畅通</>}
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4, lineHeight: 1.5 }}>
+          {queue.length > 0 ? '上一轮跑完会按顺序逐条进入会话' : '没有等待消费的消息'}
+        </div>
+
+        {/* 最新队头在顶（ticket 降序显示，消费顺序仍是 FIFO） */}
+        {queue.slice().reverse().map(q => (
+          <div key={q.ticket} style={{
+            marginTop: 8, padding: '8px 10px', borderRadius: 8,
+            background: 'rgba(245,158,11,.07)', border: '1px solid rgba(245,158,11,.28)',
+          }}>
+            <div style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 11, color: '#b45309', marginBottom: 4 }}>
+              <span className="hook-badge" style={{ fontSize: 10, padding: '0 6px' }}>{q.kind}</span>
+              <span>已等 {q.waitedSec}s</span>
+            </div>
+            <div style={{ fontSize: 12, color: 'var(--text)', wordBreak: 'break-all', lineHeight: 1.5 }} title={q.preview}>
+              {q.preview.length > 66 ? q.preview.slice(0, 66) + '…' : q.preview}
+            </div>
+          </div>
+        ))}
+
+        {queue.length > 0 && (
+          <div style={{ marginTop: 10, fontSize: 10.5, color: 'var(--text-dim)', lineHeight: 1.6 }}>
+            💡 排队为内存态：后端重启会清空，未消费的消息请重发
+          </div>
+        )}
+      </div>
       </div>
     </div>
   )

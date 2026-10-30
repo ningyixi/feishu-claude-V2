@@ -68,8 +68,31 @@ public class TerminalSession {
 
     private Thread readerThread;
 
-    /** 轮次串行化锁 — 同一时刻只有一轮在跑 */
-    private final ReentrantLock turnLock = new ReentrantLock();
+    /** 轮次串行化锁 — 同一时刻只有一轮在跑。公平锁：保证排队显示顺序 == 实际消费顺序 */
+    private final ReentrantLock turnLock = new ReentrantLock(true);
+
+    /**
+     * 排队中的消息快照（10-30-instance-queue-panel）— tryLock 失败时登记，拿到锁即移除。
+     * 仅用于前端可视化，不参与调度（调度仍由 turnLock 决定）。
+     */
+    private final java.util.concurrent.ConcurrentMap<Long, QueuedMsg> pendingQueue = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.atomic.AtomicLong queueSeq = new java.util.concurrent.atomic.AtomicLong();
+
+    /** 排队条目：ticket 保序，preview 摘要，enqueuedAt 入队时刻，kind 来源渠道 */
+    public record QueuedMsg(long ticket, String preview, String kind, long enqueuedAt) {}
+
+    /** 当前排队快照（旧→新按 ticket 排序），供 REST 轮询 */
+    public java.util.List<QueuedMsg> queuedSnapshot() {
+        return pendingQueue.values().stream()
+                .sorted(java.util.Comparator.comparingLong(QueuedMsg::ticket))
+                .toList();
+    }
+
+    private static String queuePreview(String msg) {
+        if (msg == null) return "";
+        String one = msg.strip().replaceAll("\\s+", " ");
+        return one.length() > 80 ? one.substring(0, 80) + "…" : one;
+    }
     /** 当前活跃轮次（reader 线程路由事件的目标），受 turnLock 保护 */
     private volatile Turn currentTurn;
 
@@ -327,13 +350,22 @@ public class TerminalSession {
      * 带图片附件的消息发送 — content 变成 [text块, image块...] 数组（Anthropic 消息格式）。
      */
     public String sendMessage(String message, List<ImageAttachment> images, TurnListener listener) {
+        return sendMessage(message, images, listener, "其他");
+    }
+
+    /** sourceKind: 排队面板显示的消息来源标签（飞书/工作台/A2A/其他） */
+    public String sendMessage(String message, List<ImageAttachment> images, TurnListener listener, String sourceKind) {
         if (listener == null) listener = new NullTurnListener();
 
-        // 排队提示：若锁被占用说明上一轮还在跑
+        // 排队提示：若锁被占用说明上一轮还在跑；登记进可枚举队列供前端展示（拿到锁即摘除=消费）
+        Long qTicket = null;
         if (!turnLock.tryLock()) {
+            qTicket = queueSeq.incrementAndGet();
+            pendingQueue.put(qTicket, new QueuedMsg(qTicket, queuePreview(message), sourceKind, System.currentTimeMillis()));
             listener.onQueued();
             turnLock.lock();
         }
+        if (qTicket != null) pendingQueue.remove(qTicket);
         try {
             if (!isAlive()) {
                 try {

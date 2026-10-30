@@ -308,7 +308,7 @@ function HookForm({ hook, instances, onClose, onSaved, showToast }) {
           </div>
           <div className="form-group">
             <label className="form-label">维护意图 *（本 skill 沉淀什么业务的经验——判定与维护都按此过滤，多个 hook 各管一类）</label>
-            <textarea className="form-input" rows={2} style={{ fontSize: 12.5 }}
+            <textarea className="form-input" rows={4} style={{ fontSize: 12.5 }} maxLength={4000}
               placeholder={'示例：\n· 业务开发细节（接口踩坑、字段约定、流程实现）\n· review 要点（反复出现的代码问题与检查项）\n· 怎么写好提示词（验证过的 prompt 模式与反例）'}
               value={form.intent} onChange={e => setForm(f => ({ ...f, intent: e.target.value }))} />
           </div>

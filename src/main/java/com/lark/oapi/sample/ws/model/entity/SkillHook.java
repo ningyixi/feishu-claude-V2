@@ -19,7 +19,7 @@ public class SkillHook {
     private String name = "";
 
     /** 维护意图（10-30-hook-maintenance-intent）：本 hook 沉淀什么业务的经验，judge/maintain prompt 按此过滤 */
-    @Column(length = 400)
+    @Column(length = 4000)
     private String intent = "";
 
     /** 监控的实例 ID 列表，逗号分隔（如 "1,2"） */

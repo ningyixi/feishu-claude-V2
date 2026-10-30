@@ -37,15 +37,18 @@ public class BotInstanceController {
     private final ChatMessageRepository chatMessageRepo;
     private final FeishuBotService feishuBotService;
     private final InstanceStatusService instanceStatusService;
+    private final com.lark.oapi.sample.ws.service.ClaudeCodeService claudeCodeService;
 
     public BotInstanceController(BotInstanceRepository instanceRepo,
                                  ChatMessageRepository chatMessageRepo,
                                  FeishuBotService feishuBotService,
-                                 InstanceStatusService instanceStatusService) {
+                                 InstanceStatusService instanceStatusService,
+                                 com.lark.oapi.sample.ws.service.ClaudeCodeService claudeCodeService) {
         this.instanceRepo = instanceRepo;
         this.chatMessageRepo = chatMessageRepo;
         this.feishuBotService = feishuBotService;
         this.instanceStatusService = instanceStatusService;
+        this.claudeCodeService = claudeCodeService;
     }
 
     /** 全部实例的实时运行状态（前端 4s 轮询，趣味徽章） */
@@ -192,6 +195,22 @@ public class BotInstanceController {
         // 反转为时间正序
         java.util.Collections.reverse(msgs);
         return ResponseEntity.ok(msgs);
+    }
+
+    /** 排队快照（10-30-instance-queue-panel）：等锁中的消息列表，前端轮询驱动右列面板 */
+    @GetMapping("/{id}/queue")
+    public ResponseEntity<List<java.util.Map<String, Object>>> queue(@PathVariable Long id) {
+        if (!instanceRepo.existsById(id)) return ResponseEntity.notFound().build();
+        List<java.util.Map<String, Object>> out = new ArrayList<>();
+        for (var q : claudeCodeService.queueOf(id)) {
+            java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
+            m.put("ticket", q.ticket());
+            m.put("preview", q.preview());
+            m.put("kind", q.kind());
+            m.put("waitedSec", Math.max(0, (System.currentTimeMillis() - q.enqueuedAt()) / 1000));
+            out.add(m);
+        }
+        return ResponseEntity.ok(out);
     }
 
     // ===== 内部方法 =====

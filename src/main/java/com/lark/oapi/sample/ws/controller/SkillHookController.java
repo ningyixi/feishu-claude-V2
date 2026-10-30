@@ -169,6 +169,7 @@ public class SkillHookController {
     private void validate(SkillHook h) {
         if (h.getName() == null || h.getName().isBlank()) throw new IllegalArgumentException("请填写 Hook 名称");
         if (h.getIntent() == null || h.getIntent().isBlank()) throw new IllegalArgumentException("请填写维护意图（本 skill 要沉淀什么业务的经验）");
+        if (h.getIntent().length() > 4000) throw new IllegalArgumentException("维护意图过长（上限 4000 字），请精简到核心定位与沉淀范围");
         if (h.getInstanceIds() == null || h.getInstanceIds().isBlank()) throw new IllegalArgumentException("请至少选择一个监控实例");
         if (h.getSkillDir() == null || h.getSkillDir().isBlank()) throw new IllegalArgumentException("请填写 skill 目录");
         if (!new java.io.File(h.getSkillDir()).isDirectory()) throw new IllegalArgumentException("skill 目录不存在: " + h.getSkillDir());
