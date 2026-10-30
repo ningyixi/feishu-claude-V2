@@ -111,6 +111,7 @@ public class SkillHookController {
                 return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
             }
             h.setName(body.getName());
+            h.setIntent(body.getIntent());
             h.setInstanceIds(body.getInstanceIds());
             h.setMaintainerInstanceId(body.getMaintainerInstanceId());
             h.setSkillDir(body.getSkillDir());
@@ -167,6 +168,7 @@ public class SkillHookController {
 
     private void validate(SkillHook h) {
         if (h.getName() == null || h.getName().isBlank()) throw new IllegalArgumentException("请填写 Hook 名称");
+        if (h.getIntent() == null || h.getIntent().isBlank()) throw new IllegalArgumentException("请填写维护意图（本 skill 要沉淀什么业务的经验）");
         if (h.getInstanceIds() == null || h.getInstanceIds().isBlank()) throw new IllegalArgumentException("请至少选择一个监控实例");
         if (h.getSkillDir() == null || h.getSkillDir().isBlank()) throw new IllegalArgumentException("请填写 skill 目录");
         if (!new java.io.File(h.getSkillDir()).isDirectory()) throw new IllegalArgumentException("skill 目录不存在: " + h.getSkillDir());
@@ -192,6 +194,7 @@ public class SkillHookController {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("id", h.getId());
         m.put("name", h.getName());
+        m.put("intent", h.getIntent());
         m.put("instanceIds", h.getInstanceIds());
         m.put("maintainerInstanceId", h.getMaintainerInstanceId());
         m.put("skillDir", h.getSkillDir());

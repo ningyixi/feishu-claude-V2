@@ -93,6 +93,38 @@ public class SupplierJobService {
         }
     }
 
+    /** 旧数据回填（10-29-codegen-prep）：标题含"写代码"的节点补上门禁标记（模板+存档快照） */
+    @PostConstruct
+    public void backfillCodegenPrep() {
+        try {
+            for (WorkflowTemplate t : templateRepo.findAll()) {
+                JsonArray arr = parseNodes(t.getNodesJson());
+                boolean changed = false;
+                for (JsonElement el : arr) {
+                    if (el.isJsonObject() && isCodegenTitle(str(el.getAsJsonObject(), "title", ""))
+                            && !el.getAsJsonObject().has("codegenPrep")) {
+                        el.getAsJsonObject().addProperty("codegenPrep", true);
+                        changed = true;
+                    }
+                }
+                if (changed) { t.setNodesJson(arr.toString()); templateRepo.save(t); }
+            }
+            for (SupplierJobNode n : nodeRepo.findAll()) {
+                if (!n.isCodegenPrep() && isCodegenTitle(n.getTitle())) {
+                    n.setCodegenPrep(true);
+                    nodeRepo.save(n);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[SupplierJob] codegenPrep 回填失败（不影响启动）: {}", e.getMessage());
+        }
+    }
+
+    /** 兼容"让实例写代码/让实例写供应商代码"等标题写法 */
+    static boolean isCodegenTitle(String title) {
+        return title != null && title.contains("代码") && title.contains("写");
+    }
+
     private String apiTemplateNodes() {
         JsonArray nodes = new JsonArray();
         nodes.add(node("n1", "agent", "拉取接口文档 → 接口映射报告",
@@ -123,8 +155,9 @@ public class SupplierJobService {
                 "核对存档信息：供应商 ID/枚举值是否已申请（NuGet 包 Suppliers 枚举）、测试账号/凭证是否到位、类库路径是否正确。"
                         + "缺什么先去申请，齐了再点完成。", ""));
         nodes.add(node("n4", "manual", "让实例写供应商代码",
-                "到飞书上对绑定实例下达写代码指令（建议提及使用 create-supplier skill 和本次存档的实测报告），"
-                        + "也可以直接在工作台让实例执行检查类任务。代码写完并自查后点完成。", ""));
+                "先在「写代码准备」提交三方会议文档（飞书云文档链接）与当前配置 key/value，"
+                        + "再点「生成提示词」复制发给绑定实例（自动聚合知识库/实测档案/skill/spec/会议文档/配置）。代码写完并自查后点完成。", ""));
+        nodes.get(3).getAsJsonObject().addProperty("codegenPrep", true);   // n4 写代码前置门禁
         nodes.add(node("n5", "agent_check", "代码依赖扫描 → 配置提醒清单",
                 "让实例扫描生成的供应商代码，找出所有需要外部配置的依赖（redis、配置中心开关、账号参数、NuGet 枚举、防火墙/白名单等），"
                         + "产出「上线前必须配置的清单」。",
@@ -195,6 +228,7 @@ public class SupplierJobService {
             n.setType(str(o, "type", "manual"));
             n.setDescription(str(o, "description", ""));
             n.setPrompt(str(o, "prompt", ""));
+            n.setCodegenPrep(o.has("codegenPrep") && o.get("codegenPrep").getAsBoolean());
             n.setStatus("PENDING");
             nodeRepo.save(n);
             if (firstNodeId == null) firstNodeId = n.getNodeId();
@@ -315,25 +349,47 @@ public class SupplierJobService {
         });
     }
 
-    /** 执行进度监听：每个工具事件（Bash/Read/WebFetch…）写入 node.progress，前端轮询即可见"当前在做什么" */
+    /** 执行进度监听：工具事件写 progress；思考增量节流(≥1.5s)写 thinking 尾部片段，前端轮询即见"在做什么+在想什么" */
     private TurnListener progressListener(SupplierJobNode n) {
-        return new NoopListener() {
-            @Override public void onToolStart(ToolStep step) {
-                try {
-                    String raw = "🔧 " + step.name
-                            + (step.detail == null || step.detail.isBlank() ? "" : " · " + step.detail.strip());
-                    final String text = raw.length() > 560 ? raw.substring(0, 560) + "…" : raw;
-                    nodeRepo.findByJobIdAndNodeId(n.getJobId(), n.getNodeId()).ifPresent(fresh -> {
-                        if ("RUNNING".equals(fresh.getStatus())) {
-                            fresh.setProgress(text);
-                            nodeRepo.save(fresh);
-                        }
-                    });
-                } catch (Exception ignore) {
-                    // 进度上报失败绝不影响执行主链
-                }
+        return new TurnListener() {
+            private final StringBuilder think = new StringBuilder();
+            private long lastThinkWrite;
+
+            @Override public void onTurnStart() { }
+            @Override public void onThinkingDelta(String delta) {
+                if (delta == null || delta.isEmpty()) return;
+                think.append(delta);
+                if (think.length() > 3000) think.delete(0, think.length() - 3000);
+                long now = System.currentTimeMillis();
+                if (now - lastThinkWrite < 1500) return;
+                lastThinkWrite = now;
+                String tail = think.length() > 500 ? think.substring(think.length() - 500) : think.toString();
+                patchLive(n, f -> f.setThinking(tail.strip()));
             }
+            @Override public void onTextDelta(String delta) { }
+            @Override public void onToolStart(ToolStep step) {
+                think.setLength(0);   // 新工具动作开新段落，思考缓冲重置
+                String raw = "🔧 " + step.name
+                        + (step.detail == null || step.detail.isBlank() ? "" : " · " + step.detail.strip());
+                final String text = raw.length() > 560 ? raw.substring(0, 560) + "…" : raw;
+                patchLive(n, f -> f.setProgress(text));
+            }
+            @Override public void onToolEnd(ToolStep step) { }
+            @Override public void onTurnComplete(TurnResult result) { }
+            @Override public void onTurnError(String message, boolean aborted) { }
         };
+    }
+
+    /** 执行中的实时字段写入：仅 RUNNING 态更新，失败绝不影响执行主链 */
+    private void patchLive(SupplierJobNode n, java.util.function.Consumer<SupplierJobNode> mut) {
+        try {
+            nodeRepo.findByJobIdAndNodeId(n.getJobId(), n.getNodeId()).ifPresent(f -> {
+                if ("RUNNING".equals(f.getStatus())) {
+                    mut.accept(f);
+                    nodeRepo.save(f);
+                }
+            });
+        } catch (Exception ignore) { }
     }
 
     /** 统一处理节点回复：❌→note；行首【卡点】→挂起待答；正常→artifact 落库回 PENDING（等玩家点完成） */
@@ -354,16 +410,19 @@ public class SupplierJobService {
             log.info("[SupplierJob] 节点执行完成: job={}, node={}, 产物{}字（等待玩家确认）",
                     n.getJobId(), n.getNodeId(), n.getArtifact().length());
         }
-        if (!"RUNNING".equals(n.getStatus())) n.setProgress("");   // 只有卡点挂起态保留最后进度
+        if (!"RUNNING".equals(n.getStatus())) { n.setProgress(""); n.setThinking(""); }   // 只有卡点挂起态保留最后进度
         nodeRepo.save(n);
     }
 
-    /** 玩家确认节点完成：蓝→绿，推进当前节点 */
+    /** 玩家确认节点完成：蓝→绿，推进当前节点。带写代码门禁的节点必须先交齐会议文档+KV配置 */
     @Transactional
     public void completeNode(Long jobId, String nodeId) {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
         SupplierJobNode n = nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
                 .orElseThrow(() -> new IllegalArgumentException("节点不存在: " + nodeId));
+        if (n.isCodegenPrep() && !prepComplete(job.getMeetingDocUrl(), job.getConfigJson())) {
+            throw new IllegalArgumentException("【写代码准备】未完成：需先提交三方会议文档（飞书云文档链接），并补充至少一组完整的配置 key/value");
+        }
         n.setStatus("DONE");
         n.setDoneAt(LocalDateTime.now());
         nodeRepo.save(n);
@@ -377,6 +436,132 @@ public class SupplierJobService {
                     log.info("[SupplierJob] 🎉 存档通关: id={}, name={}", jobId, job.getName());
                 });
         jobRepo.save(job);
+    }
+
+    // ===== 写代码前置准备（10-29-codegen-prep） =====
+
+    /** 三方会议文档必须是飞书云文档 https 链接（feishu.cn / larksuite.com 及其子域） */
+    static boolean isFeishuDocUrl(String url) {
+        try {
+            java.net.URI u = new java.net.URI(url == null ? "" : url.trim());
+            String host = u.getHost();
+            return "https".equalsIgnoreCase(u.getScheme()) && host != null
+                    && (host.equals("feishu.cn") || host.endsWith(".feishu.cn")
+                        || host.equals("larksuite.com") || host.endsWith(".larksuite.com"));
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** 门禁达成判定：会议文档链接非空 且 至少一组 key/value 都完整的配置 */
+    static boolean prepComplete(String meetingDocUrl, String configJson) {
+        if (meetingDocUrl == null || meetingDocUrl.isBlank()) return false;
+        try {
+            JsonArray arr = JsonParser.parseString(configJson == null || configJson.isBlank() ? "[]" : configJson).getAsJsonArray();
+            for (JsonElement el : arr) {
+                if (el.isJsonObject()) {
+                    JsonObject o = el.getAsJsonObject();
+                    String k = str(o, "key", "").trim();
+                    String v = str(o, "value", "").trim();
+                    if (!k.isEmpty() && !v.isEmpty()) return true;
+                }
+            }
+        } catch (Exception ignore) { }
+        return false;
+    }
+
+    public boolean prepReady(SupplierJob job) { return prepComplete(job.getMeetingDocUrl(), job.getConfigJson()); }
+
+    /** 保存写代码准备信息（部分更新：null 字段不动；configs 传数组 JSON 字符串或 null） */
+    @Transactional
+    public SupplierJob savePrep(Long jobId, String meetingDocUrl, String specDocPath, String configsJson) {
+        SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
+        if (meetingDocUrl != null) {
+            String m = meetingDocUrl.trim();
+            if (!m.isEmpty() && !isFeishuDocUrl(m)) {
+                throw new IllegalArgumentException("三方会议文档必须是飞书云文档链接（https，域名 feishu.cn / larksuite.com）");
+            }
+            job.setMeetingDocUrl(m);
+        }
+        if (specDocPath != null) job.setSpecDocPath(specDocPath.trim());
+        if (configsJson != null) {
+            JsonArray arr;
+            try {
+                arr = JsonParser.parseString(configsJson).getAsJsonArray();
+            } catch (Exception e) {
+                throw new IllegalArgumentException("配置格式非法（需 key/value 数组）");
+            }
+            for (JsonElement el : arr) {
+                JsonObject o = el.isJsonObject() ? el.getAsJsonObject() : new JsonObject();
+                String k = str(o, "key", "").trim();
+                String v = str(o, "value", "").trim();
+                if (!k.isEmpty() != !v.isEmpty()) throw new IllegalArgumentException("配置项 key 和 value 需成对填写: " + (k.isEmpty() ? v : k));
+            }
+            job.setConfigJson(arr.toString());
+        }
+        SupplierJob saved = jobRepo.save(job);
+        log.info("[SupplierJob] 写代码准备已保存: job={}, 会议文档={}, 配置{}组, spec={}",
+                jobId, saved.getMeetingDocUrl().isBlank() ? "无" : "有",
+                JsonParser.parseString(saved.getConfigJson()).getAsJsonArray().size(),
+                saved.getSpecDocPath().isBlank() ? "无" : "有");
+        return saved;
+    }
+
+    /** 生成发给实例的写代码提示词（聚合六类参考资料，用户一键复制粘贴到飞书） */
+    public String codegenPrompt(Long jobId) {
+        SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
+        String kbIndex = kbService.indexText(kbService.kbCode(job));
+        String skills = formatSkills(job.getSkillsJson());
+        String n2 = nodeRepo.findByJobIdAndNodeId(jobId, "n2").map(SupplierJobNode::getArtifact).orElse("");
+        if (n2.isBlank()) {   // 自定义模板里实测节点可能不叫 n2：找带工件的 agent 节点里标题含"实测/档案"的
+            n2 = nodeRepo.findByJobIdOrderBySeqAsc(jobId).stream()
+                    .filter(x -> x.getArtifact() != null && !x.getArtifact().isBlank()
+                            && (x.getType().startsWith("agent")) && isCodegenTitle(x.getTitle()) == false
+                            && (x.getTitle().contains("实测") || x.getTitle().contains("档案") || x.getTitle().contains("Postman") || x.getTitle().contains("Collection")))
+                    .findFirst().map(SupplierJobNode::getArtifact).orElse("");
+        }
+        return buildCodegenPrompt(job.getSupplierName(), job.getSupplierCode(), job.getLibraryPath(),
+                kbIndex, skills, job.getMeetingDocUrl(), job.getSpecDocPath(), job.getConfigJson(), n2);
+    }
+
+    /** 纯函数便于单测：提示词组装 */
+    static String buildCodegenPrompt(String supplierName, String supplierCode, String libraryPath,
+                                     String kbIndex, String skills, String meetingDocUrl,
+                                     String specDocPath, String configsJson, String n2Artifact) {
+        StringBuilder p = new StringBuilder();
+        p.append("【供应商接入 · 写代码】\n")
+         .append("请为供应商 ").append(supplierName).append("（ID: ").append(supplierCode)
+         .append("）编写供应商对接代码，类库目录: ").append(libraryPath).append("。\n\n")
+         .append("== 参考资料（动手前务必先读） ==\n")
+         .append("1) 接口文档知识库（已解析为本地 Markdown，先 Read 这些文件，不要重新抓取）：\n")
+         .append(kbIndex).append("\n\n")
+         .append("2) 接口实测档案（Postman Collection 与逐接口\"文档 vs 实际\"差异，来自工作台实测节点工件）：\n");
+        if (n2Artifact != null && !n2Artifact.isBlank()) {
+            String a = n2Artifact.length() > 3000 ? n2Artifact.substring(0, 3000) + "\n…（截断，完整内容见工作台该节点工件）" : n2Artifact;
+            p.append(a).append("\n");
+        } else {
+            p.append("（尚无实测档案——若接口尚未实测，先在工作台完成实测节点再写代码）\n");
+        }
+        p.append("\n3) 三方会议文档（本次实现的重要参考，飞书云文档）：")
+         .append(meetingDocUrl == null || meetingDocUrl.isBlank() ? "（未提交）" : meetingDocUrl).append("\n")
+         .append("4) spec 文档：").append(specDocPath == null || specDocPath.isBlank() ? "（未提供）" : specDocPath).append("\n")
+         .append("5) 当前配置 key/value（实现中按这些键名读取配置）：\n");
+        StringBuilder kv = new StringBuilder();
+        try {
+            for (JsonElement el : JsonParser.parseString(configsJson == null ? "[]" : configsJson).getAsJsonArray()) {
+                if (el.isJsonObject()) {
+                    JsonObject o = el.getAsJsonObject();
+                    kv.append("   - ").append(str(o, "key", "")).append(" = ").append(str(o, "value", "")).append('\n');
+                }
+            }
+        } catch (Exception ignore) { }
+        p.append(kv.length() == 0 ? "   （无）\n" : kv);
+        p.append("\n6) Skill（写码流程遵循）：\n").append(skills.isBlank() ? "（存档未配置 skill）\n" : skills + "\n");
+        p.append("\n== 注意事项 ==\n")
+         .append("- 如果实现用到 redis（缓存 key/开关），记得去配置中心完成配置。\n")
+         .append("- 覆盖度自查：同步城市/国家/酒店/房型/报价、查价、验价、下单、查单、取消各接口映射齐全，鉴权方式与实测档案一致。\n")
+         .append("- 按 create-supplier skill 的流程与项目规范落码，完成后自查并汇报。\n");
+        return p.toString();
     }
 
     /** 手动编辑工件（玩家纠正报告） */

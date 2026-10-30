@@ -115,6 +115,7 @@ export default function Hooks() {
               <div style={{ flex: 1, minWidth: 260 }}>
                 <div style={{ fontSize: 15, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   {h.name}
+                  {h.intent && <span className="hook-badge dim" title={h.intent}>🎯 {h.intent.length > 18 ? h.intent.slice(0, 18) + '…' : h.intent}</span>}
                   <span className="hook-badge">{TRIGGER_LABEL[h.triggerType] || h.triggerType}</span>
                   {h.triggerType === 'CRON' && <span className="hook-badge dim">🕐 {cronHuman(h.cronExpr)}</span>}
                   {!h.enabled && <span className="hook-badge dim">已停用</span>}
@@ -232,6 +233,7 @@ export default function Hooks() {
 function HookForm({ hook, instances, onClose, onSaved, showToast }) {
   const [form, setForm] = useState(() => ({
     name: hook?.name || '',
+    intent: hook?.intent || '',
     instanceIds: hook ? (hook.instanceIds || '').split(',').filter(Boolean).map(String) : [],
     maintainerInstanceId: hook?.maintainerInstanceId || '',
     skillDir: hook?.skillDir || '',
@@ -263,6 +265,7 @@ function HookForm({ hook, instances, onClose, onSaved, showToast }) {
 
   async function save() {
     if (!form.name.trim()) return showToast('请填写名称', 'error')
+    if (!form.intent.trim()) return showToast('请填写维护意图（本 skill 要沉淀什么业务的经验）', 'error')
     if (form.instanceIds.length === 0) return showToast('请至少选择一个监控实例', 'error')
     if (!form.maintainerInstanceId) return showToast('请选择维护模型来源实例', 'error')
     if (!form.skillDir.trim()) return showToast('请填写 skill 目录', 'error')
@@ -270,6 +273,7 @@ function HookForm({ hook, instances, onClose, onSaved, showToast }) {
     try {
       const body = {
         name: form.name.trim(),
+        intent: form.intent.trim(),
         instanceIds: form.instanceIds.join(','),
         maintainerInstanceId: Number(form.maintainerInstanceId),
         skillDir: form.skillDir.trim(),
@@ -301,6 +305,12 @@ function HookForm({ hook, instances, onClose, onSaved, showToast }) {
             <label className="form-label">Hook 名称 *</label>
             <input className="form-input" value={form.name} placeholder="如：供应商 skill 进化"
               onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+          </div>
+          <div className="form-group">
+            <label className="form-label">维护意图 *（本 skill 沉淀什么业务的经验——判定与维护都按此过滤，多个 hook 各管一类）</label>
+            <textarea className="form-input" rows={2} style={{ fontSize: 12.5 }}
+              placeholder={'示例：\n· 业务开发细节（接口踩坑、字段约定、流程实现）\n· review 要点（反复出现的代码问题与检查项）\n· 怎么写好提示词（验证过的 prompt 模式与反例）'}
+              value={form.intent} onChange={e => setForm(f => ({ ...f, intent: e.target.value }))} />
           </div>
 
           <div className="form-group">

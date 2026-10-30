@@ -57,6 +57,14 @@ public class SupplierJobNode {
     @Column(name = "progress", length = 600)
     private String progress = "";
 
+    /** 执行中实时思考流（thinking_delta 节流尾部片段），轮次结束清空 */
+    @Column(name = "thinking", length = 600)
+    private String thinking = "";
+
+    /** 写代码准备门禁（10-29-codegen-prep）：完成此节点前必须提交会议文档+配置KV（NULL=旧行，按 false 读） */
+    @Column(name = "codegen_prep")
+    private Boolean codegenPrep;
+
     @Column(name = "started_at")
     private LocalDateTime startedAt;
 
@@ -92,6 +100,10 @@ public class SupplierJobNode {
     public void setPendingQuestion(String pendingQuestion) { this.pendingQuestion = pendingQuestion; }
     public String getProgress() { return progress != null ? progress : ""; }
     public void setProgress(String progress) { this.progress = progress; }
+    public String getThinking() { return thinking != null ? thinking : ""; }
+    public void setThinking(String thinking) { this.thinking = thinking; }
+    public boolean isCodegenPrep() { return codegenPrep != null && codegenPrep; }
+    public void setCodegenPrep(boolean codegenPrep) { this.codegenPrep = codegenPrep; }
     public LocalDateTime getStartedAt() { return startedAt; }
     public void setStartedAt(LocalDateTime startedAt) { this.startedAt = startedAt; }
     public LocalDateTime getDoneAt() { return doneAt; }

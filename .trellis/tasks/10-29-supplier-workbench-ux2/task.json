@@ -1,0 +1,29 @@
+{
+  "id": "supplier-workbench-ux2",
+  "name": "supplier-workbench-ux2",
+  "title": "供应商工作台优化(二期): 思考进度可见+写代码前置准备流程",
+  "description": "n2显示思考流估算进度；写代码步骤前置门禁(三方会议文档飞书链接+配置KV)与提示词生成(知识库/Postman/skill/spec)",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": null,
+  "package": null,
+  "priority": "P1",
+  "creator": "yixi.ning",
+  "assignee": "yixi.ning",
+  "createdAt": "2026-10-29",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "master",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [
+    "10-29-think-progress",
+    "10-29-codegen-prep"
+  ],
+  "parent": null,
+  "relatedFiles": [],
+  "notes": "",
+  "meta": {}
+}

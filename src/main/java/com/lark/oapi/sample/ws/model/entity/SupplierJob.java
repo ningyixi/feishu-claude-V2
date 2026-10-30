@@ -45,6 +45,19 @@ public class SupplierJob {
     @Column(name = "skills_json")
     private String skillsJson = "[]";
 
+    /** 写代码前置（10-29-codegen-prep）：三方会议文档飞书云文档链接（门禁必需） */
+    @Column(name = "meeting_doc_url", length = 600)
+    private String meetingDocUrl = "";
+
+    /** 写代码前置：spec 文档位置（本地路径或链接，可选） */
+    @Column(name = "spec_doc_path", length = 600)
+    private String specDocPath = "";
+
+    /** 写代码前置：当前配置 key/value 数组 JSON: [{"key":"...","value":"..."}]（门禁必需≥1条） */
+    @Lob
+    @Column(name = "config_json")
+    private String configJson = "[]";
+
     /** 当前绑定的执行实例（可中途切换） */
     @Column(name = "instance_id")
     private Long instanceId;
@@ -94,6 +107,12 @@ public class SupplierJob {
     public void setDocsJson(String docsJson) { this.docsJson = docsJson; }
     public String getSkillsJson() { return skillsJson; }
     public void setSkillsJson(String skillsJson) { this.skillsJson = skillsJson; }
+    public String getMeetingDocUrl() { return meetingDocUrl != null ? meetingDocUrl : ""; }
+    public void setMeetingDocUrl(String meetingDocUrl) { this.meetingDocUrl = meetingDocUrl; }
+    public String getSpecDocPath() { return specDocPath != null ? specDocPath : ""; }
+    public void setSpecDocPath(String specDocPath) { this.specDocPath = specDocPath; }
+    public String getConfigJson() { return configJson != null ? configJson : "[]"; }
+    public void setConfigJson(String configJson) { this.configJson = configJson; }
     public Long getInstanceId() { return instanceId; }
     public void setInstanceId(Long instanceId) { this.instanceId = instanceId; }
     public String getCurrentNodeId() { return currentNodeId; }

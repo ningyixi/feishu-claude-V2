@@ -203,6 +203,36 @@ public class SupplierJobController {
         return jobService.chatHistory(id);
     }
 
+    /** 写代码准备信息保存：{meetingDocUrl?, specDocPath?, configs?:[{key,value}]}（缺省字段不动） */
+    @PutMapping(value = "/api/supplier-jobs/{id}/prep", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> savePrep(@PathVariable Long id, @RequestBody String rawBody) {
+        try {
+            JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            String meeting = body.has("meetingDocUrl") && !body.get("meetingDocUrl").isJsonNull() ? body.get("meetingDocUrl").getAsString() : null;
+            String spec = body.has("specDocPath") && !body.get("specDocPath").isJsonNull() ? body.get("specDocPath").getAsString() : null;
+            String configs = body.has("configs") && !body.get("configs").isJsonNull() ? body.get("configs").toString() : null;
+            com.lark.oapi.sample.ws.model.entity.SupplierJob job = jobService.savePrep(id, meeting, spec, configs);
+            JsonObject o = new JsonObject();
+            o.addProperty("ok", true);
+            o.addProperty("prepReady", jobService.prepReady(job));
+            return ResponseEntity.ok(o.toString());
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        }
+    }
+
+    /** 生成写代码提示词（聚合知识库/实测档案/会议文档/spec/配置/skill，用户复制到飞书发实例） */
+    @GetMapping(value = "/api/supplier-jobs/{id}/codegen-prompt", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> codegenPrompt(@PathVariable Long id) {
+        try {
+            JsonObject o = new JsonObject();
+            o.addProperty("prompt", jobService.codegenPrompt(id));
+            return ResponseEntity.ok(o.toString());
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        }
+    }
+
     // ===== 工作流模板 =====
 
     @GetMapping("/api/workflows")
@@ -287,6 +317,10 @@ public class SupplierJobController {
         o.addProperty("createdAt", String.valueOf(job.getCreatedAt()));
         o.addProperty("updatedAt", String.valueOf(job.getUpdatedAt()));
         o.addProperty("kbCode", jobService.getKbCode(job));   // 知识库归属码（前端面板按它拉取）
+        o.addProperty("meetingDocUrl", job.getMeetingDocUrl());
+        o.addProperty("specDocPath", job.getSpecDocPath());
+        o.addProperty("configJson", job.getConfigJson());
+        o.addProperty("prepReady", jobService.prepReady(job));
         // nodes 直接由 Jackson 混排不方便，这里手动拼
         var nodes = jobService.getNodes(job.getId());
         com.google.gson.JsonArray arr = new com.google.gson.JsonArray();
@@ -303,6 +337,8 @@ public class SupplierJobController {
             no.addProperty("note", n.getNote());
             no.addProperty("pendingQuestion", n.getPendingQuestion());
             no.addProperty("progress", n.getProgress());
+            no.addProperty("thinking", n.getThinking());
+            no.addProperty("codegenPrep", n.isCodegenPrep());
             no.addProperty("lastRunAt", String.valueOf(n.getLastRunAt()));
             no.addProperty("doneAt", String.valueOf(n.getDoneAt()));
             arr.add(no);

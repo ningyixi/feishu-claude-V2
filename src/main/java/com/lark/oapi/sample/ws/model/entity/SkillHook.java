@@ -18,6 +18,10 @@ public class SkillHook {
     @Column(nullable = false)
     private String name = "";
 
+    /** 维护意图（10-30-hook-maintenance-intent）：本 hook 沉淀什么业务的经验，judge/maintain prompt 按此过滤 */
+    @Column(length = 400)
+    private String intent = "";
+
     /** 监控的实例 ID 列表，逗号分隔（如 "1,2"） */
     @Column(name = "instance_ids")
     private String instanceIds = "";
@@ -68,6 +72,8 @@ public class SkillHook {
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
     public String getName() { return name; }
+    public String getIntent() { return intent != null ? intent : ""; }
+    public void setIntent(String intent) { this.intent = intent; }
     public void setName(String name) { this.name = name; }
     public String getInstanceIds() { return instanceIds; }
     public void setInstanceIds(String instanceIds) { this.instanceIds = instanceIds; }

@@ -81,6 +81,22 @@ public class SkillHookService {
         this.instanceRepo = instanceRepo;
     }
 
+    /** 旧 hook 回填默认维护意图（10-30-hook-maintenance-intent），不炸存量 */
+    @jakarta.annotation.PostConstruct
+    public void backfillIntents() {
+        try {
+            for (SkillHook h : hookRepo.findAll()) {
+                if (h.getIntent().isBlank()) {
+                    h.setIntent("通用经验沉淀（review建议/踩坑修复/最佳实践，未特别限定意图）");
+                    hookRepo.save(h);
+                }
+            }
+        } catch (Exception e) {
+            org.slf4j.LoggerFactory.getLogger(SkillHookService.class)
+                    .warn("[Hook] 意图回填失败（不影响启动）: {}", e.getMessage());
+        }
+    }
+
     // ===== 触发入口 ①：对话完成后（FeishuBotService 接线，异步不阻塞） =====
 
     public void onTurnCompleted(Long instanceId, String userText, String botReply) {
@@ -326,19 +342,26 @@ public class SkillHookService {
 
     // ===== Prompt =====
 
-    private String buildJudgePrompt(SkillHook hook, String userText, String botReply) {
+    String buildJudgePrompt(SkillHook hook, String userText, String botReply) {
         return "【Skill 自进化 · 触发判定】\n"
                 + "你是 skill「" + hook.getName() + "」（目录: " + hook.getSkillDir() + "）的进化守门员。\n"
-                + "判断下面这轮飞书对话是否包含值得沉淀进 skill 的经验：\n"
-                + "- 值得：review 后的修改建议、踩坑与修复方法、可复用的最佳实践、流程/规范改进\n"
-                + "- 不值得：闲聊、一次性查询、与该 skill 主题无关的内容、单纯的代码生成请求\n"
+                + "本 skill 的维护意图：" + intentOf(hook) + "\n"
+                + "判断下面这轮飞书对话是否包含值得沉淀进 skill 的经验——**以维护意图为准**：\n"
+                + "- 值得：与本意图直接相关的 review 修改建议、踩坑与修复方法、可复用最佳实践、流程/规范改进\n"
+                + "- 不值得：闲聊、一次性查询、与该 skill 主题或本意图无关的内容、单纯的代码生成请求\n"
+                + "- 对话有价值但不属于本意图范围 → 也判 false（由对应意图的 hook 负责）\n"
                 + "只输出一个 ```json 代码块：{\"trigger\":true或false,\"reason\":\"一句话理由\"}\n\n"
                 + "【本轮对话】\n"
                 + "用户: " + trunc(userText, 800) + "\n"
                 + "Agent 回复(截断): " + trunc(botReply, 2000);
     }
 
-    private String buildMaintainPrompt(SkillHook hook, List<ChatMessage> msgs, LocalDateTime from, LocalDateTime to) {
+    /** 意图展示（旧 hook 无意图时的默认口径与 backfillIntents 一致） */
+    static String intentOf(SkillHook hook) {
+        return hook.getIntent().isBlank() ? "通用经验沉淀（未特别限定意图）" : hook.getIntent();
+    }
+
+    String buildMaintainPrompt(SkillHook hook, List<ChatMessage> msgs, LocalDateTime from, LocalDateTime to) {
         Map<Long, String> names = new HashMap<>();
         instanceRepo.findAll().forEach(i -> names.put(i.getId(), i.getName()));
 
@@ -359,9 +382,12 @@ public class SkillHookService {
 
         return "【Skill 自进化 · 定期维护】\n"
                 + "你是 skill「" + hook.getName() + "」的维护者，skill 目录（也是你当前工作目录）: " + hook.getSkillDir() + "\n"
+                + "本 skill 的维护意图：" + intentOf(hook) + " —— **只提炼与该意图相关的经验**，"
+                + "意图之外的内容（哪怕本身有价值）留给对应意图的 hook 处理，不要越界写入。\n"
                 + "下面是 " + from.format(FMT) + " ~ " + to.format(FMT) + " 期间用户与开发实例的真实对话，"
                 + "请从中提炼值得沉淀的经验并维护 skill 文件。\n\n"
-                + "沉淀标准：可泛化、会重复出现、skill 尚未覆盖；排除一次性偶然操作和与 skill 无关的内容。\n"
+                + "沉淀标准：符合维护意图、可泛化、会重复出现、skill 尚未覆盖；排除一次性偶然操作和与 skill 无关的内容。\n"
+                + "落笔格式按意图选择（如 review 要点→检查清单条目；业务开发细节→坑与解法条目；提示词写法→模式与反例）。\n"
                 + "步骤：\n"
                 + "1. 先读 skill 目录现有文件（SKILL.md 等），理解结构与风格\n"
                 + "2. 从对话中提炼候选经验（特别注意：review 修改建议、踩坑修复、'要记住/以后都要'类表述）\n"

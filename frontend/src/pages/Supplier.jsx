@@ -471,6 +471,11 @@ function GameView({ jobId, onBack, showToast }) {
                   {cur.pendingQuestion
                     ? <>⏸ 已挂起等你答复（停在最后一步：{cur.progress || '思考中'}）</>
                     : <><span className="spinner" style={{ width: 9, height: 9, marginRight: 6 }} />正在：{cur.progress || '思考中（首个工具动作到达前略等）…'}</>}
+                  {cur.thinking && (
+                    <div style={{ marginTop: 4, fontSize: 11.5, color: '#7c3aed', maxHeight: 72, overflowY: 'auto', wordBreak: 'break-all' }} title="实例当前思考内容（估算还要在忙什么）">
+                      💭 {cur.thinking}
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -513,6 +518,9 @@ function GameView({ jobId, onBack, showToast }) {
                   {cur.note && <div style={{ fontSize: 12, color: 'var(--error)', marginTop: 8 }}>⚠️ {cur.note}</div>}
                 </div>
               )}
+
+              {/* 写代码准备门禁（10-29-codegen-prep）：会议文档 → KV 配置 → redis 提醒 → 生成提示词 */}
+              {cur.codegenPrep && <CodegenPrepCard job={job} reload={load} showToast={showToast} />}
 
               {/* 工件区 */}
               {(cur.artifact || editingArtifact) && (
@@ -566,6 +574,7 @@ function GameView({ jobId, onBack, showToast }) {
                   <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 2 }}>
                     {NODE_TYPE[n.type]?.label} · <span style={{ color: st.color }}>{st.label}</span>
                     {n.pendingQuestion ? ' · ❓待答' : ''}
+                    {n.codegenPrep ? ' · 🧾准备' : ''}
                     {n.artifact ? ' · 📄有工件' : ''}
                   </div>
                   {n.status === 'RUNNING' && n.progress && (
@@ -620,6 +629,115 @@ function GameView({ jobId, onBack, showToast }) {
 
       {/* 对话区：执行过程中随时问实例"现在什么情况" */}
       <ChatPanel jobId={job.id} running={running} showToast={showToast} />
+    </div>
+  )
+}
+
+// ===== 写代码准备卡片（10-29-codegen-prep）：会议文档门禁 → KV 配置 → redis 提醒 → 生成提示词一键复制 =====
+
+function CodegenPrepCard({ job, reload, showToast }) {
+  const parseConfigs = () => { try { const a = JSON.parse(job.configJson || '[]'); return Array.isArray(a) ? a : [] } catch { return [] } }
+  const [meeting, setMeeting] = useState(job.meetingDocUrl || '')
+  const [spec, setSpec] = useState(job.specDocPath || '')
+  const [configs, setConfigs] = useState(parseConfigs())
+  const [prompt, setPrompt] = useState(null)   // 生成结果文本
+  const [busy, setBusy] = useState(false)
+  const meetingDone = !!(job.meetingDocUrl || '').trim()
+  const kvDone = parseConfigs().some(c => c.key && c.value)
+  const ready = !!job.prepReady
+
+  async function put(body) {
+    setBusy(true)
+    const res = await fetch(`/api/supplier-jobs/${job.id}/prep`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    })
+    const d = await res.json().catch(() => ({}))
+    setBusy(false)
+    if (!res.ok) { showToast(d.error || '保存失败', 'error'); return false }
+    showToast('已保存', 'success'); reload()
+    return true
+  }
+  async function genPrompt() {
+    setBusy(true)
+    const res = await fetch(`/api/supplier-jobs/${job.id}/codegen-prompt`)
+    const d = await res.json().catch(() => ({}))
+    setBusy(false)
+    if (!res.ok) return showToast(d.error || '生成失败', 'error')
+    setPrompt(d.prompt)
+  }
+  async function copy() {
+    try { await navigator.clipboard.writeText(prompt); showToast('提示词已复制 — 去飞书粘贴发给实例吧', 'success') }
+    catch { showToast('复制失败，请手动全选文本框内容', 'error') }
+  }
+
+  return (
+    <div style={{ marginTop: 14, border: '1px solid var(--border,#e5e7eb)', borderRadius: 10, padding: '12px 16px', background: 'rgba(59,130,246,.03)' }}>
+      <div style={{ fontSize: 13, fontWeight: 700 }}>🧾 写代码准备 <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-dim)' }}>（完成后才能勾选本节点，提示词聚合全部参考料）</span></div>
+
+      {/* 1) 三方会议文档 */}
+      <div style={{ marginTop: 10, fontSize: 12 }}>
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>{meetingDone ? '✅' : '☐'} 1. 三方会议文档（飞书云文档链接，必填，写代码的重要参考）</div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <input className="form-input" style={{ flex: 1, fontSize: 12 }} placeholder="https://xxx.feishu.cn/docx/…（仅支持 feishu.cn / larksuite.com）"
+            value={meeting} onChange={e => setMeeting(e.target.value)} />
+          <button className="btn" style={{ fontSize: 12, padding: '4px 14px' }} disabled={busy || !meeting.trim()} onClick={() => put({ meetingDocUrl: meeting })}>提交</button>
+        </div>
+      </div>
+
+      {/* 2) spec（可选）+ KV 配置（必填，会议文档提交后才开放） */}
+      <div style={{ marginTop: 12, fontSize: 12 }}>
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>{kvDone ? '✅' : '☐'} 2. 当前配置 key/value（必填 ≥1 组；会议文档提交后开放）</div>
+        {!meetingDone && <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 6 }}>⬆️ 先提交三方会议文档，再补充配置</div>}
+        <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+          <input className="form-input" style={{ flex: 1, fontSize: 12 }} placeholder="spec 文档位置（可选：本地路径或链接，会带入提示词）"
+            value={spec} onChange={e => setSpec(e.target.value)} />
+          <button className="btn" style={{ fontSize: 12, padding: '4px 14px' }} disabled={busy} onClick={() => put({ specDocPath: spec })}>存 spec</button>
+        </div>
+        <div disabled={!meetingDone} style={{ opacity: meetingDone ? 1 : .45, pointerEvents: meetingDone ? 'auto' : 'none' }}>
+          {configs.map((c, i) => (
+            <div key={i} style={{ display: 'flex', gap: 6, marginBottom: 6 }}>
+              <input className="form-input" style={{ flex: '0 0 40%', fontSize: 12 }} placeholder="配置 key（如 redis.switch / account.xxx）"
+                value={c.key || ''} onChange={e => setConfigs(a => a.map((x, xi) => xi === i ? { ...x, key: e.target.value } : x))} />
+              <input className="form-input" style={{ flex: 1, fontSize: 12 }} placeholder="value"
+                value={c.value || ''} onChange={e => setConfigs(a => a.map((x, xi) => xi === i ? { ...x, value: e.target.value } : x))} />
+              <button className="btn" style={{ fontSize: 11, padding: '2px 8px', color: 'var(--error)' }}
+                onClick={() => setConfigs(a => a.filter((_, xi) => xi !== i))}>✕</button>
+            </div>
+          ))}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="btn" style={{ fontSize: 11, padding: '3px 10px' }} onClick={() => setConfigs(a => [...a, { key: '', value: '' }])}>+ 加一行</button>
+            <button className="btn btn-primary" style={{ fontSize: 11, padding: '3px 12px' }} disabled={busy}
+              onClick={() => put({ configs: configs.filter(c => c.key.trim() || c.value.trim()) })}>💾 保存配置</button>
+          </div>
+        </div>
+      </div>
+
+      {/* 3) redis 提醒 */}
+      {kvDone && (
+        <div style={{ marginTop: 10, fontSize: 12, color: '#b45309', background: 'rgba(245,158,11,.08)', border: '1px solid rgba(245,158,11,.3)', borderRadius: 6, padding: '6px 10px' }}>
+          📣 配置已录入。如果实现用到 <b>redis</b>（缓存 key / 开关），记得去<b>配置中心</b>完成配置，代码才能跑通。
+        </div>
+      )}
+
+      {/* 4) 生成提示词 */}
+      <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button className="btn btn-primary" style={{ fontSize: 12.5, padding: '6px 16px' }} disabled={busy || !ready} onClick={genPrompt}>
+          📝 生成写代码提示词
+        </button>
+        {!ready && <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>完成 1、2 两项后可生成</span>}
+      </div>
+      {prompt && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 6, alignItems: 'center' }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-dim)' }}>发给实例的提示词（可直接编辑后复制）</span>
+            <div style={{ flex: 1 }} />
+            <button className="btn" style={{ fontSize: 11, padding: '3px 12px' }} onClick={() => setPrompt(null)}>收起</button>
+            <button className="btn btn-primary" style={{ fontSize: 11, padding: '3px 12px' }} onClick={copy}>📋 一键复制</button>
+          </div>
+          <textarea className="form-input" rows={16} style={{ fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
+            value={prompt} onChange={e => setPrompt(e.target.value)} />
+        </div>
+      )}
     </div>
   )
 }
@@ -978,6 +1096,13 @@ function WorkflowEditor({ onBack, showToast }) {
                 <div className="form-group"><label className="form-label">节点说明（给玩家看的"这一步做什么"）</label>
                   <textarea className="form-input" rows={3} value={nodeDraft.node.description || ''}
                     onChange={e => setNodeDraft(d => ({ ...d, node: { ...d.node, description: e.target.value } }))} /></div>
+                <div className="form-group">
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={!!nodeDraft.node.codegenPrep}
+                      onChange={e => setNodeDraft(d => ({ ...d, node: { ...d.node, codegenPrep: e.target.checked } }))} />
+                    🧾 写代码准备门禁（玩家须先提交三方会议文档+配置KV才能点完成；节点页提供提示词生成）
+                  </label>
+                </div>
                 {(nodeDraft.node.type === 'agent' || nodeDraft.node.type === 'agent_check') && (
                   <div className="form-group"><label className="form-label">Prompt 模板（发给实例执行；支持占位符，见下方提示）</label>
                     <textarea className="form-input" rows={10} style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}
