@@ -42,6 +42,7 @@ export default function Hooks() {
   const [instances, setInstances] = useState([])
   const [changes, setChanges] = useState([])
   const [editing, setEditing] = useState(null)   // null | 'new' | hook对象
+  const [changeModal, setChangeModal] = useState(null)   // 打开维护记录弹窗的 hook 对象
   const [expanded, setExpanded] = useState({})   // hookId -> runs
   const [toast, setToast] = useState(null)
 
@@ -141,6 +142,8 @@ export default function Hooks() {
               <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                 <button className="btn" style={{ fontSize: 12, padding: '4px 10px' }} onClick={() => runNow(h)}>▶ 立即运行</button>
                 <button className="btn" style={{ fontSize: 12, padding: '4px 10px' }} onClick={() => toggle(h)}>{h.enabled ? '⏸ 停用' : '▶️ 启用'}</button>
+                <button className="btn" style={{ fontSize: 12, padding: '4px 10px' }} title="查看该 skill 的维护修改记录"
+                  onClick={() => setChangeModal(h)}>📖 维护记录{changes.filter(c => c.hookId === h.id).length > 0 ? `(${changes.filter(c => c.hookId === h.id).length})` : ''}</button>
                 <button className="btn" style={{ fontSize: 12, padding: '4px 10px' }} onClick={() => setEditing(h)}>编辑</button>
                 <button className="btn" style={{ fontSize: 12, padding: '4px 10px', color: 'var(--error)' }} onClick={() => remove(h)}>删除</button>
               </div>
@@ -183,34 +186,49 @@ export default function Hooks() {
         )
       })}
 
-      {/* Skill 修改流水 */}
-      <div className="card" style={{ padding: '16px 20px' }}>
-        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 10 }}>📖 Skill 维护修改记录</div>
-        {changes.length === 0 ? (
-          <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>暂无修改记录 —— Hook 触发并实际改动 skill 文件后会在这里入账</div>
-        ) : (
-          <table className="hook-table">
-            <thead>
-              <tr><th>时间</th><th>Hook</th><th>文件</th><th>大小变化</th><th>变更摘要</th></tr>
-            </thead>
-            <tbody>
-              {changes.map(c => (
-                <tr key={c.id}>
-                  <td style={{ whiteSpace: 'nowrap' }}>{fmtTime(c.at)}</td>
-                  <td>{hooks.find(h => h.id === c.hookId)?.name || `#${c.hookId}`}</td>
-                  <td><code>{c.filePath}</code></td>
-                  <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
-                    {(c.sizeBefore ?? 0) === 0 && (c.sizeAfter ?? 0) > 0 ? '🆕 新增'
-                      : (c.sizeAfter ?? 0) === 0 ? '🗑 删除'
-                      : `${(c.sizeBefore / 1024).toFixed(1)}K → ${(c.sizeAfter / 1024).toFixed(1)}K`}
-                  </td>
-                  <td className="hook-summary">{c.changeSummary}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </div>
+      {/* 维护记录弹窗（按 hook 过滤，替代原底部全局流水） */}
+      {changeModal && (() => {
+        const rows = changes.filter(c => c.hookId === changeModal.id)
+        return (
+          <div className="modal-mask" onClick={() => setChangeModal(null)}>
+            <div className="modal-box" style={{ maxWidth: 860, width: 'min(860px,94vw)' }} onClick={e => e.stopPropagation()}>
+              <div className="modal-title">📖 维护修改记录 · {changeModal.name}
+                <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--text-dim)', marginLeft: 8 }}>共 {rows.length} 次文件改动 · skill: {changeModal.skillDir}</span>
+              </div>
+              <div className="modal-body" style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+                {rows.length === 0 ? (
+                  <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '16px 0', textAlign: 'center' }}>
+                    该 Hook 还没有改动过 skill 文件 —— 触发维护并实际修改后会在这里入账
+                  </div>
+                ) : (
+                  <table className="hook-table">
+                    <thead>
+                      <tr><th>时间</th><th>文件</th><th>大小变化</th><th>变更摘要</th></tr>
+                    </thead>
+                    <tbody>
+                      {rows.map(c => (
+                        <tr key={c.id}>
+                          <td style={{ whiteSpace: 'nowrap' }}>{fmtTime(c.at)}</td>
+                          <td><code>{c.filePath}</code></td>
+                          <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>
+                            {(c.sizeBefore ?? 0) === 0 && (c.sizeAfter ?? 0) > 0 ? '🆕 新增'
+                              : (c.sizeAfter ?? 0) === 0 ? '🗑 删除'
+                              : `${(c.sizeBefore / 1024).toFixed(1)}K → ${(c.sizeAfter / 1024).toFixed(1)}K`}
+                          </td>
+                          <td className="hook-summary">{c.changeSummary}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 12 }}>
+                <button className="btn" onClick={() => setChangeModal(null)}>关闭</button>
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* 创建/编辑弹窗 */}
       {editing && (
