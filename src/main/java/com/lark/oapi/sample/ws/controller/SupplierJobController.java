@@ -212,6 +212,7 @@ public class SupplierJobController {
             String spec = body.has("specDocPath") && !body.get("specDocPath").isJsonNull() ? body.get("specDocPath").getAsString() : null;
             String configs = body.has("configs") && !body.get("configs").isJsonNull() ? body.get("configs").toString() : null;
             com.lark.oapi.sample.ws.model.entity.SupplierJob job = jobService.savePrep(id, meeting, spec, configs);
+            if (body.has("promptSkillPath")) jobService.savePromptSkill(id, opt(body, "promptSkillPath"));
             JsonObject o = new JsonObject();
             o.addProperty("ok", true);
             o.addProperty("prepReady", jobService.prepReady(job));
@@ -231,6 +232,15 @@ public class SupplierJobController {
         } catch (IllegalArgumentException e) {
             return err(e.getMessage());
         }
+    }
+
+    @PostMapping(value = "/api/supplier-jobs/{id}/codegen-prompt/generate", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> generateCodegenPrompt(@PathVariable Long id) {
+        try {
+            JsonObject result = new JsonObject();
+            result.addProperty("prompt", jobService.generateCodegenPrompt(id));
+            return ResponseEntity.ok(result.toString());
+        } catch (IllegalArgumentException ex) { return err(ex.getMessage()); }
     }
 
     // ===== 工作流模板 =====
@@ -319,6 +329,7 @@ public class SupplierJobController {
         o.addProperty("kbCode", jobService.getKbCode(job));   // 知识库归属码（前端面板按它拉取）
         o.addProperty("meetingDocUrl", job.getMeetingDocUrl());
         o.addProperty("specDocPath", job.getSpecDocPath());
+        o.addProperty("promptSkillPath", job.getPromptSkillPath());
         o.addProperty("configJson", job.getConfigJson());
         o.addProperty("prepReady", jobService.prepReady(job));
         // nodes 直接由 Jackson 混排不方便，这里手动拼
@@ -328,6 +339,7 @@ public class SupplierJobController {
             JsonObject no = new JsonObject();
             no.addProperty("nodeId", n.getNodeId());
             no.addProperty("seq", n.getSeq());
+            no.addProperty("contextStage", n.getContextStage());
             no.addProperty("title", n.getTitle());
             no.addProperty("type", n.getType());
             no.addProperty("description", n.getDescription());
@@ -335,6 +347,8 @@ public class SupplierJobController {
             no.addProperty("status", n.getStatus());
             no.addProperty("artifact", n.getArtifact());
             no.addProperty("note", n.getNote());
+            no.addProperty("deliveryManifest", n.getDeliveryManifest());
+            no.addProperty("toolEvidence", n.getToolEvidence());
             no.addProperty("pendingQuestion", n.getPendingQuestion());
             no.addProperty("progress", n.getProgress());
             no.addProperty("thinking", n.getThinking());

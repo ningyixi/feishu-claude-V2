@@ -53,6 +53,17 @@ public class SupplierJob {
     @Column(name = "spec_doc_path", length = 600)
     private String specDocPath = "";
 
+    @Column(name = "prompt_skill_path", length = 600)
+    private String promptSkillPath = "";
+
+    public String getPromptSkillPath() { return promptSkillPath == null ? "" : promptSkillPath; }
+    public void setPromptSkillPath(String value) { promptSkillPath = value; }
+
+    @Column(name = "generated_prompt_digest", length = 64)
+    private String generatedPromptDigest = "";
+    public String getGeneratedPromptDigest() { return generatedPromptDigest == null ? "" : generatedPromptDigest; }
+    public void setGeneratedPromptDigest(String value) { generatedPromptDigest = value; }
+
     /** 写代码前置：当前配置 key/value 数组 JSON: [{"key":"...","value":"..."}]（门禁必需≥1条） */
     @Lob
     @Column(name = "config_json")

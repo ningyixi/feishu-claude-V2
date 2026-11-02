@@ -25,6 +25,11 @@ public class SupplierKbEntry {
     @Column(nullable = false)
     private String type = "url";
 
+    @Column(name = "context_stage")
+    private String contextStage = "all";
+    public String getContextStage() { return contextStage == null ? "all" : contextStage; }
+    public void setContextStage(String stage) { contextStage = stage; }
+
     /** 来源：URL / 本地 PDF 绝对路径 /（chat、note 存标题或摘要锚点） */
     @Column(length = 500)
     private String source = "";

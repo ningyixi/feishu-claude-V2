@@ -51,6 +51,15 @@ public class SupplierKbController {
         }
     }
 
+    @PutMapping(value = "/entries/{id}/stage", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> stage(@PathVariable Long id, @RequestBody String body) {
+        try {
+            JsonObject request = JsonParser.parseString(body).getAsJsonObject();
+            kbService.setContextStage(id, request.has("stage") && !request.get("stage").isJsonNull() ? request.get("stage").getAsString() : "");
+            return ResponseEntity.ok("{\"ok\":true}");
+        } catch (IllegalArgumentException ex) { return err(ex.getMessage()); }
+    }
+
     /** 重新解析（FAILED 重试 / DONE 回到机析结果） */
     @PostMapping(value = "/entries/{id}/reparse", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> reparse(@PathVariable Long id) {

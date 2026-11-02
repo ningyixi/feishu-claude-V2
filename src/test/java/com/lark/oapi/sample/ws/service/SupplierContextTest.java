@@ -26,9 +26,16 @@ class SupplierContextTest {
         entry.setMdPath(file.toString());
         when(repo.findByKbCodeOrderByCreatedAtAsc("A")).thenReturn(List.of(entry));
         when(repo.findByKbCodeOrderByCreatedAtAsc("B")).thenReturn(List.of());
-        assertTrue(service.contextText("A").contains("取消订单必须使用供应商订单号"));
+        String content = service.contextText("A");
+        assertTrue(content.contains("取消订单必须使用供应商订单号"));
+        String receipt = service.snapshotDelivery("A", content);
+        assertTrue(receipt.contains(SupplierReferenceContext.digest(content)));
+        assertTrue(Files.walk(dir).anyMatch(p -> p.getFileName().toString().equals(SupplierReferenceContext.digest(content) + ".md")));
         assertFalse(service.contextText("B").contains("取消订单必须使用供应商订单号"));
+        entry.setContextStage("probe");
         entry.setStatus("RAW");
+        assertFalse(service.contextText("A", "codegen").contains("取消订单必须使用供应商订单号"));
+        entry.setContextStage("all");
         assertThrows(IllegalArgumentException.class, () -> service.contextText("A"));
         entry.setStatus("DONE");
         Files.writeString(file, "a".repeat(120001));

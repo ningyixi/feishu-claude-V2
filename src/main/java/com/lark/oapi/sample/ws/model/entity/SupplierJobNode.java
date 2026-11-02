@@ -44,6 +44,21 @@ public class SupplierJobNode {
     @Lob
     private String artifact = "";
 
+    private String contextStage = "auto";
+    public String getContextStage() { return contextStage == null ? "auto" : contextStage; }
+    public void setContextStage(String value) { contextStage = value; }
+
+    @Lob
+    private String deliveryManifest = "";
+
+    @Lob
+    private String toolEvidence = "";
+
+    public String getDeliveryManifest() { return deliveryManifest == null ? "" : deliveryManifest; }
+    public void setDeliveryManifest(String value) { deliveryManifest = value; }
+    public String getToolEvidence() { return toolEvidence == null ? "" : toolEvidence; }
+    public void setToolEvidence(String value) { toolEvidence = value; }
+
     /** 最近一次执行的备注（失败原因等） */
     @Lob
     private String note = "";
