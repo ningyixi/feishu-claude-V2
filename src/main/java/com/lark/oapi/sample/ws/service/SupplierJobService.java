@@ -320,11 +320,12 @@ public class SupplierJobService {
         }
         if (answer == null || answer.isBlank()) throw new IllegalArgumentException("答复内容不能为空");
         if (job.getInstanceId() == null) throw new IllegalArgumentException("存档未绑定执行实例");
+        String context = kbService.contextText(kbService.kbCode(job));
         n.setPendingQuestion("");
         nodeRepo.save(n);
         deliverToInstance(job, n, "job-answer-" + jobId + "-" + nodeId,
                 "【卡点答复】玩家答复如下，优先遵循它继续未完成的工作（不要重新开始已完成的部分），完成后按动作规范输出：\n\n"
-                        + answer.strip());
+                        + answer.strip() + "\n\n" + context);
     }
 
     /** 发消息到实例会话（虚拟线程异步）并统一处理回复 */
@@ -423,6 +424,7 @@ public class SupplierJobService {
         if (n.isCodegenPrep() && !prepComplete(job.getMeetingDocUrl(), job.getConfigJson())) {
             throw new IllegalArgumentException("【写代码准备】未完成：需先提交三方会议文档（飞书云文档链接），并补充至少一组完整的配置 key/value");
         }
+        kbService.archiveArtifact(job, nodeId, n.getTitle(), n.getArtifact());
         n.setStatus("DONE");
         n.setDoneAt(LocalDateTime.now());
         nodeRepo.save(n);
@@ -510,7 +512,7 @@ public class SupplierJobService {
     /** 生成发给实例的写代码提示词（聚合六类参考资料，用户一键复制粘贴到飞书） */
     public String codegenPrompt(Long jobId) {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
-        String kbIndex = kbService.indexText(kbService.kbCode(job));
+        String kbIndex = kbService.contextText(kbService.kbCode(job));
         String skills = formatSkills(job.getSkillsJson());
         String n2 = nodeRepo.findByJobIdAndNodeId(jobId, "n2").map(SupplierJobNode::getArtifact).orElse("");
         if (n2.isBlank()) {   // 自定义模板里实测节点可能不叫 n2：找带工件的 agent 节点里标题含"实测/档案"的
@@ -571,6 +573,8 @@ public class SupplierJobService {
                 .orElseThrow(() -> new IllegalArgumentException("节点不存在"));
         n.setArtifact(artifact != null ? artifact : "");
         nodeRepo.save(n);
+        SupplierJob job = jobRepo.findById(jobId).orElseThrow();
+        kbService.archiveArtifact(job, nodeId, n.getTitle(), n.getArtifact());
     }
 
     // ===== 对话区（玩家随时问执行实例"现在什么情况"） =====
@@ -628,7 +632,7 @@ public class SupplierJobService {
      */
     String renderPrompt(String template, SupplierJob job, String extra) {
         if (template == null) template = "";
-        String docs = kbService.indexText(kbService.kbCode(job));
+        String docs = kbService.contextText(kbService.kbCode(job));
         String skills = formatSkills(job.getSkillsJson());
         String out = template
                 .replace("{supplierName}", nullSafe(job.getSupplierName()))
@@ -640,6 +644,10 @@ public class SupplierJobService {
                         ? "\n\n== 玩家的补充/纠正指示（优先遵循） ==\n" + extra : "");
         if (!template.contains("{skills}") && !skills.isBlank()) {
             out = out + "\n\n【本工作可用的 Skill】\n开工前先阅读下列 skill 目录中的 SKILL.md（及其引用的文件），任务范围内严格遵循 skill 的指导：\n" + skills;
+        }
+        // Every node needs the supplier context, including custom templates.
+        if (!template.contains("{docs}")) {
+            out = out + "\n\n" + docs;
         }
         // {artifact:nX} 引用其他节点工件
         Matcher m = Pattern.compile("\\{artifact:([\\w-]+)}").matcher(out);

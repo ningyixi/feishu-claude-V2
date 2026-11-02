@@ -4,12 +4,25 @@ import com.lark.oapi.sample.ws.model.entity.SkillHook;
 import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.*;
 
 /**
  * 写代码前置门禁（10-29-codegen-prep）+ Hook 维护意图（10-30-hook-maintenance-intent）单测。
  * 全部纯静态/无网络断言。
  */
 class SupplierPrepTest {
+
+    @Test
+    void customNodeAlwaysReceivesSupplierKnowledgeIndex() {
+        SupplierKbService kb = mock(SupplierKbService.class);
+        var job = new com.lark.oapi.sample.ws.model.entity.SupplierJob();
+        when(kb.kbCode(job)).thenReturn("supplier-1");
+        when(kb.contextText("supplier-1")).thenReturn("供应商专属知识库索引");
+        var service = new SupplierJobService(null, null, null, null, null, kb, null);
+        assertTrue(service.renderPrompt("执行自定义任务", job, "").contains("供应商专属知识库索引"));
+        String explicit = service.renderPrompt("材料：{docs}", job, "");
+        assertEquals(explicit.indexOf("供应商专属知识库索引"), explicit.lastIndexOf("供应商专属知识库索引"));
+    }
 
     // ===== 飞书文档链接校验 =====
 
