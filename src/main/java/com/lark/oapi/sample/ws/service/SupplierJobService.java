@@ -48,6 +48,7 @@ public class SupplierJobService {
     private final BotInstanceRepository instanceRepo;
     private final ClaudeCodeService claudeCodeService;
     private final SupplierKbService kbService;
+    private final SupplierReferenceContext referenceContext;
     private final com.lark.oapi.sample.ws.repository.SupplierJobChatRepository chatRepo;
 
     public SupplierJobService(SupplierJobRepository jobRepo,
@@ -63,6 +64,7 @@ public class SupplierJobService {
         this.instanceRepo = instanceRepo;
         this.claudeCodeService = claudeService;
         this.kbService = kbService;
+        this.referenceContext = new SupplierReferenceContext(kbService);
         this.chatRepo = chatRepo;
     }
 
@@ -147,7 +149,7 @@ public class SupplierJobService {
                         + "上一步的接口映射报告:\n{artifact:n1}\n\n"
                         + "请对映射报告中的每个接口：\n"
                         + "1. 生成合理的查询条件（小数据量、真实可执行；需要凭证时先从文档/配置中找，找不到就列出\"需要玩家提供\"清单并跳过该接口）\n"
-                        + "2. 用 curl 真实调用（注意鉴权头/签名），记录：请求(方法+URL+关键头+body) 与 响应(状态码+body 截断到 2000 字)\n"
+                        + "2. 用 Postman MCP 真实调用（注意鉴权头/签名；不可用时输出【卡点】），记录：请求(方法+URL+关键头+body) 与 响应(状态码+body 截断到 2000 字)\n"
                         + "3. 对比响应与文档描述的差异，重点标注文档滞后之处（字段名/类型/枚举值不一致等）\n"
                         + "输出 markdown 实测报告，按接口分节。无法调用的接口明确标注原因。\n"
                         + "{extra}"));
@@ -224,6 +226,9 @@ public class SupplierJobService {
             n.setJobId(job.getId());
             n.setNodeId(str(o, "id", "n" + (seq + 1)));
             n.setSeq(seq);
+            String stage = str(o, "contextStage", "auto");
+            if (!List.of("auto", "all", "analysis", "probe", "codegen").contains(stage)) throw new IllegalArgumentException("节点上下文阶段无效");
+            n.setContextStage(stage);
             n.setTitle(str(o, "title", "(未命名节点)"));
             n.setType(str(o, "type", "manual"));
             n.setDescription(str(o, "description", ""));
@@ -298,9 +303,15 @@ public class SupplierJobService {
         if (job.getInstanceId() == null) {
             throw new IllegalArgumentException("存档还没绑定执行实例，请先在顶部选择实例");
         }
+        if (!instanceRepo.existsById(job.getInstanceId())) throw new IllegalArgumentException("绑定实例不存在");
         kbService.syncFromJob(job);   // 幂等：确保存量文档在知识库中有索引（执行时先查库勿重抓）
 
-        String prompt = renderPrompt(n.getPrompt(), job, extraInstruction);
+        String generated = "codegen".equals(contextStage(n)) ? generatedDevelopmentPrompt(job, codegenPrompt(jobId)) : "";
+        String prompt = renderPrompt(n.getPrompt(), job, extraInstruction, contextStage(n));
+        if (!generated.isBlank()) prompt += "\n\n## 公司 Skill 生成的开发提示词\n" + generated;
+        if (prompt.length() > 400000) throw new IllegalArgumentException("派发请求超过 400000 字符，请拆分任务");
+        n.setDeliveryManifest("准备时间：" + LocalDateTime.now() + "\n知识库：" + kbService.kbCode(job) + "\n阶段：" + contextStage(n) + "\n" + kbService.snapshotDelivery(kbService.kbCode(job), prompt));
+        n.setToolEvidence("");
         n.setStatus("RUNNING");
         n.setStartedAt(n.getStartedAt() != null ? n.getStartedAt() : LocalDateTime.now());
         n.setNote("");
@@ -320,11 +331,13 @@ public class SupplierJobService {
         }
         if (answer == null || answer.isBlank()) throw new IllegalArgumentException("答复内容不能为空");
         if (job.getInstanceId() == null) throw new IllegalArgumentException("存档未绑定执行实例");
+        String context = kbService.contextText(kbService.kbCode(job), contextStage(n)) + referenceContext.load(job, n.isCodegenPrep());
+        String message = "【卡点答复】继续未完成的工作，完成后按动作规范输出：\n\n" + answer.strip() + "\n\n" + context;
+        n.setDeliveryManifest(n.getDeliveryManifest() + "\n续跑准备：" + LocalDateTime.now() + "\n"
+                + kbService.snapshotDelivery(kbService.kbCode(job), message));
         n.setPendingQuestion("");
         nodeRepo.save(n);
-        deliverToInstance(job, n, "job-answer-" + jobId + "-" + nodeId,
-                "【卡点答复】玩家答复如下，优先遵循它继续未完成的工作（不要重新开始已完成的部分），完成后按动作规范输出：\n\n"
-                        + answer.strip());
+        deliverToInstance(job, n, "job-answer-" + jobId + "-" + nodeId, message);
     }
 
     /** 发消息到实例会话（虚拟线程异步）并统一处理回复 */
@@ -355,7 +368,10 @@ public class SupplierJobService {
             private final StringBuilder think = new StringBuilder();
             private long lastThinkWrite;
 
-            @Override public void onTurnStart() { }
+            @Override public void onTurnStart() {
+                n.setDeliveryManifest(n.getDeliveryManifest() + "\n实例开始处理：" + LocalDateTime.now());
+                patchLive(n, f -> f.setDeliveryManifest(n.getDeliveryManifest()));
+            }
             @Override public void onThinkingDelta(String delta) {
                 if (delta == null || delta.isEmpty()) return;
                 think.append(delta);
@@ -374,7 +390,18 @@ public class SupplierJobService {
                 final String text = raw.length() > 560 ? raw.substring(0, 560) + "…" : raw;
                 patchLive(n, f -> f.setProgress(text));
             }
-            @Override public void onToolEnd(ToolStep step) { }
+            @Override public void onToolEnd(ToolStep step) {
+                if (step.status == ToolStep.Status.SUCCESS && step.evidenceInput != null && step.evidenceOutput != null
+                        && (SupplierProbeEvidence.hasHttpRequest(JsonParser.parseString(step.evidenceInput))
+                            || SupplierProbeEvidence.hasHttpRequest(JsonParser.parseString(step.evidenceOutput)))
+                        && SupplierProbeEvidence.hasHttpResponse(JsonParser.parseString(step.evidenceOutput))) {
+                    String evidence = "\n## 实测工具事件 " + step.name + " @ " + LocalDateTime.now()
+                            + "\n请求：\n```json\n" + step.evidenceInput + "\n```\n返回：\n```json\n" + step.evidenceOutput + "\n```\n";
+                    synchronized (n) {
+                        if (n.getToolEvidence().length() + evidence.length() <= 1000000) n.setToolEvidence(n.getToolEvidence() + evidence);
+                    }
+                }
+            }
             @Override public void onTurnComplete(TurnResult result) { }
             @Override public void onTurnError(String message, boolean aborted) { }
         };
@@ -420,9 +447,16 @@ public class SupplierJobService {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
         SupplierJobNode n = nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
                 .orElseThrow(() -> new IllegalArgumentException("节点不存在: " + nodeId));
+        if ("RUNNING".equals(n.getStatus())) throw new IllegalArgumentException("节点尚在执行，不能标记完成");
         if (n.isCodegenPrep() && !prepComplete(job.getMeetingDocUrl(), job.getConfigJson())) {
             throw new IllegalArgumentException("【写代码准备】未完成：需先提交三方会议文档（飞书云文档链接），并补充至少一组完整的配置 key/value");
         }
+        if ("codegen".equals(contextStage(n))) generatedDevelopmentPrompt(job, codegenPrompt(jobId));
+        if (isProbeNode(n) && (n.getToolEvidence().isBlank() || n.getArtifact().isBlank())) {
+            throw new IllegalArgumentException("缺少成功的 Postman 实测工具记录，请运行实测节点；文字报告不能代替真实请求/返回");
+        }
+        kbService.archiveArtifact(job, nodeId, n.getTitle(), n.getArtifact()
+                + (n.getToolEvidence().isBlank() ? "" : "\n\n# 实测执行证据\n" + n.getToolEvidence()));
         n.setStatus("DONE");
         n.setDoneAt(LocalDateTime.now());
         nodeRepo.save(n);
@@ -436,6 +470,10 @@ public class SupplierJobService {
                     log.info("[SupplierJob] 🎉 存档通关: id={}, name={}", jobId, job.getName());
                 });
         jobRepo.save(job);
+    }
+
+    static boolean isProbeNode(SupplierJobNode node) {
+        return "probe".equals(node.getContextStage()) || (node.getTitle() != null && (node.getTitle().contains("实测") || node.getTitle().contains("Postman")));
     }
 
     // ===== 写代码前置准备（10-29-codegen-prep） =====
@@ -470,7 +508,11 @@ public class SupplierJobService {
         return false;
     }
 
-    public boolean prepReady(SupplierJob job) { return prepComplete(job.getMeetingDocUrl(), job.getConfigJson()); }
+    public boolean prepReady(SupplierJob job) {
+        return prepComplete(job.getMeetingDocUrl(), job.getConfigJson())
+                && !job.getSpecDocPath().isBlank() && !job.getPromptSkillPath().isBlank()
+                && !formatSkills(job.getSkillsJson()).isBlank();
+    }
 
     /** 保存写代码准备信息（部分更新：null 字段不动；configs 传数组 JSON 字符串或 null） */
     @Transactional
@@ -507,21 +549,57 @@ public class SupplierJobService {
         return saved;
     }
 
+    public void savePromptSkill(Long jobId, String path) {
+        SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
+        job.setPromptSkillPath(path.trim());
+        jobRepo.save(job);
+    }
+
     /** 生成发给实例的写代码提示词（聚合六类参考资料，用户一键复制粘贴到飞书） */
+    public String generateCodegenPrompt(Long jobId) {
+        String original = codegenPrompt(jobId);
+        SupplierJob job = jobRepo.findById(jobId).orElseThrow();
+        if (job.getInstanceId() == null) throw new IllegalArgumentException("请先绑定执行实例");
+        BotInstance inst = instanceRepo.findById(job.getInstanceId()).orElseThrow(() -> new IllegalArgumentException("执行实例不存在"));
+        String context = original + SupplierTrellisContext.prepare(job, original);
+        String result = claudeCodeService.chat(inst.getId(), "supplier-prompt-" + jobId,
+                "按下方公司提示词生成 Skill 执行提示词生成任务。只输出用于下一步供应商开发的最终提示词，保留所有必需材料、来源与 Trellis 流程；本轮不要修改代码，不要调用供应商接口。\n\n" + context,
+                null, firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), ""), inst.getClaudeModel(), new NoopListener());
+        if (result == null || result.isBlank() || result.startsWith("❌") || STANDBLOCK.matcher(result).find()) {
+            throw new IllegalArgumentException("提示词 Skill 执行未完成：" + result);
+        }
+        String finalPrompt = result + "\n\n## 工作台强制附带的原始上下文与任务\n" + context;
+        kbService.archiveArtifact(job, "generated-prompt", "公司 Skill 生成的对接提示词", finalPrompt);
+        job.setGeneratedPromptDigest(SupplierReferenceContext.digest(original));
+        jobRepo.save(job);
+        return finalPrompt;
+    }
+
+    private String generatedDevelopmentPrompt(SupplierJob job, String currentContext) {
+        if (!SupplierReferenceContext.digest(currentContext).equals(job.getGeneratedPromptDigest())) {
+            throw new IllegalArgumentException("请先用公司 Skill 生成开发提示词；材料变更后需要重新生成");
+        }
+        var entry = kbService.list(kbService.kbCode(job)).stream()
+                .filter(e -> ("job:" + job.getId() + "/node:generated-prompt").equals(e.getSource()) && "DONE".equals(e.getStatus()))
+                .findFirst().orElseThrow(() -> new IllegalArgumentException("生成的开发提示词已缺失，请重新生成"));
+        try { return kbService.readMd(entry.getId()); }
+        catch (java.io.IOException ex) { throw new IllegalArgumentException("无法读取开发提示词，请重新生成", ex); }
+    }
+
     public String codegenPrompt(Long jobId) {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
-        String kbIndex = kbService.indexText(kbService.kbCode(job));
+        if (!prepComplete(job.getMeetingDocUrl(), job.getConfigJson())) throw new IllegalArgumentException("请先保存会议文档和完整配置");
+        String kbIndex = kbService.contextText(kbService.kbCode(job), "codegen") + referenceContext.load(job, true);
         String skills = formatSkills(job.getSkillsJson());
-        String n2 = nodeRepo.findByJobIdAndNodeId(jobId, "n2").map(SupplierJobNode::getArtifact).orElse("");
-        if (n2.isBlank()) {   // 自定义模板里实测节点可能不叫 n2：找带工件的 agent 节点里标题含"实测/档案"的
-            n2 = nodeRepo.findByJobIdOrderBySeqAsc(jobId).stream()
-                    .filter(x -> x.getArtifact() != null && !x.getArtifact().isBlank()
-                            && (x.getType().startsWith("agent")) && isCodegenTitle(x.getTitle()) == false
-                            && (x.getTitle().contains("实测") || x.getTitle().contains("档案") || x.getTitle().contains("Postman") || x.getTitle().contains("Collection")))
-                    .findFirst().map(SupplierJobNode::getArtifact).orElse("");
-        }
-        return buildCodegenPrompt(job.getSupplierName(), job.getSupplierCode(), job.getLibraryPath(),
+        List<SupplierJobNode> probes = nodeRepo.findByJobIdOrderBySeqAsc(jobId).stream()
+                .filter(x -> isProbeNode(x) && "DONE".equals(x.getStatus()) && !x.getToolEvidence().isBlank()).toList();
+        if (probes.isEmpty()) throw new IllegalArgumentException("请先完成带真实 Postman 工具证据的实测节点");
+        String n2 = probes.stream().map(x -> x.getArtifact() + "\n\n" + x.getToolEvidence())
+                .collect(java.util.stream.Collectors.joining("\n\n"));
+        String prompt = buildCodegenPrompt(job.getSupplierName(), job.getSupplierCode(), job.getLibraryPath(),
                 kbIndex, skills, job.getMeetingDocUrl(), job.getSpecDocPath(), job.getConfigJson(), n2);
+        if (prompt.length() > 240000) throw new IllegalArgumentException("开发上下文超过 240000 字符，请按使用阶段整理知识库或拆分任务");
+        return prompt;
     }
 
     /** 纯函数便于单测：提示词组装 */
@@ -537,7 +615,7 @@ public class SupplierJobService {
          .append(kbIndex).append("\n\n")
          .append("2) 接口实测档案（Postman Collection 与逐接口\"文档 vs 实际\"差异，来自工作台实测节点工件）：\n");
         if (n2Artifact != null && !n2Artifact.isBlank()) {
-            String a = n2Artifact.length() > 3000 ? n2Artifact.substring(0, 3000) + "\n…（截断，完整内容见工作台该节点工件）" : n2Artifact;
+            String a = n2Artifact;
             p.append(a).append("\n");
         } else {
             p.append("（尚无实测档案——若接口尚未实测，先在工作台完成实测节点再写代码）\n");
@@ -571,6 +649,8 @@ public class SupplierJobService {
                 .orElseThrow(() -> new IllegalArgumentException("节点不存在"));
         n.setArtifact(artifact != null ? artifact : "");
         nodeRepo.save(n);
+        SupplierJob job = jobRepo.findById(jobId).orElseThrow();
+        kbService.archiveArtifact(job, nodeId, n.getTitle(), n.getArtifact() + (n.getToolEvidence().isBlank() ? "" : "\n\n" + n.getToolEvidence()));
     }
 
     // ===== 对话区（玩家随时问执行实例"现在什么情况"） =====
@@ -626,9 +706,20 @@ public class SupplierJobService {
      * 末尾统一追加 ACTION_SPEC（动作规范，与前文冲突以规范为准）。
      * 若 prompt 未写 {skills} 且存档配置了 skill，则自动在末尾追加"可用技能"段（内置模板无需修改即生效）。
      */
-    String renderPrompt(String template, SupplierJob job, String extra) {
+    static String contextStage(SupplierJobNode node) {
+        if (!"auto".equals(node.getContextStage())) return node.getContextStage();
+        if (node.isCodegenPrep() || isCodegenTitle(node.getTitle())) return "codegen";
+        if (isProbeNode(node)) return "probe";
+        if (node.getTitle() != null && node.getTitle().contains("分析")) return "analysis";
+        return "all";
+    }
+
+    String renderPrompt(String template, SupplierJob job, String extra) { return renderPrompt(template, job, extra, "all"); }
+
+    String renderPrompt(String template, SupplierJob job, String extra, String stage) {
         if (template == null) template = "";
-        String docs = kbService.indexText(kbService.kbCode(job));
+        template = template.replace("用 curl 真实调用", "用 Postman MCP 真实调用");
+        String docs = "all".equals(stage) ? kbService.contextText(kbService.kbCode(job)) : kbService.contextText(kbService.kbCode(job), stage);
         String skills = formatSkills(job.getSkillsJson());
         String out = template
                 .replace("{supplierName}", nullSafe(job.getSupplierName()))
@@ -641,18 +732,23 @@ public class SupplierJobService {
         if (!template.contains("{skills}") && !skills.isBlank()) {
             out = out + "\n\n【本工作可用的 Skill】\n开工前先阅读下列 skill 目录中的 SKILL.md（及其引用的文件），任务范围内严格遵循 skill 的指导：\n" + skills;
         }
+        // Every node needs the supplier context, including custom templates.
+        if (!template.contains("{docs}")) {
+            out = out + "\n\n" + docs;
+        }
         // {artifact:nX} 引用其他节点工件
         Matcher m = Pattern.compile("\\{artifact:([\\w-]+)}").matcher(out);
         StringBuilder sb = new StringBuilder();
         while (m.find()) {
             String ref = m.group(1);
             String artifact = nodeRepo.findByJobIdAndNodeId(job.getId(), ref)
-                    .map(SupplierJobNode::getArtifact).orElse("（引用的节点 " + ref + " 还没有产物）");
-            if (artifact.length() > 12000) artifact = artifact.substring(0, 12000) + "\n...(截断)";
+                    .map(SupplierJobNode::getArtifact).filter(a -> !a.isBlank())
+                    .orElseThrow(() -> new IllegalArgumentException("引用的节点 " + ref + " 还没有产物，请先完成上游任务"));
+            if (artifact.length() > 120000) throw new IllegalArgumentException("上游产物超过 120000 字符，请拆分任务：" + ref);
             m.appendReplacement(sb, Matcher.quoteReplacement(artifact));
         }
         m.appendTail(sb);
-        return sb + "\n\n" + ACTION_SPEC;
+        return sb + "\n\n" + referenceContext.load(job, false) + "\n\n" + ACTION_SPEC;
     }
 
     /** R5/R6/R7 统一动作规范：Trellis 四段纪律 + 卡点协议 + Postman 实测协议（追加在所有 agent prompt 末尾） */
@@ -671,7 +767,10 @@ public class SupplierJobService {
             6. 接口实测协议（凡真实调用供应商 HTTP 接口）：必须经 Postman 插件(MCP) 执行——
                a) 先把待测接口整理成 Postman Collection（v2.1 JSON，命名 <供应商代码>-<yyyyMMdd>，含环境变量/鉴权配置）；
                b) 经插件发送请求、采集真实响应；c) 工件中附 Collection 定义与逐接口"文档 vs 实际"差异对比。
-               仅当 Postman 插件确认不可用时才降级 newman CLI 回放；自由 curl 不算合规实测产物。""";
+               官方 runCollection 默认只返回测试摘要。每个请求须配置以下 Tests 脚本，让插件返回真实请求/响应的结构化证据（禁止用静态假数据替换）：
+               pm.test("SUPPLIER_EVIDENCE:" + JSON.stringify({request:{name:pm.info.requestName,method:pm.request.method,url:pm.variables.replaceIn(pm.request.url.toString()),body:pm.request.body ? pm.variables.replaceIn(pm.request.body.toString()) : ""},response:{code:pm.response.code,body:pm.response.text()}}), function(){ pm.expect(pm.response.code).to.be.within(100,599); });
+               证据必须由实际响应生成，报告正文不能替代插件事件。响应过大时拆分请求范围，不要省略正文后宣称已完整取证。
+               Postman 插件不可用时输出【卡点】，配置可用插件后重试；自由 curl 不算合规实测产物。""";
 
     /** skill 目录列表 → prompt 段落（空配置返回空串） */
     private String formatSkills(String skillsJson) {

@@ -19,6 +19,9 @@ public class ToolStep {
     /** 是否为子 Agent 步骤（Task 工具） */
     public final boolean subAgent;
 
+    public String evidenceInput;
+    public String evidenceOutput;
+
     public volatile Status status;
     public final long startMs;
     public volatile long endMs;

@@ -688,6 +688,9 @@ public class TerminalSession {
                 String name = obj.has("name") ? obj.get("name").getAsString() : "?";
                 String detail = extractToolDetail(name, obj.has("input") ? obj.getAsJsonObject("input") : null);
                 ToolStep step = new ToolStep(id, name, detail, "Task".equalsIgnoreCase(name));
+                if (SupplierProbeEvidence.isExecutionTool(name)) {
+                    step.evidenceInput = SupplierProbeEvidence.capture(obj.get("input"));
+                }
                 turn.toolSteps.add(step);
                 turn.stepsById.put(id, step);
                 activityPhase = ActivityPhase.TOOL_RUNNING;
@@ -713,6 +716,7 @@ public class TerminalSession {
             ToolStep step = turn.stepsById.get(toolUseId);
             if (step == null || step.status != ToolStep.Status.RUNNING) continue;
             boolean isError = obj.has("is_error") && obj.get("is_error").getAsBoolean();
+            if (step.evidenceInput != null) step.evidenceOutput = SupplierProbeEvidence.capture(obj.get("content"));
             step.markEnd(isError ? ToolStep.Status.ERROR : ToolStep.Status.SUCCESS);
             turn.listener.onToolEnd(step);
             // 所有工具都结束了 → 回到"等模型下一步动作"的思考态

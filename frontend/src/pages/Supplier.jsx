@@ -520,9 +520,11 @@ function GameView({ jobId, onBack, showToast }) {
               )}
 
               {/* 写代码准备门禁（10-29-codegen-prep）：会议文档 → KV 配置 → redis 提醒 → 生成提示词 */}
-              {cur.codegenPrep && <CodegenPrepCard job={job} reload={load} showToast={showToast} />}
+              {(cur.codegenPrep || cur.contextStage === 'codegen') && <CodegenPrepCard job={job} reload={load} showToast={showToast} />}
 
               {/* 工件区 */}
+              {cur.deliveryManifest && <details style={{ marginTop: 12 }}><summary>本次上下文交付记录</summary><pre style={{ whiteSpace: 'pre-wrap', fontSize: 11 }}>{cur.deliveryManifest}</pre></details>}
+              {cur.toolEvidence && <details style={{ marginTop: 12 }}><summary>Postman 请求与返回证据</summary><pre style={{ whiteSpace: 'pre-wrap', fontSize: 11 }}>{cur.toolEvidence}</pre></details>}
               {(cur.artifact || editingArtifact) && (
                 <div style={{ marginTop: 14 }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
@@ -639,6 +641,7 @@ function CodegenPrepCard({ job, reload, showToast }) {
   const parseConfigs = () => { try { const a = JSON.parse(job.configJson || '[]'); return Array.isArray(a) ? a : [] } catch { return [] } }
   const [meeting, setMeeting] = useState(job.meetingDocUrl || '')
   const [spec, setSpec] = useState(job.specDocPath || '')
+  const [promptSkill, setPromptSkill] = useState(job.promptSkillPath || '')
   const [configs, setConfigs] = useState(parseConfigs())
   const [prompt, setPrompt] = useState(null)   // 生成结果文本
   const [busy, setBusy] = useState(false)
@@ -659,7 +662,7 @@ function CodegenPrepCard({ job, reload, showToast }) {
   }
   async function genPrompt() {
     setBusy(true)
-    const res = await fetch(`/api/supplier-jobs/${job.id}/codegen-prompt`)
+    const res = await fetch(`/api/supplier-jobs/${job.id}/codegen-prompt/generate`, { method: 'POST' })
     const d = await res.json().catch(() => ({}))
     setBusy(false)
     if (!res.ok) return showToast(d.error || '生成失败', 'error')
@@ -689,9 +692,13 @@ function CodegenPrepCard({ job, reload, showToast }) {
         <div style={{ fontWeight: 600, marginBottom: 4 }}>{kvDone ? '✅' : '☐'} 2. 当前配置 key/value（必填 ≥1 组；会议文档提交后开放）</div>
         {!meetingDone && <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 6 }}>⬆️ 先提交三方会议文档，再补充配置</div>}
         <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
-          <input className="form-input" style={{ flex: 1, fontSize: 12 }} placeholder="spec 文档位置（可选：本地路径或链接，会带入提示词）"
+          <input className="form-input" style={{ flex: 1, fontSize: 12 }} placeholder="spec 文档绝对路径或已解析入库的链接（生成提示词必填）"
             value={spec} onChange={e => setSpec(e.target.value)} />
           <button className="btn" style={{ fontSize: 12, padding: '4px 14px' }} disabled={busy} onClick={() => put({ specDocPath: spec })}>存 spec</button>
+        </div>
+        <div style={{ display: 'flex', gap: 8, marginBottom: 6 }}>
+          <input className="form-input" value={promptSkill} onChange={e => setPromptSkill(e.target.value)} placeholder="公司提示词生成 Skill 绝对路径（目录或 SKILL.md）" />
+          <button className="btn" disabled={busy} onClick={() => put({ promptSkillPath: promptSkill })}>存提示词 Skill</button>
         </div>
         <div disabled={!meetingDone} style={{ opacity: meetingDone ? 1 : .45, pointerEvents: meetingDone ? 'auto' : 'none' }}>
           {configs.map((c, i) => (
@@ -722,9 +729,9 @@ function CodegenPrepCard({ job, reload, showToast }) {
       {/* 4) 生成提示词 */}
       <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
         <button className="btn btn-primary" style={{ fontSize: 12.5, padding: '6px 16px' }} disabled={busy || !ready} onClick={genPrompt}>
-          📝 生成写代码提示词
+          📝 用公司 Skill 生成提示词
         </button>
-        {!ready && <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>完成 1、2 两项后可生成</span>}
+        {!ready && <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>请保存会议文档、配置、spec、提示词 Skill 和对接 Skill；生成时还会检查实测证据与 Trellis</span>}
       </div>
       {prompt && (
         <div style={{ marginTop: 10 }}>
@@ -785,6 +792,11 @@ function KbPanel({ kbCode, showToast }) {
     if (!res.ok) return showToast(d.error || '添加失败', 'error')
     setValue(''); setTitle('')
     showToast(type === 'chat' || type === 'note' || type === 'md' ? '已入库，下次节点执行即可引用' : '已入库（原文）。点该行右侧「解析」生成解析文档', 'success')
+    load()
+  }
+  async function changeStage(id, stage) {
+    const res = await fetch(`/api/supplier-kb/entries/${id}/stage`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ stage }) })
+    if (!res.ok) return showToast('使用阶段保存失败', 'error')
     load()
   }
   async function openMd(e) {
@@ -851,6 +863,9 @@ function KbPanel({ kbCode, showToast }) {
                 {st.label}
               </span>
               {e.status === 'FAILED' && <span style={{ fontSize: 11, color: 'var(--error)' }} title={e.error}>{String(e.error || '').slice(0, 40)}</span>}
+              <select aria-label="材料使用阶段" className="form-input" style={{ width: 130, fontSize: 11 }} value={e.contextStage || 'all'} onChange={ev => changeStage(e.id, ev.target.value)}>
+                <option value="all">通用 · 每次交付</option><option value="analysis">文档分析</option><option value="probe">接口实测</option><option value="codegen">代码开发</option><option value="archive">仅留档</option>
+              </select>
               <div style={{ flex: 1 }} />
               {e.status === 'DONE' && <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => openMd(e)}>👁 产物/校正</button>}
               {(e.type === 'url' || e.type === 'pdf') && e.status === 'RAW' && (
@@ -1072,7 +1087,7 @@ function WorkflowEditor({ onBack, showToast }) {
             + 添加节点
           </button>
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.8 }}>
-            节点 prompt 支持占位符：{'{supplierName} {supplierId} {libraryPath} {docs} {skills} {extra}'}（{'{docs}'} 现为<b>知识库索引</b>：解析产物文件路径+先查库规则，创建时录入的文档已自动并入）、{'{artifact:n1}'}（引用某节点工件）。
+            节点 prompt 支持占位符：{'{supplierName} {supplierId} {libraryPath} {docs} {skills} {extra}'}（{'{docs}'} 现为<b>所选阶段的知识库正文</b>：来源、指纹和实际文本，创建时录入的文档已自动并入）、{'{artifact:n1}'}（引用某节点工件）。
             所有 agent 节点末尾会自动追加「执行动作规范」（Trellis 四段 / 卡点协议 / Postman 实测协议），无需写进模板。
             存档配置了 Skill 时，即使 prompt 不写 {'{skills}'} 也会自动在末尾追加"可用技能"段。
           </div>
@@ -1092,6 +1107,11 @@ function WorkflowEditor({ onBack, showToast }) {
                       onChange={e => setNodeDraft(d => ({ ...d, node: { ...d.node, type: e.target.value } }))}>
                       {Object.entries(NODE_TYPE).map(([k, v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
                     </select></div>
+                </div>
+                <div className="form-group"><label className="form-label">上下文使用阶段</label>
+                  <select className="form-input" value={nodeDraft.node.contextStage || 'auto'} onChange={e => setNodeDraft(d => ({ ...d, node: { ...d.node, contextStage: e.target.value } }))}>
+                    <option value="auto">兼容旧模板（按标题识别）</option><option value="all">全部材料</option><option value="analysis">文档分析</option><option value="probe">接口实测（需要工具证据）</option><option value="codegen">代码开发（完整前置门禁）</option>
+                  </select>
                 </div>
                 <div className="form-group"><label className="form-label">节点说明（给玩家看的"这一步做什么"）</label>
                   <textarea className="form-input" rows={3} value={nodeDraft.node.description || ''}
