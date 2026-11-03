@@ -33,6 +33,7 @@ public class EmployeeMessage {
     private String sender = "employee";
 
     @Lob
+    @Column(length = 2147483647)
     private String content = "";
 
     /** 浏览器侧已读标记（红点数字 = 未读数；打开该员工即全部已读） */

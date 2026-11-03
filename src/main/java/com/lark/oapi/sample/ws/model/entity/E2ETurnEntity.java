@@ -34,26 +34,28 @@ public class E2ETurnEntity {
     private String addressedTo = "";
 
     @Lob
-    @Column(name = "user_text")
+    @Column(length = 2147483647, name = "user_text")
     private String userText = "";
 
     @Lob
+    @Column(length = 2147483647)
     private String thinking = "";
 
     @Lob
+    @Column(length = 2147483647)
     private String answer = "";
 
     @Lob
-    @Column(name = "tools_json")
+    @Column(length = 2147483647, name = "tools_json")
     private String toolsJson = "[]";
 
     @Lob
-    @Column(name = "result_json")
+    @Column(length = 2147483647, name = "result_json")
     private String resultJson;
 
     /** A2A 任务信封 JSON（commMode=a2a 的 agent 轮次；随轮次恢复，见 TurnRecord.a2a） */
     @Lob
-    @Column(name = "a2a_json")
+    @Column(length = 2147483647, name = "a2a_json")
     private String a2aJson;
 
     @Column(name = "error_message", length = 1000)

@@ -1,0 +1,71 @@
+services:
+  mysql:
+    image: mysql:8.4.9
+    container_name: feishu-claude-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: feishu_claude
+      MYSQL_USER: feishu
+      MYSQL_PASSWORD: ${FEISHU_MYSQL_PASSWORD:?Run python3 scripts/database.py init first}
+      MYSQL_ROOT_PASSWORD: ${FEISHU_MYSQL_ROOT_PASSWORD:?Run python3 scripts/database.py init first}
+    ports:
+      - "127.0.0.1:${FEISHU_MYSQL_PORT:-3307}:3306"
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_0900_bin"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_PASSWORD mysql --protocol=TCP -h127.0.0.1 -u$$MYSQL_USER -D$$MYSQL_DATABASE -e 'SELECT 1' >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+  backend:
+    build:
+      context: .
+      target: backend
+      args:
+        APP_UID: ${LOCAL_UID:-1000}
+        APP_GID: ${LOCAL_GID:-1000}
+    image: feishu-claude-backend:local
+    restart: unless-stopped
+    environment:
+      SPRING_PROFILES_ACTIVE: mysql
+      FEISHU_MYSQL_URL: jdbc:mysql://mysql:3306/${FEISHU_MYSQL_DATABASE:-feishu_claude}?useUnicode=true&characterEncoding=UTF-8&connectionTimeZone=UTC&preserveInstants=true
+      FEISHU_MYSQL_USER: feishu
+      FEISHU_MYSQL_PASSWORD: ${FEISHU_MYSQL_PASSWORD}
+      FEISHU_KB_PATH: /app/data/supplier-kb
+      CLAUDE_CONFIG_DIR: /home/node/.claude
+    ports:
+      - "127.0.0.1:${FEISHU_BACKEND_PORT:-18081}:8080"
+    volumes:
+      - app_data:/app/data
+      - claude_home:/home/node
+      - type: bind
+        source: ${WORKSPACE_ROOT:-.}
+        target: /workspace
+    depends_on:
+      mysql:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8080/api/workflows"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s
+  frontend:
+    build:
+      context: .
+      target: frontend
+    image: feishu-claude-frontend:local
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${FEISHU_FRONTEND_PORT:-18080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+volumes:
+  mysql_data:
+  app_data:
+    name: ${FEISHU_APP_DATA_VOLUME:-feishu-claude_app_data}
+  claude_home:
+    name: ${FEISHU_CLAUDE_HOME_VOLUME:-feishu-claude_claude_home}

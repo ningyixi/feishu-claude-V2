@@ -28,7 +28,7 @@ public class WorkflowTemplate {
     private boolean builtin = false;
 
     @Lob
-    @Column(name = "nodes_json")
+    @Column(length = 2147483647, name = "nodes_json")
     private String nodesJson = "[]";
 
     @Column(name = "created_at")

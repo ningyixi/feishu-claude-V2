@@ -50,7 +50,7 @@ public class SupplierKbEntry {
 
     /** 解析元数据 JSON：chars/pages/finalUrl/fetchedAt/editedAt… */
     @Lob
-    @Column(name = "meta_json")
+    @Column(length = 2147483647, name = "meta_json")
     private String metaJson = "{}";
 
     @Column(name = "created_at")

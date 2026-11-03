@@ -15,10 +15,11 @@ public class E2ETaskEntity {
     private String id;
 
     @Lob
-    @Column(name = "members_json")
+    @Column(length = 2147483647, name = "members_json")
     private String membersJson = "[]";
 
     @Lob
+    @Column(length = 2147483647)
     private String requirement = "";
 
     @Column(name = "auto_fix")
@@ -44,7 +45,7 @@ public class E2ETaskEntity {
 
     /** 流水线状态 JSON: {stage,stageDetail,round,failReason,cases[],rounds[](含results[])} */
     @Lob
-    @Column(name = "pipeline_json")
+    @Column(length = 2147483647, name = "pipeline_json")
     private String pipelineJson = "{}";
 
     @Column(name = "pipeline_started")

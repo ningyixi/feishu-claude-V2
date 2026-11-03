@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+frontend/node_modules
+target
+data
+backups
+.trellis/workspace
+*.mv.db
+*.trace.db

@@ -27,6 +27,7 @@ public class EmployeeDemand {
     private String title = "";
 
     @Lob
+    @Column(length = 2147483647)
     private String requirement = "";
 
     /** QUEUED | RUNNING | DONE | FAILED | CANCELLED | INTERRUPTED */
@@ -42,16 +43,17 @@ public class EmployeeDemand {
 
     /** 执行完成的汇报全文 */
     @Lob
+    @Column(length = 2147483647)
     private String result;
 
     /** 执行时间线（SSE 事件的压缩快照，JSON 数组；需求结束时落库，重启后仍可回看执行过程） */
     @Lob
-    @Column(name = "timeline_json")
+    @Column(length = 2147483647, name = "timeline_json")
     private String timelineJson;
 
     /** 本需求的工作区（JSON 数组：path + 远端分支 + 运行时状态），见 WorkspaceGitService；空 = 用实例目录 */
     @Lob
-    @Column(name = "workspaces_json")
+    @Column(length = 2147483647, name = "workspaces_json")
     private String workspacesJson;
 
     public String getWorkspacesJson() { return workspacesJson; }

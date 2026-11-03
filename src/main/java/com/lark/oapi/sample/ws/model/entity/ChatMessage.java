@@ -24,7 +24,8 @@ public class ChatMessage {
     @Column(nullable = false)
     private String role;
 
-    @Column(columnDefinition = "TEXT")
+    @Lob
+    @Column(length = 2147483647)
     private String content;
 
     /** p2p 或 group */

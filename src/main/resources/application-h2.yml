@@ -1,0 +1,7 @@
+# Explicit legacy profile: --spring.profiles.active=h2
+spring:
+  datasource:
+    url: jdbc:h2:file:${FEISHU_DB_PATH:D:/feishu-claude-data/config};WRITE_DELAY=2000
+    driver-class-name: org.h2.Driver
+    username: ${FEISHU_H2_USER:sa}
+    password: ${FEISHU_H2_PASSWORD:}

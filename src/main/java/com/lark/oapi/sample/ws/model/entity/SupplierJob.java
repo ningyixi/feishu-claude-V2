@@ -37,12 +37,12 @@ public class SupplierJob {
 
     /** 接口文档列表 JSON: [{"type":"url"|"path","value":"..."}] */
     @Lob
-    @Column(name = "docs_json")
+    @Column(length = 2147483647, name = "docs_json")
     private String docsJson = "[]";
 
     /** 关联的 skill 目录列表 JSON: ["D:\\skills\\create-supplier", ...] — 节点执行时注入 prompt */
     @Lob
-    @Column(name = "skills_json")
+    @Column(length = 2147483647, name = "skills_json")
     private String skillsJson = "[]";
 
     /** 写代码前置（10-29-codegen-prep）：三方会议文档飞书云文档链接（门禁必需） */
@@ -66,7 +66,7 @@ public class SupplierJob {
 
     /** 写代码前置：当前配置 key/value 数组 JSON: [{"key":"...","value":"..."}]（门禁必需≥1条） */
     @Lob
-    @Column(name = "config_json")
+    @Column(length = 2147483647, name = "config_json")
     private String configJson = "[]";
 
     /** 当前绑定的执行实例（可中途切换） */

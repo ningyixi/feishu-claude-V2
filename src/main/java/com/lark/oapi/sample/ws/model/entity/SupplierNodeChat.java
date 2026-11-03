@@ -29,7 +29,7 @@ public class SupplierNodeChat {
     private String status = "DONE";
 
     @Lob
-    @Column(nullable = false)
+    @Column(length = 2147483647, nullable = false)
     private String text = "";
 
     @Column(name = "created_at")

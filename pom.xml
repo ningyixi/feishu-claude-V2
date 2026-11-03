@@ -49,7 +49,12 @@
             <version>6.2.2</version>
         </dependency>
 
-        <!-- H2 Database -->
+        <!-- MySQL is the default store; H2 remains available for offline migration. -->
+        <dependency>
+            <groupId>com.mysql</groupId>
+            <artifactId>mysql-connector-j</artifactId>
+            <scope>runtime</scope>
+        </dependency>
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>

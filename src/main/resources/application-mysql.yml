@@ -1,0 +1,8 @@
+spring:
+  datasource:
+    url: ${FEISHU_MYSQL_URL:jdbc:mysql://localhost:3307/feishu_claude?useUnicode=true&characterEncoding=UTF-8&connectionTimeZone=UTC&preserveInstants=true}
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    username: ${FEISHU_MYSQL_USER:feishu}
+    password: ${FEISHU_MYSQL_PASSWORD}
+  jpa:
+    database-platform: org.hibernate.dialect.MySQLDialect

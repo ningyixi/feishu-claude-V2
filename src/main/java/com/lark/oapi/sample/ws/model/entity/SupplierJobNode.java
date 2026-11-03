@@ -31,10 +31,12 @@ public class SupplierJobNode {
     private String type = "manual";
 
     @Lob
+    @Column(length = 2147483647)
     private String description = "";
 
     /** agent/agent_check 节点的 prompt 模板（支持 {supplierName} 等占位符） */
     @Lob
+    @Column(length = 2147483647)
     private String prompt = "";
 
     /** PENDING | RUNNING | DONE */
@@ -42,6 +44,7 @@ public class SupplierJobNode {
 
     /** agent 执行产物 / 玩家补充的笔记（markdown） */
     @Lob
+    @Column(length = 2147483647)
     private String artifact = "";
 
     private String contextStage = "auto";
@@ -49,9 +52,11 @@ public class SupplierJobNode {
     public void setContextStage(String value) { contextStage = value; }
 
     @Lob
+    @Column(length = 2147483647)
     private String deliveryManifest = "";
 
     @Lob
+    @Column(length = 2147483647)
     private String toolEvidence = "";
 
     public String getDeliveryManifest() { return deliveryManifest == null ? "" : deliveryManifest; }
@@ -61,11 +66,12 @@ public class SupplierJobNode {
 
     /** 最近一次执行的备注（失败原因等） */
     @Lob
+    @Column(length = 2147483647)
     private String note = "";
 
     /** 卡点待答（R7）：agent 输出【卡点】后的完整回复，等待玩家答复注入；空=无卡点 */
     @Lob
-    @Column(name = "pending_question")
+    @Column(length = 2147483647, name = "pending_question")
     private String pendingQuestion = "";
 
     /** 执行中实时进度（当前工具活动摘要，如 "🔧 Bash · curl -X POST ..."），轮次结束清空 */

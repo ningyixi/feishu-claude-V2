@@ -29,7 +29,7 @@ public class DigitalEmployee {
 
     /** 职责描述 — 作为员工人设注入每次需求的 prompt */
     @Lob
-    @Column(name = "role_desc")
+    @Column(length = 2147483647, name = "role_desc")
     private String roleDesc = "";
 
     /**
@@ -37,7 +37,7 @@ public class DigitalEmployee {
      * 注入每次需求/聊天的 prompt，优先级高于系统内置默认流程（DEFAULT_SOP）。
      */
     @Lob
-    @Column(name = "work_spec")
+    @Column(length = 2147483647, name = "work_spec")
     private String workSpec = "";
 
     /**
