@@ -8,5 +8,6 @@ import java.util.List;
 public interface HookRunRepository extends JpaRepository<HookRun, Long> {
     List<HookRun> findTop50ByHookIdOrderByStartedAtDesc(Long hookId);
     HookRun findFirstByHookIdOrderByStartedAtDesc(Long hookId);
+    List<HookRun> findByStatus(String status);
     void deleteByHookId(Long hookId);
 }

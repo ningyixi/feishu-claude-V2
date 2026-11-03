@@ -106,6 +106,23 @@ public class SkillHookService {
         }
     }
 
+    /** 启动清孤儿：上个进程被杀（重启/断网/编译事故）时残留的 RUNNING 记录落终态，窗口未推进下次自动补跑 */
+    @jakarta.annotation.PostConstruct
+    public void sweepOrphanRuns() {
+        try {
+            for (HookRun r : runRepo.findByStatus("RUNNING")) {
+                r.setStatus("FAILED");
+                r.setSummary(trunc("进程中断（后端重启/断网）——本窗口未推进，内容将在下一次执行自动补回", 4000));
+                r.setFinishedAt(LocalDateTime.now());
+                r.setDurationMs(java.time.Duration.between(r.getStartedAt(), r.getFinishedAt()).toMillis());
+                runRepo.save(r);
+                log.warn("[Hook] 孤儿执行记录已标中断: runId={}, hook={}, startedAt={}", r.getId(), r.getHookId(), r.getStartedAt());
+            }
+        } catch (Exception e) {
+            log.warn("[Hook] 孤儿记录清理失败: {}", e.getMessage());
+        }
+    }
+
     // ===== 触发入口 ①：对话完成后（FeishuBotService 接线，异步不阻塞） =====
 
     public void onTurnCompleted(Long instanceId, String userText, String botReply) {
@@ -148,10 +165,10 @@ public class SkillHookService {
             log.info("[Hook] {} 判定触发: {}", hook.getName(), reason);
             run.setJudgeReason(trunc(reason, 1000));
             doMaintain(hook, run);
-        } catch (Exception e) {
+        } catch (Throwable e) {   // 同 runAsync：Error 也必须落终态
             log.error("[Hook] {} 判定/执行异常", hook.getName(), e);
             run.setStatus("FAILED");
-            run.setJudgeReason(trunc("异常: " + e.getMessage(), 1000));
+            run.setJudgeReason(trunc("异常: " + e, 1000));
             finish(run);
         } finally {
             lock.unlock();
@@ -198,11 +215,11 @@ public class SkillHookService {
             runRepo.save(run);
             try {
                 doMaintain(hook, run);
-            } catch (Exception e) {
+            } catch (Throwable e) {   // Throwable：NoClassDefFoundError 等 Error 曾穿透 Exception 分支导致记录永久卡 RUNNING
                 log.error("[Hook] {} 执行异常", hook.getName(), e);
                 run.setStatus("FAILED");
-                run.setSummary(trunc("执行异常: " + e.getMessage(), 4000));
-                finish(run);
+                run.setSummary(trunc("执行异常: " + e, 4000));
+                finish(run);   // 窗口不推进（未 touchLastRun），下次自动补跑
             } finally {
                 lock.unlock();
             }
@@ -226,10 +243,23 @@ public class SkillHookService {
             return;
         }
 
+        // 防漏保证（断网/停机攒了大批对话时）：本次只消化注入预算放得下的前缀，
+        // 窗口推进到最后一条**已处理**消息而非 to——剩余自动留到下一次执行，不会被截断吞掉。
+        List<ChatMessage> batch = budgetWithinCap(msgs);
+        LocalDateTime cutoff = to;
+        String batchNote = "";
+        if (batch.size() < msgs.size()) {
+            ChatMessage last = batch.get(batch.size() - 1);
+            if (last.getCreatedAt() != null) cutoff = last.getCreatedAt();
+            log.info("[Hook] {} 窗口共{}条对话超出注入预算，本次处理前{}条，剩余{}条下次补跑",
+                    hook.getName(), msgs.size(), batch.size(), msgs.size() - batch.size());
+            batchNote = "窗口" + msgs.size() + "条超长，本次处理前" + batch.size() + "条（剩余下次补跑）| ";
+        }
+
         // skill 目录执行前快照
         Map<String, FileState> before = snapshot(hook.getSkillDir());
 
-        String prompt = buildMaintainPrompt(hook, msgs, from, to);
+        String prompt = buildMaintainPrompt(hook, batch, from, cutoff);
         String out = maintainerSession(hook).sendMessage(prompt, new NoopListener());
 
         // 执行后快照对比 → 真实变更
@@ -277,9 +307,9 @@ public class SkillHookService {
             summary.append("（模型判断本窗口无需沉淀）");
         }
         if (isError) summary.append(" | 维护会话返回错误: ").append(brief(out));
-        run.setSummary(trunc(summary.toString(), 4000));
+        run.setSummary(trunc(batchNote + summary.toString(), 4000));
         finish(run);
-        touchLastRun(hook, to);
+        touchLastRun(hook, cutoff);   // 只推进到已处理的消息（超长窗口分批补跑不漏内容）
         log.info("[Hook] {} 维护完成: {}条对话 → {}个文件变更, lesson={}",
                 hook.getName(), msgs.size(), changes.size(), brief(lesson));
     }
@@ -287,6 +317,19 @@ public class SkillHookService {
     private void touchLastRun(SkillHook hook, LocalDateTime windowTo) {
         hook.setLastRunAt(windowTo);
         hookRepo.save(hook);
+    }
+
+    /** 按与 buildMaintainPrompt 一致的截断规则估算注入预算，取能装下的消息前缀（防超长窗口截断吞内容） */
+    private static List<ChatMessage> budgetWithinCap(List<ChatMessage> msgs) {
+        int total = 0;
+        int n = 0;
+        for (ChatMessage m : msgs) {
+            int len = Math.min(m.getContent() == null ? 0 : m.getContent().length(), MSG_CAP) + 64;  // 时间/角色/空白折叠开销余量
+            if (n > 0 && total + len > TOTAL_CAP) break;
+            total += len;
+            n++;   // 首条永远纳入（哪怕超预算），避免零消息空转
+        }
+        return msgs.subList(0, n);
     }
 
     private HookRun newRun(SkillHook hook, String triggerType) {
