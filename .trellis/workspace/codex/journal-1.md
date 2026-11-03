@@ -139,3 +139,36 @@ OrbStack 全栈运行及 MySQL/H2 迁移备份工具已提交。完成 GitHub MC
 ### Next Steps
 
 - None - task complete
+
+
+## Session 5: Windows 主力机迁移交接与 Wiki 存储解释
+
+**Date**: 2026-11-04
+**Task**: Windows 主力机迁移交接与 Wiki 存储解释
+**Branch**: `master`
+
+### Summary
+
+新增 Windows 无 Docker 的 H2→MySQL 迁移交接与 LLM Wiki 存储说明，交叉核对配置/迁移核心/编译和读取代码，记录主数据选择、备份、原生入口尚缺、文件路径、Flowable 表名大小写、验收及回退。明确 Wiki 使用模型编译、MySQL 和磁盘文件，没有向量中间件；保留语义 A/B 验证边界。更新现有文档入口及数据库规范，8 个本地 Markdown 链接和 Trellis context 检查通过；仅文档变更，未执行实际迁移。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `ebc0bf4` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
