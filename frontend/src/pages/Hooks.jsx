@@ -1,3 +1,5 @@
+import Toast from '../components/ui/Toast'
+import { Surface, useConfirm } from '../components/ui/FloatingUI'
 import { useState, useEffect } from 'react'
 
 // ===== 常量 =====
@@ -38,7 +40,9 @@ function cronHuman(expr) {
 // ===== 主页面 =====
 
 export default function Hooks() {
+  const confirmAction = useConfirm()
   const [hooks, setHooks] = useState([])
+  const [draft, setDraft] = useState(null)
   const [instances, setInstances] = useState([])
   const [changes, setChanges] = useState([])
   const [editing, setEditing] = useState(null)   // null | 'new' | hook对象
@@ -75,7 +79,7 @@ export default function Hooks() {
     setTimeout(load, 1500)
   }
   async function remove(h) {
-    if (!confirm(`删除 Hook「${h.name}」？其执行记录和 skill 修改记录一并删除（skill 文件本身不受影响）。`)) return
+    if (!await confirmAction({ title: '删除 Hook？', body: `删除 Hook「${h.name}」？其执行记录和 skill 修改记录一并删除（skill 文件本身不受影响）。删除后无法恢复。`, confirmLabel: '删除 Hook' })) return
     await fetch(`/api/hooks/${h.id}`, { method: 'DELETE' })
     showToast('已删除', 'success')
     load()
@@ -93,7 +97,7 @@ export default function Hooks() {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
         <div>
-          <h1 className="page-title" style={{ margin: 0 }}>🪝 Skill 自进化 Hook</h1>
+          <h1 className="page-title" style={{ margin: 0 }}>Skill 自进化 Hook</h1>
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
             监控实例对话 → LLM 判定/定时触发 → 从实战中提炼经验 → 自动维护 skill 文件
           </div>
@@ -107,7 +111,8 @@ export default function Hooks() {
           暂无 Hook。新建一个：比如监控「实例2」的对话，自动维护 D:\feishu-claude-data\create-supplier
         </div>
       )}
-      {hooks.map(h => {
+      {hooks.map(savedHook => {
+        const h = editing?.id === savedHook.id && draft ? { ...savedHook, ...draft, instanceIds: draft.instanceIds.join(',') } : savedHook
         const last = h.lastRun
         const st = last ? RUN_STATUS[last.status] : null
         return (
@@ -116,13 +121,13 @@ export default function Hooks() {
               <div style={{ flex: 1, minWidth: 260 }}>
                 <div style={{ fontSize: 15, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                   {h.name}
-                  {h.intent && <span className="hook-badge dim" title={h.intent}>🎯 {h.intent.length > 18 ? h.intent.slice(0, 18) + '…' : h.intent}</span>}
+                  {h.intent && <span className="hook-badge dim" data-tooltip={h.intent} tabIndex={0}>🎯 {h.intent.length > 18 ? h.intent.slice(0, 18) + '…' : h.intent}</span>}
                   <span className="hook-badge">{TRIGGER_LABEL[h.triggerType] || h.triggerType}</span>
                   {h.triggerType === 'CRON' && <span className="hook-badge dim">🕐 {cronHuman(h.cronExpr)}</span>}
                   {!h.enabled && <span className="hook-badge dim">已停用</span>}
                   {h.creatorEmployeeId
-                    ? <span className="hook-badge" title={`由数字员工「${h.creatorEmployeeName || h.creatorEmployeeId}」创建`}>👔 {h.creatorEmployeeName || `员工#${h.creatorEmployeeId}`}</span>
-                    : <span className="hook-badge dim" title="由管理员在面板创建">👑 admin</span>}
+                    ? <span className="hook-badge" data-tooltip={`由数字员工「${h.creatorEmployeeName || h.creatorEmployeeId}」创建`} tabIndex={0}>👔 {h.creatorEmployeeName || `员工#${h.creatorEmployeeId}`}</span>
+                    : <span className="hook-badge dim" data-tooltip="由管理员在面板创建" tabIndex={0}>👑 admin</span>}
                 </div>
                 <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 6, lineHeight: 1.8 }}>
                   <div>👁 监控: {(h.instanceIds || '').split(',').filter(Boolean).map(id => (
@@ -142,8 +147,8 @@ export default function Hooks() {
               <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
                 <button className="btn" style={{ fontSize: 12, padding: '4px 10px' }} onClick={() => runNow(h)}>▶ 立即运行</button>
                 <button className="btn" style={{ fontSize: 12, padding: '4px 10px' }} onClick={() => toggle(h)}>{h.enabled ? '⏸ 停用' : '▶️ 启用'}</button>
-                <button className="btn" style={{ fontSize: 12, padding: '4px 10px' }} title="查看该 skill 的维护修改记录"
-                  onClick={() => setChangeModal(h)}>📖 维护记录{changes.filter(c => c.hookId === h.id).length > 0 ? `(${changes.filter(c => c.hookId === h.id).length})` : ''}</button>
+                <button className="btn" style={{ fontSize: 12, padding: '4px 10px' }} data-tooltip="查看该 skill 的维护修改记录"
+                  onClick={() => setChangeModal(h)} aria-label="查看该 skill 的维护修改记录">📖 维护记录{changes.filter(c => c.hookId === h.id).length > 0 ? `(${changes.filter(c => c.hookId === h.id).length})` : ''}</button>
                 <button className="btn" style={{ fontSize: 12, padding: '4px 10px' }} onClick={() => setEditing(h)}>编辑</button>
                 <button className="btn" style={{ fontSize: 12, padding: '4px 10px', color: 'var(--error)' }} onClick={() => remove(h)}>删除</button>
               </div>
@@ -171,7 +176,7 @@ export default function Hooks() {
                           <td style={{ whiteSpace: 'nowrap', fontSize: 12 }}>{fmtTime(r.windowFrom)} → {fmtTime(r.windowTo)}</td>
                           <td>{r.messageCount ?? '—'}</td>
                           <td>{fmtDur(r.durationMs)}</td>
-                          <td className="hook-summary" title={(r.judgeReason || '') + '\n' + (r.summary || '')}>
+                          <td className="hook-summary" data-tooltip={(r.judgeReason || '') + '\n' + (r.summary || '')} tabIndex={0}>
                             {r.judgeReason && <span style={{ color: 'var(--text-dim)' }}>[判定] {r.judgeReason}<br /></span>}
                             {r.summary}
                           </td>
@@ -190,7 +195,7 @@ export default function Hooks() {
       {changeModal && (() => {
         const rows = changes.filter(c => c.hookId === changeModal.id)
         return (
-          <div className="modal-mask" onClick={() => setChangeModal(null)}>
+          <Surface kind="drawer" onClose={() => setChangeModal(null)}>
             <div className="modal-box" style={{ maxWidth: 860, width: 'min(860px,94vw)' }} onClick={e => e.stopPropagation()}>
               <div className="modal-title">📖 维护修改记录 · {changeModal.name}
                 <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--text-dim)', marginLeft: 8 }}>共 {rows.length} 次文件改动 · skill: {changeModal.skillDir}</span>
@@ -226,7 +231,7 @@ export default function Hooks() {
                 <button className="btn" onClick={() => setChangeModal(null)}>关闭</button>
               </div>
             </div>
-          </div>
+          </Surface>
         )
       })()}
 
@@ -235,20 +240,21 @@ export default function Hooks() {
         <HookForm
           hook={editing === 'new' ? null : editing}
           instances={instances}
-          onClose={() => setEditing(null)}
-          onSaved={() => { setEditing(null); load(); showToast('已保存', 'success') }}
+          onDraft={setDraft}
+          onClose={() => { setDraft(null); setEditing(null) }}
+          onSaved={() => { setDraft(null); setEditing(null); load(); showToast('已保存', 'success') }}
           showToast={showToast}
         />
       )}
 
-      {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
     </div>
   )
 }
 
 // ===== 创建/编辑表单 =====
 
-function HookForm({ hook, instances, onClose, onSaved, showToast }) {
+function HookForm({ hook, instances, onClose, onSaved, showToast, onDraft }) {
   const [form, setForm] = useState(() => ({
     name: hook?.name || '',
     intent: hook?.intent || '',
@@ -260,6 +266,7 @@ function HookForm({ hook, instances, onClose, onSaved, showToast }) {
     enabled: hook ? hook.enabled : true,
   }))
   const [saving, setSaving] = useState(false)
+  useEffect(() => { onDraft?.(form) }, [form, onDraft])
   // 实例独占绑定：被数字员工绑定的实例不能再新分配给 Hook（服务端也会拦；已勾选的存量不强制移除）
   const [occupied, setOccupied] = useState({})
   useEffect(() => {
@@ -315,7 +322,7 @@ function HookForm({ hook, instances, onClose, onSaved, showToast }) {
   }
 
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <Surface kind="drawer" onClose={onClose} form>
       <div className="modal-box" style={{ maxWidth: 860, width: 'min(860px, 94vw)' }} onClick={e => e.stopPropagation()}>
         <div className="modal-title">{hook ? `编辑 Hook「${hook.name}」` : '🪝 新建 Skill 自进化 Hook'}</div>
         <div className="modal-body">
@@ -420,6 +427,6 @@ function HookForm({ hook, instances, onClose, onSaved, showToast }) {
           <button className="btn btn-primary" onClick={save} disabled={saving}>{saving ? '保存中…' : '保存'}</button>
         </div>
       </div>
-    </div>
+    </Surface>
   )
 }

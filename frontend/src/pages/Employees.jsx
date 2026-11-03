@@ -1,3 +1,5 @@
+import Toast from '../components/ui/Toast'
+import { Surface, useConfirm, useDirtyValue, useQueryParam } from '../components/ui/FloatingUI'
 import { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -5,7 +7,7 @@ import remarkGfm from 'remark-gfm'
 // ===== 数字员工（侧边栏独立页面）：员工 CRUD / 需求下发自动并行 / 实例工位实时进度 / 主动上报聊天框 =====
 
 export default function Employees() {
-  const [empId, setEmpId] = useState(null)
+  const [empId, setEmpId] = useQueryParam('employee')
   const [toast, setToast] = useState(null)
 
   function showToast(msg, type) {
@@ -18,7 +20,7 @@ export default function Employees() {
       {empId
         ? <EmployeeDetail empId={empId} onBack={() => setEmpId(null)} showToast={showToast} />
         : <EmployeeList onOpen={setEmpId} showToast={showToast} />}
-      {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
     </div>
   )
 }
@@ -75,6 +77,7 @@ function fmtDur(ms) {
 function fmtTime(t) { return t ? String(t).replace('T', ' ').substring(5, 16) : '' }
 
 function EmployeeList({ onOpen, showToast }) {
+  const confirmAction = useConfirm()
   const [employees, setEmployees] = useState([])
   const [creating, setCreating] = useState(false)
 
@@ -87,7 +90,7 @@ function EmployeeList({ onOpen, showToast }) {
 
   async function remove(e, ev) {
     ev.stopPropagation()
-    if (!confirm(`删除数字员工「${e.name}」？其全部需求记录将一并删除（运行中的会先停止）。`)) return
+    if (!await confirmAction({ title: '删除数字员工？', body: `删除数字员工「${e.name}」？其全部需求记录将一并删除（运行中的会先停止）。删除后无法恢复。`, confirmLabel: '删除员工' })) return
     await fetch(`/api/employees/${e.id}`, { method: 'DELETE' })
     showToast('已删除员工', 'success')
     load()
@@ -97,7 +100,7 @@ function EmployeeList({ onOpen, showToast }) {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.2rem' }}>
         <div>
-          <h1 className="page-title" style={{ margin: 0 }}>👔 数字员工</h1>
+          <h1 className="page-title" style={{ margin: 0 }}>数字员工</h1>
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
             创建数字员工、绑定可操作的实例；下发需求后自动并行开工，随时查看进度与「实例 ↔ 需求」映射
           </div>
@@ -119,10 +122,10 @@ function EmployeeList({ onOpen, showToast }) {
               <div style={{ flex: 1, minWidth: 0 }}>
                 <div style={{ fontSize: 15, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
                   {e.name}
-                  {(e.unreadCount || 0) > 0 && <span className="unread-dot" title={`${e.unreadCount} 条未读上报`}>{e.unreadCount}</span>}
+                  {(e.unreadCount || 0) > 0 && <span className="unread-dot" data-tooltip={`${e.unreadCount} 条未读上报`} tabIndex={0}>{e.unreadCount}</span>}
                 </div>
                 <div style={{ fontSize: 12.5, color: 'var(--text-dim)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
-                  title={e.roleDesc}>{e.roleDesc || '未填职责描述'}</div>
+                  data-tooltip={e.roleDesc} tabIndex={0}>{e.roleDesc || '未填职责描述'}</div>
               </div>
               <button className="btn" style={{ fontSize: 12, padding: '2px 10px', color: 'var(--error)' }}
                 onClick={ev => remove(e, ev)}>删除</button>
@@ -138,10 +141,10 @@ function EmployeeList({ onOpen, showToast }) {
                 {(e.permissions || []).length === 0 && <span className="hook-badge dim">无</span>}
                 {(e.permissions || []).map(p => {
                   const pm = EMP_PERMS.find(x => x.key === p)
-                  return <span key={p} className="hook-badge" title={`已授权：${pm?.label || p}`}>{pm?.icon || '🔓'} {pm ? pm.label.replace('创建 ', '') : p}</span>
+                  return <span key={p} className="hook-badge" data-tooltip={`已授权：${pm?.label || p}`} tabIndex={0}>{pm?.icon || '🔓'} {pm ? pm.label.replace('创建 ', '') : p}</span>
                 })}
-                {!!e.workSpec && <span className="hook-badge" title={e.workSpec}>📜 SPEC</span>}
-                {!!e.autoPr && <span className="hook-badge" title="任务完结后自动建分支并提交 PR">🚀 自动PR</span>}
+                {!!e.workSpec && <span className="hook-badge" data-document={e.workSpec} tabIndex={0} role="button" data-document-title="工作 SPEC">📜 SPEC</span>}
+                {!!e.autoPr && <span className="hook-badge" data-tooltip="任务完结后自动建分支并提交 PR" tabIndex={0}>🚀 自动PR</span>}
               </div>
             </div>
             <div style={{ display: 'flex', gap: 6, marginTop: 10, flexWrap: 'wrap', alignItems: 'center' }}>
@@ -167,7 +170,7 @@ function EmployeeList({ onOpen, showToast }) {
   )
 }
 
-function EmployeeForm({ initial, onCancel, onDone, showToast }) {
+function EmployeeForm({ initial, onCancel, onDone, showToast, onDraft }) {
   const [name, setName] = useState(initial?.name || '')
   const [emoji, setEmoji] = useState(initial?.emoji || '👤')
   const [roleDesc, setRoleDesc] = useState(initial?.roleDesc || '')
@@ -180,8 +183,10 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
   const [prBaseBranch, setPrBaseBranch] = useState(initial?.prBaseBranch || '')
   const [specEditing, setSpecEditing] = useState(false)   // SPEC 大白框（全屏编辑）
   const [instances, setInstances] = useState([])
+  useEffect(() => { onDraft?.({ name, emoji, roleDesc, workSpec, autoPr, permissions: perms, instanceIds: bound, instances: instances.filter(i => bound.includes(String(i.id))) }) }, [name, emoji, roleDesc, workSpec, autoPr, perms, bound, instances, onDraft])
   const [occupied, setOccupied] = useState({})   // String(instId) → 占用员工标签（编辑自己时排除自己）
   const [saving, setSaving] = useState(false)
+  const formDirty = useDirtyValue({name,emoji,roleDesc,bound,perms,reportIntervalMin,workSpec,autoPr,notifyInstanceId,prBaseBranch}, initial?.id || 'new')
 
   useEffect(() => {
     fetch('/api/instances').then(r => r.json())
@@ -224,7 +229,7 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
   }
 
   return (
-    <div className="modal-mask" onClick={onCancel}>
+    <Surface kind="drawer" onClose={onCancel} form dirty={formDirty}>
       <div className="modal-box" style={{ maxWidth: 640 }} onClick={ev => ev.stopPropagation()}>
         <div className="modal-title">{initial ? `✏️ 编辑员工 · ${initial.emoji || ''} ${initial.name}` : '👔 新建数字员工'}</div>
         <div className="form-group">
@@ -336,7 +341,7 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
               它会注入这个员工的每次任务与聊天，优先级高于系统默认流程）
             </span>
           </label>
-          <div className="spec-preview" onClick={() => setSpecEditing(true)} title="点击打开大白框编辑">
+          <div className="spec-preview" onClick={() => setSpecEditing(true)} data-tooltip="点击打开大白框编辑" tabIndex={0}>
             {workSpec || '（未填写——点击编辑，像写 txt 文档一样，把这个员工在你这里干活要遵守的规矩写下来）'}
           </div>
           <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -352,7 +357,7 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
 
       {/* SPEC 大白框：全屏级编辑弹层（嵌套在表单弹窗之上，像编辑一份 txt 工作规范） */}
       {specEditing && (
-        <div className="modal-mask" onClick={e => { e.stopPropagation(); setSpecEditing(false) }}>
+        <Surface kind="drawer" onClose={e => { setSpecEditing(false) }} form>
           <div className="modal-box spec-modal" onClick={e => e.stopPropagation()}>
             <div className="modal-title">📜 {name || '员工'} 的工作 SPEC</div>
             <div style={{ fontSize: 12.5, color: 'var(--text-dim)', marginBottom: 8, lineHeight: 1.7 }}>
@@ -366,15 +371,17 @@ function EmployeeForm({ initial, onCancel, onDone, showToast }) {
               <button className="btn btn-primary" onClick={() => setSpecEditing(false)}>完成</button>
             </div>
           </div>
-        </div>
+        </Surface>
       )}
-    </div>
+    </Surface>
   )
 }
 
 function EmployeeDetail({ empId, onBack, showToast }) {
+  const confirmAction = useConfirm()
   const [data, setData] = useState(null)         // {employee, demands, messages, chatProgress}
   const [editing, setEditing] = useState(false)
+  const [draftEmployee, setDraftEmployee] = useState(null)
   const [dispatching, setDispatching] = useState(false)
   const [expanded, setExpanded] = useState({})
   const [replyTo, setReplyTo] = useState(null)   // 带着某条需求的上下文追问
@@ -404,7 +411,7 @@ function EmployeeDetail({ empId, onBack, showToast }) {
   }, [data?.unreadCount])
 
   async function removeEmployee() {
-    if (!confirm(`删除数字员工「${data.employee.name}」？全部需求记录将一并删除（运行中的会先停止）。`)) return
+    if (!await confirmAction({ title: '删除数字员工？', body: `删除数字员工「${data.employee.name}」？全部需求记录将一并删除（运行中的会先停止）。删除后无法恢复。`, confirmLabel: '删除员工' })) return
     await fetch(`/api/employees/${empId}`, { method: 'DELETE' })
     showToast('已删除员工', 'success')
     onBack()
@@ -422,7 +429,7 @@ function EmployeeDetail({ empId, onBack, showToast }) {
 
   if (!data) return <div className="card" style={{ color: 'var(--text-dim)', padding: '2rem', textAlign: 'center' }}>加载中…</div>
 
-  const emp = data.employee
+  const emp = editing && draftEmployee ? { ...data.employee, ...draftEmployee } : data.employee
   const demands = data.demands || []
   const running = demands.filter(d => d.status === 'RUNNING')
   const queuedCount = demands.filter(d => d.status === 'QUEUED').length
@@ -447,12 +454,12 @@ function EmployeeDetail({ empId, onBack, showToast }) {
           {(emp.instances || []).map(i => <span key={i.id} className="hook-badge dim">📡 {i.name}</span>)}
           {(emp.permissions || []).map(p => {
             const pm = EMP_PERMS.find(x => x.key === p)
-            return <span key={p} className="hook-badge" title={`已授权：${pm?.label || p}`}>{pm?.icon || '🔓'} {pm ? pm.label.replace('创建 ', '') : p}</span>
+            return <span key={p} className="hook-badge" data-tooltip={`已授权：${pm?.label || p}`} tabIndex={0}>{pm?.icon || '🔓'} {pm ? pm.label.replace('创建 ', '') : p}</span>
           })}
-          {!!emp.workSpec && <span className="hook-badge" title={emp.workSpec}>📜 SPEC {emp.workSpec.length}字</span>}
-          {!!emp.autoPr && <span className="hook-badge" title={"任务完结后自动建分支并提交 PR" + (emp.prBaseBranch ? ` → ${emp.prBaseBranch}` : "")}>🚀 自动PR</span>}
+          {!!emp.workSpec && <span className="hook-badge" data-document={emp.workSpec} tabIndex={0} role="button" data-document-title="工作 SPEC">📜 SPEC {emp.workSpec.length}字</span>}
+          {!!emp.autoPr && <span className="hook-badge" data-tooltip={"任务完结后自动建分支并提交 PR" + (emp.prBaseBranch ? ` → ${emp.prBaseBranch}` : "")} tabIndex={0}>🚀 自动PR</span>}
           {!!emp.notifyInstanceId && (
-            <span className="hook-badge dim" title="飞书通知实例：员工的消息经它的机器人推给你">
+            <span className="hook-badge dim" data-tooltip="飞书通知实例：员工的消息经它的机器人推给你" tabIndex={0}>
               📣 {(emp.instances || []).find(i => i.id === emp.notifyInstanceId)?.name || `#${emp.notifyInstanceId}`}
             </span>
           )}
@@ -478,7 +485,7 @@ function EmployeeDetail({ empId, onBack, showToast }) {
       <div className="card" style={{ padding: '14px 16px' }}>
         <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>
           🖥 实例工位
-          <span className={'live-dot' + (connected ? ' on' : '')} title={connected ? '实时执行流已连接' : '实时流未连接，轮询兜底中'}>
+          <span className={'live-dot' + (connected ? ' on' : '')} data-tooltip={connected ? '实时执行流已连接' : '实时流未连接，轮询兜底中'} tabIndex={0}>
             {connected ? '● 实时' : '○ 轮询'}
           </span>
           {queuedCount > 0 && <span style={{ fontWeight: 400, color: '#d97706', fontSize: 12.5, marginLeft: 8 }}>⏳ {queuedCount} 个需求排队中</span>}
@@ -532,7 +539,7 @@ function EmployeeDetail({ empId, onBack, showToast }) {
                   {st.label}
                 </span>
                 <b style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{d.title}</b>
-                {d.instanceName && <span className="hook-badge dim" title="执行实例（映射关系）">📡 {d.instanceName}</span>}
+                {d.instanceName && <span className="hook-badge dim" data-tooltip="执行实例（映射关系）" tabIndex={0}>📡 {d.instanceName}</span>}
                 <span style={{ fontSize: 12, color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>
                   {fmtTime(d.createdAt)}{d.elapsedMs > 0 ? ` · ${fmtDur(d.elapsedMs)}` : ''}
                 </span>
@@ -597,8 +604,8 @@ function EmployeeDetail({ empId, onBack, showToast }) {
       </div>
       </div>
 
-      {editing && <EmployeeForm initial={emp} onCancel={() => setEditing(false)}
-        onDone={() => { setEditing(false); load() }} showToast={showToast} />}
+      {editing && <EmployeeForm initial={emp} onDraft={setDraftEmployee} onCancel={() => { setDraftEmployee(null); setEditing(false) }}
+        onDone={() => { setDraftEmployee(null); setEditing(false); load() }} showToast={showToast} />}
       {dispatching && <DemandForm emp={emp} onCancel={() => setDispatching(false)}
         onDone={() => { setDispatching(false); load() }} showToast={showToast} />}
     </div>
@@ -704,7 +711,7 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
               onChange={e => setShellInstance(e.target.value)}>
               {(emp?.instances || []).map(i => <option key={i.id} value={i.id}>📡 {i.name}</option>)}
             </select>
-            <span style={{ fontSize: 12, color: '#b45309' }} title="Shell 是面板管理员的直通通道，以服务端进程权限执行，不受 Claude 沙箱档位约束">
+            <span style={{ fontSize: 12, color: '#b45309' }} data-tooltip="Shell 是面板管理员的直通通道，以服务端进程权限执行，不受 Claude 沙箱档位约束" tabIndex={0}>
               ⚠ admin 直通通道（不经沙箱）
             </span>
           </div>
@@ -758,7 +765,7 @@ function MsgBubble({ m, emp }) {
         <div className="emp-msg-head">
           <b style={{ color: t.color }}>{t.icon} {t.label}</b>
           <span>{fmtTime(m.createdAt)}</span>
-          <span title={m.feishuPushed ? '已推送到你的飞书' : '未推送飞书（实例未连接或未配置授权用户）——这里能看到就不漏事'}>
+          <span data-tooltip={m.feishuPushed ? '已推送到你的飞书' : '未推送飞书（实例未连接或未配置授权用户）——这里能看到就不漏事'} tabIndex={0}>
             {m.feishuPushed ? '📱✓ 飞书已推' : '📱✗'}
           </span>
         </div>
@@ -886,7 +893,7 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
   }
 
   return (
-    <div className="modal-mask" onClick={onCancel}>
+    <Surface kind="drawer" onClose={onCancel} form>
       <div className="modal-box" style={{ maxWidth: 640 }} onClick={ev => ev.stopPropagation()}>
         <div className="modal-title">📮 给 {emp.emoji || ''}「{emp.name}」下发需求</div>
         <div className="form-group">
@@ -940,7 +947,7 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
                   onChange={e => setWs(i, { path: e.target.value, error: '', ok: false })} onBlur={() => validateWs(i)} />
                 <input className="form-input" style={{ flex: 2 }} value={w.branch} placeholder="远端分支，如 origin/dev"
                   onChange={e => setWs(i, { branch: e.target.value, error: '', ok: false })} onBlur={() => validateWs(i)} />
-                <button className="btn" title="移除" onClick={() => setWorkspaces(ws => ws.filter((_, j) => j !== i))}>✕</button>
+                <button className="btn" data-tooltip="移除" onClick={() => setWorkspaces(ws => ws.filter((_, j) => j !== i))} aria-label="移除">✕</button>
               </div>
               {w.error ? <div style={{ fontSize: 12, color: '#dc2626', marginTop: 2 }}>{w.error}</div>
                 : w.ok ? <div style={{ fontSize: 12, color: '#16a34a', marginTop: 2 }}>✓ git 仓库，分支可用</div> : null}
@@ -959,7 +966,7 @@ function DemandForm({ emp, onCancel, onDone, showToast }) {
           <button className="btn btn-primary" onClick={submit} disabled={saving || (mismatch && !confirmMismatch)}>{saving ? '下发中…' : '下发需求'}</button>
         </div>
       </div>
-    </div>
+    </Surface>
   )
 }
 

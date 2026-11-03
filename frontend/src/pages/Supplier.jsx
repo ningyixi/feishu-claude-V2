@@ -1,8 +1,11 @@
+import Toast from '../components/ui/Toast'
+import { Surface, useConfirm, DraftPage, useDirtyValue } from '../components/ui/FloatingUI'
 import { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import SupplierWikiPanel from '../components/SupplierWikiPanel'
 import SupplierWorkflowPanel from '../components/SupplierWorkflowPanel'
+import { useSearchParams } from 'react-router-dom'
 
 // ===== 常量 =====
 
@@ -23,8 +26,9 @@ const emptyDoc = { type: 'url', value: '' }
 // ===== 主页面（视图路由） =====
 
 export default function Supplier() {
-  const [view, setView] = useState(() => /^\d+$/.test(new URLSearchParams(window.location.search).get('job') || '') ? 'game' : 'list')       // list | create | game | workflows
-  const [jobId, setJobId] = useState(() => { const value = new URLSearchParams(window.location.search).get('job'); return /^\d+$/.test(value || '') ? Number(value) : null })
+  const [route, setRoute] = useSearchParams()
+  const jobId = /^\d+$/.test(route.get('job') || '') ? Number(route.get('job')) : null
+  const view = route.get('view') || (jobId ? 'game' : 'list')
   const [toast, setToast] = useState(null)
 
   function showToast(msg, type) {
@@ -34,13 +38,13 @@ export default function Supplier() {
 
   return (
     <div>
-      {view === 'list' && <JobList onOpen={id => { setJobId(id); setView('game') }}
-        onCreate={() => setView('create')} onWorkflows={() => setView('workflows')} showToast={showToast} />}
-      {view === 'create' && <CreateJob onBack={() => setView('list')}
-        onCreated={id => { setJobId(id); setView('game') }} showToast={showToast} />}
-      {view === 'game' && jobId && <GameView jobId={jobId} onBack={() => { setJobId(null); setView('list') }} showToast={showToast} />}
-      {view === 'workflows' && <WorkflowEditor onBack={() => setView('list')} showToast={showToast} />}
-      {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
+      {view === 'list' && <JobList onOpen={id => setRoute({ job: String(id) })}
+        onCreate={() => setRoute({ view: 'create' })} onWorkflows={() => setRoute({ view: 'workflows' })} showToast={showToast} />}
+      {view === 'create' && <CreateJob onBack={() => setRoute({})}
+        onCreated={id => setRoute({ job: String(id) })} showToast={showToast} />}
+      {view === 'game' && jobId && <GameView jobId={jobId} onBack={() => setRoute({})} showToast={showToast} />}
+      {view === 'workflows' && <WorkflowEditor onBack={() => setRoute({})} showToast={showToast} />}
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
     </div>
   )
 }
@@ -48,6 +52,7 @@ export default function Supplier() {
 // ===== 工作列表 =====
 
 function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
+  const confirmAction = useConfirm()
   const [jobs, setJobs] = useState([])
   const [instances, setInstances] = useState([])
 
@@ -61,8 +66,8 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
 
   async function remove(j, e) {
     e.stopPropagation()
-    if (!confirm(`删除工作「${j.name}」？存档和节点记录将清除。`)) return
-    await fetch(`/api/supplier-jobs/${j.id}`, { method: 'DELETE' })
+    if (!await confirmAction({ kind: 'popconfirm', title: '删除工作？', body: `删除工作「${j.name}」？存档和节点记录将清除，删除后无法恢复。`, confirmLabel: '删除工作' })) return
+    const response = await fetch(`/api/supplier-jobs/${j.id}`, { method: 'DELETE' }); if (!response.ok) { const body = await response.json(); return showToast(body.error || '删除失败', 'error') }
     showToast('已删除', 'success')
     load()
   }
@@ -71,7 +76,7 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.2rem' }}>
         <div>
-          <h1 className="page-title" style={{ margin: 0 }}>🏭 供应商接入工作台</h1>
+          <h1 className="page-title" style={{ margin: 0 }}>供应商接入工作台</h1>
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
             每个工作 = 一局接入供应商的"游戏"：沿工作流节点推进，实例帮你干活，点完成变绿，全绿通关
           </div>
@@ -117,6 +122,7 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
 // ===== 新建工作（选模式 → 填"角色卡"） =====
 
 function CreateJob({ onBack, onCreated, showToast }) {
+  const pageFormRef = useRef(null)
   const occupied = useOccupied()
   const [step, setStep] = useState(1)
   const [mode, setMode] = useState('API')
@@ -153,14 +159,14 @@ function CreateJob({ onBack, onCreated, showToast }) {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || '创建失败')
       showToast('存档创建成功，游戏开始 🎮', 'success')
-      onCreated(data.id)
+      pageFormRef.current?.commit(); onCreated(data.id)
     } catch (e) {
       showToast(e.message, 'error')
     } finally { setSaving(false) }
   }
 
   return (
-    <div style={{ maxWidth: 760, margin: '0 auto' }}>
+    <DraftPage ref={pageFormRef}><div style={{ maxWidth: 760, margin: '0 auto' }}>
       <h1 className="page-title">🎮 新建接入工作 {step === 1 ? '· 选择体验模式' : '· 录入基础信息'}</h1>
 
       {step === 1 && (
@@ -173,7 +179,7 @@ function CreateJob({ onBack, onCreated, showToast }) {
                 直连供应商 REST/API：文档分析 → 接口实测 → 写代码 → 依赖检查 → 配置 → 联调 → 上线
               </div>
             </div>
-            <div className="mode-card disabled" title="CM 模式工作流尚未开发">
+            <div className="mode-card disabled" data-tooltip="CM 模式工作流尚未开发" tabIndex={0}>
               <div style={{ fontSize: 30 }}>🏨</div>
               <div style={{ fontWeight: 700, margin: '8px 0 4px' }}>新接 CM 供应商</div>
               <div style={{ fontSize: 12, color: 'var(--text-dim)'}}>即将上线（可先到工作流模板里自行设计）</div>
@@ -290,7 +296,7 @@ function CreateJob({ onBack, onCreated, showToast }) {
           </div>
         </div>
       )}
-    </div>
+    </div></DraftPage>
   )
 }
 
@@ -417,7 +423,7 @@ function GameView({ jobId, onBack, showToast }) {
           {job.createdByEmployeeId && <CreatorBadge id={job.createdByEmployeeId} name={job.createdByEmployeeName} />}
           <span className="hook-badge">{job.mode === 'API' ? 'API 供应商' : 'CM 供应商'}</span>
           {job.status === 'COMPLETED' && <span className="hook-badge" style={{ background: 'rgba(22,163,74,.1)', color: '#16a34a', borderColor: 'rgba(22,163,74,.3)' }}>已通关 🎉</span>}
-          <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={openDetail} title="查看/修改任务详细信息">📋 详情</button>
+          <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={openDetail} data-tooltip="查看/修改任务详细信息" aria-label="查看/修改任务详细信息">📋 详情</button>
           <div style={{ flex: 1 }} />
           <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>进度 {doneCount}/{nodes.length}</span>
           <div className="pass-bar" style={{ maxWidth: 140 }}><div className="pass-fill" style={{ width: `${nodes.length ? doneCount / nodes.length * 100 : 0}%` }} /></div>
@@ -458,7 +464,7 @@ function GameView({ jobId, onBack, showToast }) {
       </div>
 
       <SupplierWorkflowPanel job={job} showToast={showToast} onManaged={setManaged} />
-      <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
+      <div className="supplier-workspace-grid" style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
         {/* 左：节点操作卡 */}
         <div className="card" style={{ flex: 1, minWidth: 0, padding: '16px 20px' }}>
           {cur ? (
@@ -488,7 +494,7 @@ function GameView({ jobId, onBack, showToast }) {
                     ? <>⏸ 已挂起等你答复（停在最后一步：{cur.progress || '思考中'}）</>
                     : <><span className="spinner" style={{ width: 9, height: 9, marginRight: 6 }} />正在：{cur.progress || '思考中（首个工具动作到达前略等）…'}</>}
                   {cur.thinking && (
-                    <div style={{ marginTop: 4, fontSize: 11.5, color: '#7c3aed', maxHeight: 72, overflowY: 'auto', wordBreak: 'break-all' }} title="实例当前思考内容（估算还要在忙什么）">
+                    <div style={{ marginTop: 4, fontSize: 11.5, color: '#7c3aed', maxHeight: 72, overflowY: 'auto', wordBreak: 'break-all' }} data-tooltip="实例当前思考内容（估算还要在忙什么）" tabIndex={0}>
                       💭 {cur.thinking}
                     </div>
                   )}
@@ -599,7 +605,7 @@ function GameView({ jobId, onBack, showToast }) {
                     {n.artifact ? ' · 📄有工件' : ''}
                   </div>
                   {n.status === 'RUNNING' && n.progress && (
-                    <div style={{ fontSize: 11, color: '#3b82f6', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={n.progress}>
+                    <div style={{ fontSize: 11, color: '#3b82f6', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} data-tooltip={n.progress} tabIndex={0}>
                       ⏳ {n.progress}
                     </div>
                   )}
@@ -613,7 +619,7 @@ function GameView({ jobId, onBack, showToast }) {
 
       {/* 任务详情弹窗：创建后仍可回看/修改全部录入信息 */}
       {showDetail && detailDraft && (
-        <div className="modal-mask" onClick={() => setShowDetail(false)}>
+        <Surface kind="dialog" onClose={() => setShowDetail(false)} form>
           <div className="modal-box" style={{ maxWidth: 680, width: 'min(680px,94vw)' }} onClick={ev => ev.stopPropagation()}>
             <div className="modal-title">📋 任务详情 · {job.name}</div>
             <div className="modal-body">
@@ -642,7 +648,7 @@ function GameView({ jobId, onBack, showToast }) {
               <button className="btn btn-primary" onClick={saveDetail}>💾 保存</button>
             </div>
           </div>
-        </div>
+        </Surface>
       )}
 
       {/* R3 统一补充入口：供应商知识库（URL/PDF/聊天记录/笔记 随时补充） */}
@@ -831,6 +837,9 @@ const KB_STATUS = {
 }
 
 function KbPanel({ kbCode, showToast }) {
+  const confirmAction = useConfirm()
+  const [shared, setShared] = useState(true)
+  useEffect(() => { let alive = true; fetch('/api/supplier-jobs').then(r => r.ok ? r.json() : []).then(rows => { if (alive && Array.isArray(rows)) setShared(rows.filter(job => job.supplierCode === kbCode || job.kbCode === kbCode).length > 1) }).catch(() => {}); return () => { alive = false } }, [kbCode])
   const [entries, setEntries] = useState([])
   const [type, setType] = useState('chat')
   const [value, setValue] = useState('')
@@ -873,7 +882,7 @@ function KbPanel({ kbCode, showToast }) {
     const r = await fetch(`/api/supplier-kb/entries/${e.id}/md`)
     const d = await r.json().catch(() => ({}))
     if (!r.ok) return showToast(d.error || '读取失败', 'error')
-    setView({ id: e.id, title: e.title, content: d.content || '', editing: false })
+    setView({ id: e.id, title: e.title, content: d.content || '', originalContent: d.content || '', editing: false })
   }
   async function saveMd() {
     const res = await fetch(`/api/supplier-kb/entries/${view.id}/md`, {
@@ -890,7 +899,7 @@ function KbPanel({ kbCode, showToast }) {
     showToast('已重新排队解析', 'success'); load()
   }
   async function removeEntry(e) {
-    if (!confirm(`删除「${e.title || '该条目'}」？${(e.type === 'url' || e.type === 'pdf') && e.source ? '（来源仍在创建时的文档清单里，但不会再被自动同步回来）' : ''}`)) return
+    if (!await confirmAction({ kind: shared || /"site"\s*:\s*true/.test(e.metaJson || '') ? 'dialog' : 'popconfirm', title: '删除知识库条目？', body: `删除「${e.title || '该条目'}」？${(e.type === 'url' || e.type === 'pdf') && e.source ? '（来源仍在创建时的文档清单里，但不会再被自动同步回来）' : ''}删除后无法恢复，关联的站点页面也会删除，使用这些材料的 Wiki 将过期。`, confirmLabel: '删除条目' })) return
     const res = await fetch(`/api/supplier-kb/entries/${e.id}`, { method: 'DELETE' })
     const d = await res.json().catch(() => ({}))
     if (!res.ok) return showToast(d.error || '删除失败', 'error')
@@ -916,7 +925,7 @@ function KbPanel({ kbCode, showToast }) {
           placeholder={KB_TYPES[type].ph} value={value} onChange={e => setValue(e.target.value)} />
         {type === 'url' && (
           <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11.5, color: 'var(--text-dim)', alignSelf: 'center', cursor: 'pointer' }}
-            title="从入口页发现链接，按范围逐页抓取：严格同源 + 入口第一级路径（如 /docs/），最多发现 200 页；第 201 页发现即报错终止">
+            data-tooltip="从入口页发现链接，按范围逐页抓取：严格同源 + 入口第一级路径（如 /docs/），最多发现 200 页；第 201 页发现即报错终止" tabIndex={0}>
             <input type="checkbox" checked={site} onChange={ev => setSite(ev.target.checked)} />🕸 导入同站点文档目录（最多 200 页）
           </label>
         )}
@@ -934,9 +943,9 @@ function KbPanel({ kbCode, showToast }) {
           return (
             <div key={e.id} className="anim-in" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderTop: '1px solid var(--border,#eee)', flexWrap: 'wrap' }}>
               <span style={{ fontSize: 14 }}>{KB_TYPES[e.type]?.icon || '•'}</span>
-              <span style={{ fontSize: 12.5, fontWeight: 600, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.title}>{e.title || '(未命名)'}</span>
-              <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.source}>{e.source}</span>
-              {isSite && <span className="hook-badge dim" title="同站点目录递归抓取（≤200页）">🕸站点</span>}
+              <span style={{ fontSize: 12.5, fontWeight: 600, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} data-tooltip={e.title} tabIndex={0}>{e.title || '(未命名)'}</span>
+              <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} data-tooltip={e.source} tabIndex={0}>{e.source}</span>
+              {isSite && <span className="hook-badge dim" data-tooltip="同站点目录递归抓取（≤200页）" tabIndex={0}>🕸站点</span>}
               <span className="hook-badge" style={{ color: st.color, background: st.color + '14', borderColor: st.color + '40' }}>
                 {(e.status === 'PARSING' || e.status === 'PENDING') && <span className="spinner" style={{ width: 8, height: 8, marginRight: 4, borderWidth: 1.5 }} />}
                 {st.label}
@@ -947,7 +956,7 @@ function KbPanel({ kbCode, showToast }) {
                 </span>
               )}
               {isSite && m.partial && <span className="hook-badge" style={{ color: '#b45309', background: 'rgba(245,158,11,.12)', borderColor: 'rgba(245,158,11,.4)' }}>⚠️ 部分导入</span>}
-              {e.status === 'FAILED' && <span style={{ fontSize: 11, color: 'var(--error)' }} title={e.error}>{String(e.error || '').slice(0, 40)}</span>}
+              {e.status === 'FAILED' && <span style={{ fontSize: 11, color: 'var(--error)' }} data-tooltip={e.error} tabIndex={0}>{String(e.error || '').slice(0, 40)}</span>}
               <select aria-label="材料使用阶段" className="form-input" style={{ width: 130, fontSize: 11 }} value={e.contextStage || 'all'} onChange={ev => changeStage(e.id, ev.target.value)}>
                 <option value="all">通用 · 每次交付</option><option value="analysis">文档分析</option><option value="probe">接口实测</option><option value="codegen">代码开发</option><option value="archive">仅留档</option>
               </select>
@@ -967,7 +976,7 @@ function KbPanel({ kbCode, showToast }) {
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔄 重解析</button>
               )}
               <button className="btn" style={{ fontSize: 11, padding: '2px 8px', color: 'var(--error)', borderColor: 'rgba(220,38,38,.35)' }}
-                title="删除该条目" onClick={() => removeEntry(e)}>✕</button>
+                data-tooltip="删除该条目" onClick={() => removeEntry(e)} aria-label="删除该条目">✕</button>
             </div>
           )
         })}
@@ -975,7 +984,7 @@ function KbPanel({ kbCode, showToast }) {
 
       {/* 产物预览/编辑弹窗 */}
       {view && (
-        <div className="modal-mask" onClick={() => setView(null)}>
+        <Surface kind="drawer" onClose={() => setView(null)} form>
           <div className="modal-box" style={{ maxWidth: 860, width: 'min(860px,94vw)' }} onClick={ev => ev.stopPropagation()}>
             <div className="modal-title">📄 {view.title}（解析产物 Markdown）</div>
             <div className="modal-body">
@@ -992,7 +1001,7 @@ function KbPanel({ kbCode, showToast }) {
               <button className="btn" onClick={() => setView(null)}>关闭</button>
               {view.editing ? (
                 <>
-                  <button className="btn" onClick={() => setView(v => ({ ...v, editing: false }))}>取消编辑</button>
+                  <button className="btn" onClick={() => setView(v => ({ ...v, content: v.originalContent, editing: false }))}>取消编辑</button>
                   <button className="btn btn-primary" onClick={saveMd}>💾 保存校正</button>
                 </>
               ) : (
@@ -1000,7 +1009,7 @@ function KbPanel({ kbCode, showToast }) {
               )}
             </div>
           </div>
-        </div>
+        </Surface>
       )}
 
       {pagesModal && (
@@ -1014,7 +1023,7 @@ function KbPanel({ kbCode, showToast }) {
       )}
 
       {pview && (
-        <div className="modal-mask" onClick={() => setPview(null)}>
+        <Surface kind="drawer" onClose={() => setPview(null)}>
           <div className="modal-box" style={{ maxWidth: 820, width: 'min(820px,94vw)' }} onClick={ev => ev.stopPropagation()}>
             <div className="modal-title">📄 {pview.title}（页面正文）</div>
             <div className="modal-body">
@@ -1026,7 +1035,7 @@ function KbPanel({ kbCode, showToast }) {
               <button className="btn" onClick={() => setPview(null)}>关闭</button>
             </div>
           </div>
-        </div>
+        </Surface>
       )}
     </div>
   )
@@ -1051,7 +1060,7 @@ function PagesModal({ kbCode, entry, onClose, onView, showToast }) {
   }, [entry.id, entry.status])
   const m = (() => { try { return JSON.parse(entry.metaJson || '{}') } catch { return {} } })()
   return (
-    <div className="modal-mask" onClick={onClose}>
+    <Surface kind="drawer" onClose={onClose}>
       <div className="modal-box" style={{ maxWidth: 920, width: 'min(920px,95vw)' }} onClick={ev => ev.stopPropagation()}>
         <div className="modal-title">📑 站点页面清单 · {entry.title}
           <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--text-dim)', marginLeft: 8 }}>
@@ -1067,9 +1076,9 @@ function PagesModal({ kbCode, entry, onClose, onView, showToast }) {
             return (
               <div key={p.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '6px 0', borderTop: '1px solid var(--border,#eee)', flexWrap: 'wrap' }}>
                 <span className="hook-badge" style={{ color: ps.color, background: ps.color + '14', borderColor: ps.color + '40', flexShrink: 0 }}>{ps.label}</span>
-                <span style={{ fontSize: 12, fontWeight: 600, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.title}>{p.title || '(无标题)'}</span>
-                <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', flex: 1, minWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.url}>{p.url}</span>
-                {p.status === 'failed' && <span style={{ fontSize: 11, color: 'var(--error)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.error}>{p.error}</span>}
+                <span style={{ fontSize: 12, fontWeight: 600, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} data-tooltip={p.title} tabIndex={0}>{p.title || '(无标题)'}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', flex: 1, minWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} data-tooltip={p.url} tabIndex={0}>{p.url}</span>
+                {p.status === 'failed' && <span style={{ fontSize: 11, color: 'var(--error)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} data-tooltip={p.error} tabIndex={0}>{p.error}</span>}
                 {p.status === 'loaded' && p.mdPath && <button className="btn" style={{ fontSize: 11, padding: '2px 10px', flexShrink: 0 }} onClick={() => onView(p)}>预览</button>}
               </div>
             )
@@ -1079,7 +1088,7 @@ function PagesModal({ kbCode, entry, onClose, onView, showToast }) {
           <button className="btn" onClick={onClose}>关闭</button>
         </div>
       </div>
-    </div>
+    </Surface>
   )
 }
 
@@ -1228,6 +1237,8 @@ function DevChatPanel({ jobId, nodeId, disabled, showToast }) {
 // ===== 工作流模板编辑器 =====
 
 function WorkflowEditor({ onBack, showToast }) {
+  const pageFormRef = useRef(null)
+  const confirmAction = useConfirm()
   const [templates, setTemplates] = useState([])
   const [editing, setEditing] = useState(null)   // {id?, name, description, mode, nodes:[...]}
 
@@ -1261,18 +1272,20 @@ function WorkflowEditor({ onBack, showToast }) {
       const d = await res.json().catch(() => ({}))
       return showToast(d.error || '保存失败', 'error')
     }
-    showToast('模板已保存', 'success')
+    pageFormRef.current?.commit(); showToast('模板已保存', 'success')
     setEditing(null)
     load()
   }
   async function removeTemplate(t) {
-    if (!confirm(`删除模板「${t.name}」？（已创建的工作存档不受影响）`)) return
+    if (!await confirmAction({ kind: 'popconfirm', title: '删除模板？', body: `删除模板「${t.name}」？（已创建的工作存档不受影响）删除后无法恢复。`, confirmLabel: '删除模板' })) return
     const res = await fetch(`/api/workflows/${t.id}`, { method: 'DELETE' })
     const d = await res.json().catch(() => ({}))
     if (!res.ok) return showToast(d.error || '删除失败', 'error')
     showToast('已删除', 'success')
     load()
   }
+
+  const templateDirty = useDirtyValue(editing, editing ? `template:${editing.id || 'new'}` : 'closed')
 
   // 节点编辑
   const [nodeDraft, setNodeDraft] = useState(null)   // {index, node}
@@ -1288,7 +1301,7 @@ function WorkflowEditor({ onBack, showToast }) {
 
   if (editing) {
     return (
-      <div>
+      <DraftPage ref={pageFormRef} dirty={templateDirty}><div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: '1rem' }}>
           <button className="btn" onClick={() => setEditing(null)}>← 返回</button>
           <h1 className="page-title" style={{ margin: 0, fontSize: 18 }}>{editing.id ? '编辑模板' : '新建模板'}</h1>
@@ -1313,7 +1326,7 @@ function WorkflowEditor({ onBack, showToast }) {
             <div key={i} className="wf-editor-row">
               <span style={{ color: 'var(--text-dim)', fontSize: 12, width: 24 }}>{i + 1}</span>
               <span style={{ width: 90, fontSize: 12 }}>{NODE_TYPE[n.type]?.icon} {NODE_TYPE[n.type]?.label}</span>
-              <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{n.title || '(未命名)'}</span>
+              <span style={{ flex: 1, fontSize: 13, fontWeight: 600 }}>{(nodeDraft?.index === i ? nodeDraft.node.title : n.title) || '(未命名)'}</span>
               <span style={{ fontSize: 12, color: 'var(--text-dim)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{n.description}</span>
               <button className="btn" style={{ fontSize: 12, padding: '2px 8px' }} onClick={() => moveNode(i, -1)}>↑</button>
               <button className="btn" style={{ fontSize: 12, padding: '2px 8px' }} onClick={() => moveNode(i, 1)}>↓</button>
@@ -1334,7 +1347,7 @@ function WorkflowEditor({ onBack, showToast }) {
         </div>
 
         {nodeDraft && (
-          <div className="modal-mask" onClick={() => setNodeDraft(null)}>
+          <Surface kind="drawer" onClose={() => setNodeDraft(null)} form>
             <div className="modal-box" style={{ maxWidth: 800, width: 'min(800px,94vw)' }} onClick={e => e.stopPropagation()}>
               <div className="modal-title">{nodeDraft.index >= 0 ? `编辑节点 ${nodeDraft.index + 1}` : '添加节点'}</div>
               <div className="modal-body">
@@ -1381,12 +1394,12 @@ function WorkflowEditor({ onBack, showToast }) {
                     return { ...e, nodes }
                   })
                   setNodeDraft(null)
-                }}>确定</button>
+                }}>应用到模板</button>
               </div>
             </div>
-          </div>
+          </Surface>
         )}
-      </div>
+      </div></DraftPage>
     )
   }
 
@@ -1394,7 +1407,7 @@ function WorkflowEditor({ onBack, showToast }) {
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: '1rem' }}>
         <button className="btn" onClick={onBack}>← 工作台</button>
-        <h1 className="page-title" style={{ margin: 0 }}>🛠 工作流模板</h1>
+        <h1 className="page-title" style={{ margin: 0 }}>工作流模板</h1>
         <div style={{ flex: 1 }} />
         <button className="btn btn-primary" onClick={startCreate}>+ 新建模板</button>
       </div>
@@ -1413,7 +1426,7 @@ function WorkflowEditor({ onBack, showToast }) {
           {t.description && <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 6 }}>{t.description}</div>}
           <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 8 }}>
             {safeParseNodes(t.nodesJson).map((n, i) => (
-              <span key={i} className="hook-badge dim" title={n.description}>{i + 1}. {NODE_TYPE[n.type]?.icon} {n.title}</span>
+              <span key={i} className="hook-badge dim" data-tooltip={n.description} tabIndex={0}>{i + 1}. {NODE_TYPE[n.type]?.icon} {n.title}</span>
             ))}
           </div>
         </div>
@@ -1427,8 +1440,8 @@ function WorkflowEditor({ onBack, showToast }) {
 /** 创建者标签：数字员工（👔 名字）或管理员（👑 admin） */
 function CreatorBadge({ id, name, dim = false }) {
   return id
-    ? <span className={'hook-badge' + (dim ? ' dim' : '')} title={`由数字员工「${name || id}」创建`}>👔 {name || `员工#${id}`}</span>
-    : <span className="hook-badge dim" title="由管理员在面板创建">👑 admin</span>
+    ? <span className={'hook-badge' + (dim ? ' dim' : '')} data-tooltip={`由数字员工「${name || id}」创建`} tabIndex={0}>👔 {name || `员工#${id}`}</span>
+    : <span className="hook-badge dim" data-tooltip="由管理员在面板创建" tabIndex={0}>👑 admin</span>
 }
 
 /** 实例独占绑定映射：String(instId) → {empId, label}（被数字员工绑定的实例不可再分配给他人） */

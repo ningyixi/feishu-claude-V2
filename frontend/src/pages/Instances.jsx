@@ -1,3 +1,5 @@
+import Toast from '../components/ui/Toast'
+import { Surface, useConfirm, useQueryParam } from '../components/ui/FloatingUI'
 import { useState, useEffect } from 'react'
 import ChatHistory from './ChatHistory'
 
@@ -71,8 +73,8 @@ function StatusBadge({ st }) {
     <span
       className={'status-badge' + (st.busy ? ' busy' : '')}
       style={{ color, background: color + '14', borderColor: color + '40' }}
-      title={st.detail}
-    >
+      data-tooltip={st.detail}
+     tabIndex={0}>
       <span className="status-dot" />
       {st.emoji} {st.label}
     </span>
@@ -80,12 +82,15 @@ function StatusBadge({ st }) {
 }
 
 export default function Instances() {
+  const confirmAction = useConfirm()
   const [list, setList] = useState([])
   const [editing, setEditing] = useState(null)
   const [form, setForm] = useState({ ...EMPTY })
   const [tests, setTests] = useState({})
   const [toast, setToast] = useState(null)
-  const [chatInstance, setChatInstance] = useState(null)
+  const [chatId, setChatId] = useQueryParam('instance')
+  const chatInstance = list.find(instance => String(instance.id) === chatId)
+  const setChatInstance = instance => setChatId(instance?.id || null)
   const [showForm, setShowForm] = useState(false)
   const [statuses, setStatuses] = useState({})
   // 实例独占绑定：instId(String) → 占用它的数字员工标签
@@ -167,9 +172,9 @@ export default function Instances() {
   }
 
   async function handleDelete(id) {
-    if (!confirm('确定删除此实例？')) return
+    if (!await confirmAction({ kind: occupied[String(id)] || statuses[id]?.busy ? 'dialog' : 'popconfirm', title: '删除实例？', body: '确定删除此实例？删除后无法恢复，依赖此实例的工作可能受影响。', confirmLabel: '删除实例' })) return
     try {
-      await fetch(`/api/instances/${id}`, { method: 'DELETE' })
+      const response = await fetch(`/api/instances/${id}`, { method: 'DELETE' }); if (!response.ok) throw new Error('删除失败')
       showToast('已删除', 'success')
       load()
     } catch (e) { showToast('删除失败', 'error') }
@@ -200,7 +205,7 @@ export default function Instances() {
   return (
     <div>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
-        <h1 className="page-title" style={{ margin: 0 }}>📡 实例管理</h1>
+        <h1 className="page-title" style={{ margin: 0 }}>实例管理</h1>
         <button className="btn btn-primary" onClick={startCreate}>+ 新增实例</button>
       </div>
 
@@ -213,7 +218,8 @@ export default function Instances() {
 
       {/* 实例列表：卡片网格（一行 3~4 个），meta 纵向全量展示，悬停抬升 */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(340px, 1fr))', gap: '12px', alignItems: 'start' }}>
-        {list.map(inst => {
+        {list.map(savedInstance => {
+          const inst = editing === savedInstance.id ? { ...savedInstance, ...form, claudeWorkingDir: form.workingDir, shellWorkingDir: form.workingDir } : savedInstance
           const feishuTest = tests[`${inst.id}-feishu`]
           const claudeTest = tests[`${inst.id}-claude`]
           const st = statuses[inst.id]
@@ -230,13 +236,13 @@ export default function Instances() {
               {(occupied[String(inst.id)] || inst.sandboxLevel > 0) && (
                 <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginTop: 6 }}>
                   {occupied[String(inst.id)] && (
-                    <span className="hook-badge" title={`已被数字员工「${occupied[String(inst.id)]}」独占绑定，不能再分配给其他人（包括 admin）；要先在该员工处解绑`}>
+                    <span className="hook-badge" data-tooltip={`已被数字员工「${occupied[String(inst.id)]}」独占绑定，不能再分配给其他人（包括 admin）；要先在该员工处解绑`} tabIndex={0}>
                       👔 {occupied[String(inst.id)]}
                     </span>
                   )}
                   {inst.sandboxLevel > 0 && (
                     <span className="hook-badge" style={{ color: inst.sandboxLevel === 2 ? '#9333ea' : '#0891b2' }}
-                      title={SANDBOX_LEVELS.find(s => s.value === inst.sandboxLevel)?.desc}>
+                      data-tooltip={SANDBOX_LEVELS.find(s => s.value === inst.sandboxLevel)?.desc} tabIndex={0}>
                       {inst.sandboxLevel === 2 ? '🔒 严格沙箱' : '🛡 宽松沙箱'}
                     </span>
                   )}
@@ -244,35 +250,35 @@ export default function Instances() {
               )}
               {/* meta 纵向：每项一行，截断 + 悬停看全量 */}
               <div className="inst-rows">
-                <div className="inst-row" title={inst.authorizedOpenId || '未配置'}>
+                <div className="inst-row" data-tooltip={inst.authorizedOpenId || '未配置'} tabIndex={0}>
                   <span className="inst-k">👤 OpenID</span>
                   <span className="inst-v">{inst.authorizedOpenId || '未配置'}</span>
                 </div>
-                <div className="inst-row" title={dir}>
+                <div className="inst-row" data-tooltip={dir} tabIndex={0}>
                   <span className="inst-k">📁 目录</span>
                   <span className="inst-v">{dir}</span>
                 </div>
-                <div className="inst-row" title={inst.claudeModel || '跟随网关默认模型'}>
+                <div className="inst-row" data-tooltip={inst.claudeModel || '跟随网关默认模型'} tabIndex={0}>
                   <span className="inst-k">🧠 模型</span>
                   <span className="inst-v">{inst.claudeModel || '网关默认'}</span>
                 </div>
-                <div className="inst-row" title={inst.feishuAppId || '未配置'}>
+                <div className="inst-row" data-tooltip={inst.feishuAppId || '未配置'} tabIndex={0}>
                   <span className="inst-k">🆔 APP</span>
                   <span className="inst-v">{inst.feishuAppId || '未配置'}</span>
                 </div>
               </div>
-              {st?.detail && <div className="status-detail inst-detail" title={st.detail}>💬 {st.detail}</div>}
+              {st?.detail && <div className="status-detail inst-detail" data-tooltip={st.detail} tabIndex={0}>💬 {st.detail}</div>}
               {/* 操作行：图标 + 文字 */}
               <div style={{ display: 'flex', gap: 6, marginTop: 9, flexWrap: 'wrap' }}>
                 <button className="btn btn-primary" onClick={() => setChatInstance(inst)} style={{ fontSize: 12.5, padding: '3px 9px' }}>💬 对话</button>
-                <button className="btn" onClick={() => runTest(inst.id, 'feishu')} disabled={feishuTest?.status === 'loading'}
-                  style={{ fontSize: 12.5, padding: '3px 9px' }} title="测试飞书连接">
+                <span className="tooltip-anchor" data-tooltip="测试飞书连接" tabIndex={feishuTest?.status === 'loading' ? 0 : -1}><button className="btn" onClick={() => runTest(inst.id, 'feishu')} disabled={feishuTest?.status === 'loading'}
+                  style={{ fontSize: 12.5, padding: '3px 9px' }}  aria-label="测试飞书连接">
                   {feishuTest?.status === 'loading' ? '⏳ 测试中' : '🐦 测飞书'}
-                </button>
-                <button className="btn" onClick={() => runTest(inst.id, 'claude')} disabled={claudeTest?.status === 'loading'}
-                  style={{ fontSize: 12.5, padding: '3px 9px' }} title="测试 Claude">
+                </button></span>
+                <span className="tooltip-anchor" data-tooltip="测试 Claude" tabIndex={claudeTest?.status === 'loading' ? 0 : -1}><button className="btn" onClick={() => runTest(inst.id, 'claude')} disabled={claudeTest?.status === 'loading'}
+                  style={{ fontSize: 12.5, padding: '3px 9px' }}  aria-label="测试 Claude">
                   {claudeTest?.status === 'loading' ? '⏳ 测试中' : '🤖 测 Claude'}
-                </button>
+                </button></span>
                 <button className="btn" onClick={() => startEdit(inst)} style={{ fontSize: 12.5, padding: '3px 9px', marginLeft: 'auto' }}>✏️ 编辑</button>
                 <button className="btn" onClick={() => handleDelete(inst.id)} style={{ fontSize: 12.5, padding: '3px 9px', color: 'var(--error)' }}>🗑 删除</button>
               </div>
@@ -296,7 +302,7 @@ export default function Instances() {
 
       {/* 新增/编辑实例弹窗 */}
       {showForm && (
-        <div className="modal-mask" onClick={cancelEdit}>
+        <Surface kind="drawer" onClose={cancelEdit} form>
           <div className="modal-box" style={{ maxWidth: 720, width: 'min(720px, 94vw)' }} onClick={e => e.stopPropagation()}>
             <div className="modal-title">{editing ? '✏️ 编辑实例' : '➕ 新增实例'}</div>
             <div className="modal-body">
@@ -371,10 +377,10 @@ export default function Instances() {
               <button className="btn btn-primary" onClick={handleSave}>{editing ? '保存' : '创建'}</button>
             </div>
           </div>
-        </div>
+        </Surface>
       )}
 
-      {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
     </div>
   )
 }

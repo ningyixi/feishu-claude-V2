@@ -1,3 +1,5 @@
+import Toast from '../components/ui/Toast'
+import { Surface, useConfirm, useQueryParam, useFormSaved } from '../components/ui/FloatingUI'
 import { useState, useEffect, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -49,9 +51,10 @@ function fmtTokens(n) {
 // ===== 主页面 =====
 
 export default function E2ETest() {
+  const confirmAction = useConfirm()
   const [instances, setInstances] = useState([])
   const [tasks, setTasks] = useState([])
-  const [activeTaskId, setActiveTaskId] = useState(null)
+  const [activeTaskId, setActiveTaskId] = useQueryParam('task')
   const [taskInfo, setTaskInfo] = useState(null)     // 含 members/pipeline
   const [turns, setTurns] = useState([])             // 群聊消息（按 turnIndex 稀疏数组）
   const [connected, setConnected] = useState(false)
@@ -59,7 +62,7 @@ export default function E2ETest() {
   const [addressee, setAddressee] = useState('auto')
   const [modal, setModal] = useState(null)
   const [toast, setToast] = useState(null)
-  const [showCreate, setShowCreate] = useState(false)
+  const [showCreate, setShowCreate] = useQueryParam('create', false)
   const [search, setSearch] = useState('')
   const [bumped, setBumped] = useState({})           // taskId → 本地收到活动的时间（排序用）
   const [lastRead, setLastRead] = useState(loadLastRead)   // taskId → 已读消息数（localStorage 持久化）
@@ -344,7 +347,7 @@ export default function E2ETest() {
 
   async function handleDelete(id, ev) {
     ev.stopPropagation()
-    if (!confirm('删除此测试任务？群聊记录将丢失（各实例自己的飞书会话不受影响）。')) return
+    if (!await confirmAction({ kind: tasks.find(t => t.id === id)?.pipelineDone ? 'popconfirm' : 'dialog', title: '删除测试任务？', body: '删除此测试任务？群聊记录将丢失（各实例自己的飞书会话不受影响）。删除后无法恢复，进行中的任务会停止。', confirmLabel: '删除测试任务' })) return
     try {
       await fetch(`/api/e2e/tasks/${id}`, { method: 'DELETE' })
       if (activeTaskId === id) { setActiveTaskId(null); setMobileChat(false) }
@@ -401,7 +404,7 @@ export default function E2ETest() {
             const st = taskStatus(t)
             return (
               <div key={t.id} className={'e2e-item' + (t.id === activeTaskId ? ' active' : '') + (unread > 0 ? ' has-unread' : '')} onClick={() => openTask(t.id)}
-                title={`需求: ${t.requirement}\n成员: ${(t.members || []).map(m => m.roleEmoji + m.name).join(' / ')}\n创建者: ${t.creatorEmployeeId ? '👔 数字员工「' + (t.creatorEmployeeName || t.creatorEmployeeId) + '」' : '👑 admin'}`}>
+                data-tooltip={`需求: ${t.requirement}\n成员: ${(t.members || []).map(m => m.roleEmoji + m.name).join(' / ')}\n创建者: ${t.creatorEmployeeId ? '👔 数字员工「' + (t.creatorEmployeeName || t.creatorEmployeeId) + '」' : '👑 admin'}`} tabIndex={0}>
                 <div className="e2e-avatar" style={{ background: avatarColor(t.id) }}>
                   {avatarText(t)}
                   <span className="e2e-avatar-tag">{t.creatorEmployeeId ? '👔' : '👑'}</span>
@@ -417,7 +420,7 @@ export default function E2ETest() {
                   </div>
                 </div>
                 {unread > 0 && <span className="e2e-unread">{unread > 99 ? '99+' : unread}</span>}
-                <button className="task-del e2e-item-del" title="删除群聊" onClick={e => handleDelete(t.id, e)}>×</button>
+                <button className="task-del e2e-item-del" data-tooltip="删除群聊" onClick={e => handleDelete(t.id, e)} aria-label="删除群聊">×</button>
               </div>
             )
           })}
@@ -428,23 +431,23 @@ export default function E2ETest() {
       <div className="e2e-main">
         <div className="card chat-area" style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', padding: 0, marginBottom: 0 }}>
           <div className="chat-header" style={{ padding: '7px 14px' }}>
-            <button className="btn e2e-back" onClick={() => setMobileChat(false)} title="返回群聊列表">‹ 返回</button>
+            <button className="btn e2e-back" onClick={() => setMobileChat(false)} data-tooltip="返回群聊列表" aria-label="返回群聊列表">‹ 返回</button>
             {taskInfo ? (
               <>
-                <span className="e2e-chat-title" title={taskInfo.requirement}>💬 {truncate(taskInfo.requirement, 40) || taskInfo.id}</span>
+                <span className="e2e-chat-title" data-tooltip={taskInfo.requirement} tabIndex={0}>💬 {truncate(taskInfo.requirement, 40) || taskInfo.id}</span>
                 <code style={{ fontSize: 11, color: 'var(--text-dim)' }}>{taskInfo.id}</code>
                 {taskInfo.creatorEmployeeId
-                  ? <span className="hook-badge" title="由数字员工创建">👔 {taskInfo.creatorEmployeeName || `员工#${taskInfo.creatorEmployeeId}`}</span>
-                  : <span className="hook-badge dim" title="由管理员创建">👑 admin</span>}
+                  ? <span className="hook-badge" data-tooltip="由数字员工创建" tabIndex={0}>👔 {taskInfo.creatorEmployeeName || `员工#${taskInfo.creatorEmployeeId}`}</span>
+                  : <span className="hook-badge dim" data-tooltip="由管理员创建" tabIndex={0}>👑 admin</span>}
                 <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
                   {taskInfo.members.map(m => `${m.roleEmoji}${m.name}`).join(' · ')}
                   {taskInfo.commMode === 'a2a' ? ' · 🔗 A2A 任务信封'
                     : taskInfo.sharedDir ? ' · 📁 同目录文件中转' : ' · 📨 群聊全文传递'}
                 </span>
                 {(taskInfo.pipeline?.runIndex || 1) > 1 && (
-                  <span style={{ color: '#2563eb', fontSize: 12, fontWeight: 700 }} title="同群续派的第 N 轮任务">🔁 第 {taskInfo.pipeline.runIndex} 轮</span>
+                  <span style={{ color: '#2563eb', fontSize: 12, fontWeight: 700 }} data-tooltip="同群续派的第 N 轮任务" tabIndex={0}>🔁 第 {taskInfo.pipeline.runIndex} 轮</span>
                 )}
-                {(taskInfo.busy || (taskInfo.pipelineStarted && !taskInfo.pipelineDone)) && <span className="spinner" title="流水线执行中" />}
+                {(taskInfo.busy || (taskInfo.pipelineStarted && !taskInfo.pipelineDone)) && <span className="spinner" data-tooltip="流水线执行中" tabIndex={0} />}
                 {taskStatus(taskInfo) && <span className={'e2e-status ' + taskStatus(taskInfo).cls}>{taskStatus(taskInfo).label}</span>}
                 <span className={'conn-badge ' + (connected ? 'on' : 'off')}>{connected ? '● 已连接' : '○ 未连接'}</span>
                 <button className="btn" style={{ fontSize: 12, padding: '3px 10px' }}
@@ -546,18 +549,18 @@ export default function E2ETest() {
 
       {/* 创建任务弹窗 */}
       {showCreate && (
-        <div className="modal-mask" onClick={() => setShowCreate(false)}>
+        <Surface kind="page" onClose={() => setShowCreate(false)} form>
           <div className="modal-box" style={{ maxWidth: 1500, width: 'min(1500px, 96vw)' }} onClick={ev => ev.stopPropagation()}>
             <div className="modal-title">🧪 新建 E2E 测试群聊任务</div>
             <CreatePanel instances={instances} onClose={() => setShowCreate(false)}
               onCreated={async (id) => { setShowCreate(false); await loadTasks(); openTask(id) }}
               setModal={setModal} showToast={showToast} />
           </div>
-        </div>
+        </Surface>
       )}
 
       {modal && (
-        <div className="modal-mask" onClick={() => setModal(null)}>
+        <Surface kind="dialog" onClose={() => setModal(null)}>
           <div className="modal-box" onClick={ev => ev.stopPropagation()}>
             <div className="modal-title">{modal.title}</div>
             <div className="modal-body">{modal.body}</div>
@@ -566,9 +569,9 @@ export default function E2ETest() {
               <button className="btn btn-primary" onClick={modal.onConfirm}>{modal.confirmLabel || '仍要继续创建'}</button>
             </div>
           </div>
-        </div>
+        </Surface>
       )}
-      {toast && <div className={`toast toast-${toast.type}`}>{toast.msg}</div>}
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
     </div>
   )
 }
@@ -618,6 +621,7 @@ function taskStatus(t) {
 // ===== 创建面板 =====
 
 function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
+  const formSaved = useFormSaved()
   const [pick, setPick] = useState({ programmer: '', designer: '', executor: '' })
   const [requirement, setRequirement] = useState('')
   const [autoFix, setAutoFix] = useState(true)
@@ -686,7 +690,7 @@ function CreatePanel({ instances, onClose, onCreated, setModal, showToast }) {
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || '创建失败')
       showToast('群聊任务已创建，输入测试指令即可启动', 'success')
-      onCreated(data.id)
+      formSaved(); onCreated(data.id)
     } catch (e) {
       showToast('创建失败: ' + e.message, 'error')
     } finally {
@@ -783,7 +787,7 @@ function RunBlock({ run }) {
     <div className="run-block">
       <div className="run-block-head" onClick={() => setOpen(v => !v)}>
         <span>{done ? '✅' : failed ? '❌' : '⏸'} 第 {run.runIndex} 轮任务</span>
-        <span className="run-req" title={run.requirement}>{truncate(run.requirement, 16)}</span>
+        <span className="run-req" data-tooltip={run.requirement} tabIndex={0}>{truncate(run.requirement, 16)}</span>
         <span style={{ marginLeft: 'auto', fontSize: 12, color: done ? 'var(--success, #16a34a)' : failed ? 'var(--error)' : 'var(--text-dim)' }}>
           {passed}/{(run.cases || []).length}
         </span>
@@ -836,7 +840,7 @@ function StageStepper({ pipeline }) {
       {pipeline.rounds?.length > 0 && (
         <div className="round-timeline">
           {pipeline.rounds.map(r => (
-            <span key={r.round} className={'round-chip' + (r.failed === 0 ? ' allpass' : '')} title={r.fixSummary || ''}>
+            <span key={r.round} className={'round-chip' + (r.failed === 0 ? ' allpass' : '')} data-tooltip={r.fixSummary || ''} tabIndex={0}>
               第{r.round}轮 {r.passed}/{r.total} 通过{r.failed > 0 && ` · ❌${r.failed}`}{r.blocked > 0 && ` · 🚫${r.blocked}`}
             </span>
           ))}
@@ -884,7 +888,7 @@ function RoundHistory({ rounds }) {
             const st = CASE_STATUS[c.status] || CASE_STATUS.pending
             const note = c.status !== 'pass' ? (c.failReason || c.evidence || '') : ''
             return (
-              <div key={c.id} className="round-case-row" title={note ? `${c.id}: ${note}` : c.id}>
+              <div key={c.id} className="round-case-row" data-tooltip={note ? `${c.id}: ${note}` : c.id} tabIndex={0}>
                 <span>{st.icon}</span>
                 <b style={{ fontSize: 12 }}>{c.id}</b>
                 <span className="rc-title">{c.title}</span>
@@ -892,7 +896,7 @@ function RoundHistory({ rounds }) {
             )
           })}
           {(r.results || []).length === 0 && <div className="round-case-row" style={{ color: 'var(--text-dim)' }}>（本轮无逐用例明细）</div>}
-          {r.fixSummary && <div className="round-fix" title={r.fixSummary}>🔧 修复: {truncate(r.fixSummary, 60)}</div>}
+          {r.fixSummary && <div className="round-fix" data-tooltip={r.fixSummary} tabIndex={0}>🔧 修复: {truncate(r.fixSummary, 60)}</div>}
         </div>
       ))}
     </div>
@@ -938,7 +942,7 @@ function GroupMessage({ turn, live }) {
       const first = String(turn.authorName).split(' ')[0] || '👔'
       return (
         <div className="msg-bot">
-          <div className="msg-avatar" style={{ background: 'rgba(37,99,235,0.12)', color: '#2563eb' }} title={turn.authorName}>
+          <div className="msg-avatar" style={{ background: 'rgba(37,99,235,0.12)', color: '#2563eb' }} data-tooltip={turn.authorName} tabIndex={0}>
             {first.length <= 8 ? first : '👔'}
           </div>
           <div className="bubble-bot" style={{ borderLeft: '3px solid #2563eb' }}>
@@ -967,7 +971,7 @@ function GroupMessage({ turn, live }) {
   const role = roleOf(turn.author)
   return (
     <div className="msg-bot">
-      <div className="msg-avatar" style={{ background: role.color + '18', color: role.color }} title={turn.authorName}>
+      <div className="msg-avatar" style={{ background: role.color + '18', color: role.color }} data-tooltip={turn.authorName} tabIndex={0}>
         {role.emoji}
       </div>
       <div className="bubble-bot" style={{ borderLeft: `3px solid ${role.color}` }}>
@@ -997,7 +1001,7 @@ function A2AStrip({ a2a }) {
   const st = A2A_STATUS[a2a.status] || A2A_STATUS.Pending
   return (
     <div className="a2a-strip">
-      <span title="A2A 任务信封">📨</span>
+      <span data-tooltip="A2A 任务信封" tabIndex={0}>📨</span>
       <b>A2A</b>
       <code className="a2a-id">{a2a.taskId}</code>
       <span className="a2a-route">{a2a.senderName || '编排器'} → {roleOf(a2a.receiverRole).emoji} {a2a.receiverName || ''}</span>
@@ -1006,7 +1010,7 @@ function A2AStrip({ a2a }) {
         {st.label}
       </span>
       {a2a.durationMs > 0 && <span className="a2a-dur">耗时 {fmtElapsed(a2a.durationMs)}</span>}
-      {a2a.error && <span className="a2a-err" title={a2a.error}>⚠ {truncate(a2a.error, 40)}</span>}
+      {a2a.error && <span className="a2a-err" data-tooltip={a2a.error} tabIndex={0}>⚠ {truncate(a2a.error, 40)}</span>}
       {a2a.outputExcerpt && (
         <details className="a2a-details">
           <summary>输出摘录</summary>
@@ -1055,7 +1059,7 @@ function AgentTurnBody({ turn, live }) {
           {toolsOpen && (
             <div className="panel-content">
               {validTools.map((t, i) => (
-                <span key={i} className="tool-badge" title={t.detail}>
+                <span key={i} className="tool-badge" data-tooltip={t.detail} tabIndex={0}>
                   {t.status === 'running' && <span className="spinner" style={{ width: 10, height: 10, marginRight: 0 }} />}
                   🛠️ {t.name}
                   {t.detail && <span className="tool-detail">{t.detail.length > 40 ? t.detail.slice(0, 40) + '…' : t.detail}</span>}

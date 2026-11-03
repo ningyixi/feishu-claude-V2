@@ -7,8 +7,10 @@ export default defineConfig({
     outDir: '../src/main/resources/static',
     emptyOutDir: true,
   },
+  preview: { allowedHosts: ['feishu-ui-preview'] },
   server: {
     port: 3000,
+    allowedHosts: ['feishu-ui-preview'],
     // 修复 Z: 盘等网络驱动器不支持 fs.watch 的问题
     watch: {
       usePolling: true,
@@ -17,9 +19,9 @@ export default defineConfig({
       ignored: ['**/node_modules/**', '**/.git/**'],
     },
     proxy: {
-      '/api': 'http://localhost:8080',
+      '/api': process.env.VITE_API_PROXY || 'http://localhost:8080',
       '/ws': {
-        target: 'ws://localhost:8080',
+        target: process.env.VITE_API_PROXY || 'ws://localhost:8080',
         ws: true,
         configure: (proxy) => {
           proxy.on('error', () => {})

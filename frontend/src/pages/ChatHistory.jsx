@@ -240,7 +240,7 @@ export default function ChatHistory({ instanceId, instanceName, onBack }) {
               <span className="hook-badge" style={{ fontSize: 10, padding: '0 6px' }}>{q.kind}</span>
               <span>已等 {q.waitedSec}s</span>
             </div>
-            <div style={{ fontSize: 12, color: 'var(--text)', wordBreak: 'break-all', lineHeight: 1.5 }} title={q.preview}>
+            <div style={{ fontSize: 12, color: 'var(--text)', wordBreak: 'break-all', lineHeight: 1.5 }} data-tooltip={q.preview} tabIndex={0}>
               {q.preview.length > 66 ? q.preview.slice(0, 66) + '…' : q.preview}
             </div>
           </div>
