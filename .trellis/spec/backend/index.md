@@ -20,6 +20,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
 | [Supplier Context](./supplier-context.md) | Supplier context and workflow contracts | Implemented |
 | [Supplier Wiki](./supplier-wiki.md) | TEXT/WIKI modes, compilation, delivery and experiment receipts | Implemented |
+| [Supplier Workflow](./supplier-workflow.md) | Flowable processes, human tasks, files, notifications and recovery | Implemented |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
 
 ---

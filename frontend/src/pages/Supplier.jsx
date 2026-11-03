@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import SupplierWikiPanel from '../components/SupplierWikiPanel'
+import SupplierWorkflowPanel from '../components/SupplierWorkflowPanel'
 
 // ===== 常量 =====
 
@@ -22,8 +23,8 @@ const emptyDoc = { type: 'url', value: '' }
 // ===== 主页面（视图路由） =====
 
 export default function Supplier() {
-  const [view, setView] = useState('list')       // list | create | game | workflows
-  const [jobId, setJobId] = useState(null)
+  const [view, setView] = useState(() => /^\d+$/.test(new URLSearchParams(window.location.search).get('job') || '') ? 'game' : 'list')       // list | create | game | workflows
+  const [jobId, setJobId] = useState(() => { const value = new URLSearchParams(window.location.search).get('job'); return /^\d+$/.test(value || '') ? Number(value) : null })
   const [toast, setToast] = useState(null)
 
   function showToast(msg, type) {
@@ -300,6 +301,7 @@ function safeParseNodes(json) {
 // ===== 游戏视图 =====
 
 function GameView({ jobId, onBack, showToast }) {
+  const [managed, setManaged] = useState(false)
   const occupied = useOccupied()
   const [job, setJob] = useState(null)
   const [selected, setSelected] = useState(null)     // nodeId
@@ -334,6 +336,7 @@ function GameView({ jobId, onBack, showToast }) {
   const running = nodes.some(n => n.status === 'RUNNING')
 
   async function runNode(nodeId) {
+    if (managed) return showToast('请在持续工作流的待办中处理此节点', 'error')
     const res = await fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/run`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ instruction }),
@@ -345,6 +348,7 @@ function GameView({ jobId, onBack, showToast }) {
     load()
   }
   async function answerNode(nodeId) {
+    if (managed) return showToast('请在持续工作流的待办中处理此节点', 'error')
     if (!steerAnswer.trim()) return
     const res = await fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/answer`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -357,12 +361,14 @@ function GameView({ jobId, onBack, showToast }) {
     load()
   }
   async function completeNode(nodeId) {
+    if (managed) return showToast('请在持续工作流的待办中处理此节点', 'error')
     await fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/complete`, { method: 'POST' })
     showToast('✅ 节点完成', 'success')
     setSelected(null)   // 自动跳到下一个推荐节点
     load()
   }
   async function saveArtifact(nodeId) {
+    if (managed) return showToast('请在持续工作流的待办中处理此节点', 'error')
     await fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/artifact`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ artifact: artifactDraft }),
@@ -418,7 +424,7 @@ function GameView({ jobId, onBack, showToast }) {
           <label style={{ fontSize: 12, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 6 }}>
             🤖 执行实例
             <select className="form-input" style={{ width: 170, padding: '4px 8px', fontSize: 12 }}
-              value={job.instanceId || ''} onChange={e => switchInstance(e.target.value)}>
+              disabled={managed} value={job.instanceId || ''} onChange={e => switchInstance(e.target.value)}>
               <option value="">（未绑定）</option>
               {instances.filter(i => i.enabled).map(i => {
                 const occ = occupied[String(i.id)]
@@ -451,6 +457,7 @@ function GameView({ jobId, onBack, showToast }) {
         )}
       </div>
 
+      <SupplierWorkflowPanel job={job} showToast={showToast} onManaged={setManaged} />
       <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
         {/* 左：节点操作卡 */}
         <div className="card" style={{ flex: 1, minWidth: 0, padding: '16px 20px' }}>

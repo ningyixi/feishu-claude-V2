@@ -1034,6 +1034,7 @@ public class SupplierJobService {
                 .replace("{skills}", skills)
                 .replace("{extra}", extra != null && !extra.isBlank()
                         ? "\n\n== 玩家的补充/纠正指示（优先遵循） ==\n" + extra : "");
+        if (!template.contains("{extra}") && extra != null && !extra.isBlank()) out += "\n\n【本轮补充 / 驳回修改意见】\n" + extra;
         if (!template.contains("{skills}") && !skills.isBlank()) {
             out = out + "\n\n【本工作可用的 Skill】\n开工前先阅读下列 skill 目录中的 SKILL.md（及其引用的文件），任务范围内严格遵循 skill 的指导：\n" + skills;
         }

@@ -24,6 +24,9 @@ public class SupplierJobController {
 
     private static final Logger log = LoggerFactory.getLogger(SupplierJobController.class);
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<com.lark.oapi.sample.ws.service.SupplierWorkflowService> supplierWorkflows;
+    private void manualOnly(Long id) { supplierWorkflows.getObject().assertLegacyWriteAllowed(id); }
     private final SupplierJobService jobService;
     private final WorkflowTemplateRepository templateRepo;
     private final com.lark.oapi.sample.ws.service.EmployeeService employeeService;
@@ -101,6 +104,7 @@ public class SupplierJobController {
     public ResponseEntity<String> update(@PathVariable Long id, @RequestBody String rawBody) {
         try {
             JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            manualOnly(id);
             SupplierJob patch = new SupplierJob();
             patch.setName(null); patch.setSupplierCode(null); patch.setSupplierName(null); patch.setLibraryPath(null); patch.setDocsJson(null); patch.setSkillsJson(null);
             if (body.has("knowledgeMode")) {
@@ -131,8 +135,8 @@ public class SupplierJobController {
 
     @DeleteMapping("/api/supplier-jobs/{id}")
     public ResponseEntity<?> delete(@PathVariable Long id) {
-        jobService.deleteJob(id);
-        return ResponseEntity.ok(Map.of("ok", true));
+        try { manualOnly(id);jobService.deleteJob(id);return ResponseEntity.ok(Map.of("ok", true)); }
+        catch (IllegalArgumentException ex) { return err(ex.getMessage()); }
     }
 
     // ===== 节点操作 =====
@@ -147,6 +151,7 @@ public class SupplierJobController {
                 JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
                 instruction = opt(body, "instruction");
             }
+            manualOnly(id);
             jobService.runNode(id, nodeId, instruction);
             return ResponseEntity.ok("{\"ok\":true}");
         } catch (IllegalArgumentException e) {
@@ -160,6 +165,7 @@ public class SupplierJobController {
                                              @RequestBody String rawBody) {
         try {
             JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            manualOnly(id);
             jobService.answerNode(id, nodeId, opt(body, "answer"));
             return ResponseEntity.ok("{\"ok\":true}");
         } catch (IllegalArgumentException e) {
@@ -171,6 +177,7 @@ public class SupplierJobController {
     @PostMapping(value = "/api/supplier-jobs/{id}/nodes/{nodeId}/complete", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> completeNode(@PathVariable Long id, @PathVariable String nodeId) {
         try {
+            manualOnly(id);
             jobService.completeNode(id, nodeId);
             return ResponseEntity.ok("{\"ok\":true}");
         } catch (IllegalArgumentException e) {
@@ -184,6 +191,7 @@ public class SupplierJobController {
                                                @RequestBody String rawBody) {
         try {
             JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            manualOnly(id);
             jobService.saveArtifact(id, nodeId, opt(body, "artifact"));
             return ResponseEntity.ok("{\"ok\":true}");
         } catch (IllegalArgumentException e) {

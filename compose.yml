@@ -34,6 +34,7 @@ services:
       FEISHU_MYSQL_USER: feishu
       FEISHU_MYSQL_PASSWORD: ${FEISHU_MYSQL_PASSWORD}
       FEISHU_KB_PATH: /app/data/supplier-kb
+      FEISHU_WORKFLOW_PUBLIC_URL: ${FEISHU_WORKFLOW_PUBLIC_URL:-http://localhost:18080}
       CLAUDE_CONFIG_DIR: /home/node/.claude
     ports:
       - "127.0.0.1:${FEISHU_BACKEND_PORT:-18081}:8080"

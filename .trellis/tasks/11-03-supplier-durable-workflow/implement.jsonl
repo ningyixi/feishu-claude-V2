@@ -1,0 +1,4 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Shared MySQL transactions and container runtime"}
+{"file": ".trellis/spec/backend/supplier-context.md", "reason": "Preserve evidence, spec and Trellis gates"}
+{"file": ".trellis/spec/backend/supplier-wiki.md", "reason": "Preserve knowledge modes and freshness gates"}
+{"file": ".trellis/spec/backend/supplier-workflow.md", "reason": "Durable task, outbox and recovery contract"}

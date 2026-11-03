@@ -1,5 +1,6 @@
 """Real HTTP checks through Nginx. Creates and removes only uniquely named fixtures."""
 import json
+import re
 import urllib.request
 import urllib.error
 import uuid
@@ -15,6 +16,11 @@ class StackSmoke(unittest.TestCase):
                 with urllib.request.urlopen(request) as response: actual=response.status;result=json.load(response)
             except urllib.error.HTTPError as error: actual=error.code;result=json.load(error)
             self.assertEqual(actual,status,(path,result));return result
+        with urllib.request.urlopen(base+'/supplier') as response: html=response.read().decode()
+        bundle=re.search(r'src="([^"]+\.js)"',html).group(1)
+        with urllib.request.urlopen(base+bundle) as response: javascript=response.read().decode()
+        self.assertIn('持续工作流',javascript)
+        self.assertIn('同意并继续',javascript)
         code='wiki_smoke_'+uuid.uuid4().hex[:12];jobs=[];entry=None
         template=next(t for t in call('/api/workflows') if t['mode']=='API')
         try:
@@ -26,6 +32,9 @@ class StackSmoke(unittest.TestCase):
             patched=call(f'/api/supplier-jobs/{wiki}','PUT',{'name':'renamed fixture'})
             self.assertEqual(patched['supplierCode'],code);self.assertEqual(patched['libraryPath'],'/workspace');self.assertEqual(patched['knowledgeMode'],'WIKI')
             self.assertEqual(call(f'/api/supplier-jobs/{wiki}/wiki')['status'],'EMPTY')
+            self.assertEqual(call(f'/api/supplier-jobs/{wiki}/workflow')['status'],'NOT_STARTED')
+            call(f'/api/supplier-jobs/{wiki}/workflow/start','POST',{'notifyFeishu':True},400)
+            self.assertEqual(call(f'/api/supplier-jobs/{wiki}/workflow')['status'],'NOT_STARTED')
             call(f'/api/supplier-jobs/{wiki}/wiki/schema','PUT',{'instructions':'接口和商务约定分别组织，保留原文证据。'})
             self.assertTrue(call(f'/api/supplier-jobs/{wiki}/wiki/schema')['instructions'])
             call(f'/api/supplier-jobs/{jobs[0]}/wiki/schema','PUT',{'instructions':'not allowed'},400)

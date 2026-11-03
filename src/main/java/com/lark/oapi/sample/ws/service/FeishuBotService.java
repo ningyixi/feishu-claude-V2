@@ -41,6 +41,8 @@ public class FeishuBotService {
     private final ShellService shellService;
     private final ClaudeCodeService claudeCodeService;
     private final SkillHookService skillHookService;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<SupplierWorkflowService> supplierWorkflows;
 
     enum Mode { SHELL, CHAT }
 
@@ -396,6 +398,13 @@ public class FeishuBotService {
             if (text.isEmpty()) return;
         }
 
+        // Workflow commands are deterministic application actions, never routed through Claude or shell.
+        if (isText && (text.equals("/供应商") || text.startsWith("/供应商 "))) {
+            try { replyText(instanceId, openId, chatType, chatId, supplierWorkflows.getObject().feishuReply(instanceId, openId, text)); }
+            catch (IllegalArgumentException ex) { replyText(instanceId, openId, chatType, chatId, "待办处理失败：" + ex.getMessage()); }
+            return;
+        }
+
         // 保存用户消息到对话历史
         saveChatMessage(instanceId, openId, "user",
                 isText ? text : (isImage ? "[图片]" : "[表情包]"), chatType);
@@ -644,6 +653,22 @@ public class FeishuBotService {
             return;
         }
         replyText(instanceId, openId, "p2p", "", content);
+    }
+
+    /** Unlike best-effort chat replies, workflow delivery must report provider failure to its outbox. */
+    public void sendWorkflowNotice(Long instanceId, String openId, String content, String uuid) throws Exception {
+        var connection = connections.get(instanceId);
+        if (connection == null || connection.httpClient == null) throw new IllegalStateException("飞书实例未连接，通知保留待重试");
+        // Text message limit is byte-based. Preserve the task URL/command even when the question is long.
+        if (content.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > 28000) {
+            int tail = content.lastIndexOf("\n打开工作台");
+            content = content.substring(0, Math.min(5000, content.length())) + "\n（详情见工作台）" + (tail >= 0 ? content.substring(tail) : "");
+        }
+        var json = new JsonObject(); json.addProperty("text", content);
+        var request = CreateMessageReq.newBuilder().receiveIdType("open_id")
+                .createMessageReqBody(CreateMessageReqBody.newBuilder().receiveId(openId).uuid(uuid).msgType("text").content(json.toString()).build()).build();
+        var response = connection.httpClient.im().message().create(request);
+        if (!response.success()) throw new IllegalStateException("飞书发送失败 code=" + response.getCode() + ": " + response.getMsg());
     }
 
     private void replyText(Long instanceId, String openId, String chatType, String chatId, String content) {
