@@ -180,6 +180,87 @@ public final class DocParser {
         }
     }
 
+    // ===== 站点抓取原语（11-03-kb-site-crawl） =====
+
+    public static final int MAX_DECODE_CHARS = 100_000;   // 单页解码字符上限，超出=截断=致命
+    private static final int CRAWL_MAX_REDIRECTS = 5;
+
+    /**
+     * 抓取一个页面用于站点导入：md 直链优先 → HTML 回退转 Markdown。
+     * 与单页解析的区别：重定向 ≤5 且必须由 redirectOk 判定同源/同域（跨源不跟随=单页失败）；
+     * 响应超 5MB / 解码超 100k 字符 / SSRF 违规 = {@link SiteCrawler.FatalCrawlError}（终止整个导入，截断不冒充完整）。
+     */
+    public static SiteCrawler.FetchedPage fetchPage(String url, java.util.function.Predicate<String> redirectOk) throws Exception {
+        assertSafeUrlChecked(url);
+        String mdUrl = mdProbeUrl(url);
+        if (mdUrl != null) {
+            try {
+                Body b = httpGetCrawl(mdUrl, redirectOk);
+                String text = new String(b.bytes(), StandardCharsets.UTF_8);
+                if (!looksLikeHtml(text)) {
+                    if (text.length() > MAX_DECODE_CHARS) throw new SiteCrawler.FatalCrawlError("单页解码超出 " + MAX_DECODE_CHARS + " 字符上限（截断不允许）");
+                    return new SiteCrawler.FetchedPage(b.finalUrl(), text.strip());
+                }
+            } catch (SiteCrawler.FatalCrawlError f) { throw f; }
+            catch (Exception ignore) { /* 无 md 直链 → 回退原地址 */ }
+        }
+        Body resp = httpGetCrawl(url, redirectOk);
+        String ctype = resp.contentType();
+        if (ctype.contains("pdf") || ctype.contains("octet-stream") || ctype.contains("image/") || ctype.contains("zip")) {
+            throw new IOException("非文档资源(content-type=" + ctype + ")，跳过");   // 单页失败级别
+        }
+        String text = new String(resp.bytes(), StandardCharsets.UTF_8);
+        if (text.length() > MAX_DECODE_CHARS) throw new SiteCrawler.FatalCrawlError("单页解码超出 " + MAX_DECODE_CHARS + " 字符上限（截断不允许）");
+        if (ctype.contains("markdown") || !looksLikeHtml(text)) {
+            return new SiteCrawler.FetchedPage(resp.finalUrl(), text.strip());
+        }
+        return new SiteCrawler.FetchedPage(resp.finalUrl(), cleanHtmlToMarkdown(text, resp.finalUrl()));
+    }
+
+    private static void assertSafeUrlChecked(String url) {
+        try { assertSafeUrl(url); }
+        catch (IllegalArgumentException e) { throw new SiteCrawler.FatalCrawlError("安全策略拒绝: " + e.getMessage()); }
+    }
+
+    private static Body httpGetCrawl(String url, java.util.function.Predicate<String> redirectOk) throws Exception {
+        String current = url;
+        for (int hop = 0; hop <= CRAWL_MAX_REDIRECTS; hop++) {
+            assertSafeUrlChecked(current);
+            HttpRequest req = HttpRequest.newBuilder(new URI(current))
+                    .timeout(READ_TIMEOUT)
+                    .header("User-Agent", "Mozilla/5.0 (compatible; SupplierKbCrawler/1.0)")
+                    .header("Accept", "text/markdown,text/html;q=0.9,text/plain;q=0.8,*/*;q=0.5")
+                    .GET().build();
+            try {
+                HttpResponse<InputStream> resp = CLIENT.send(req, HttpResponse.BodyHandlers.ofInputStream());
+                int code = resp.statusCode();
+                if (code >= 300 && code < 400) {
+                    closeQuietly(resp.body());
+                    String loc = resp.headers().firstValue("location").orElse(null);
+                    if (loc == null || loc.isBlank()) throw new IOException("3xx 无 Location: " + current);
+                    String target = new URI(current).resolve(loc).toString();
+                    if (!redirectOk.test(target)) throw new IOException("跨站/越出范围的重定向不跟随: " + target);
+                    current = target;
+                    continue;
+                }
+                if (code != 200) { closeQuietly(resp.body()); throw new IOException("HTTP " + code + ": " + current); }
+                byte[] bytes;
+                try { bytes = readCapped(resp.body(), MAX_FETCH_BYTES); }
+                catch (IOException cap) {
+                    if (cap.getMessage() != null && cap.getMessage().contains("上限")) {
+                        throw new SiteCrawler.FatalCrawlError("响应超出 " + MAX_FETCH_BYTES / 1024 / 1024 + "MB 上限被截断（不允许当完整导入）");
+                    }
+                    throw cap;
+                }
+                return new Body(bytes, resp.headers().firstValue("content-type").orElse(""), current);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IOException("抓取被中断: " + current, e);
+            }
+        }
+        throw new IOException("重定向超过 " + CRAWL_MAX_REDIRECTS + " 跳: " + url);   // 循环重定向=单页失败
+    }
+
     // ===== PDF =====
 
     /** 本地 PDF 路径 → 校验 → 按页提取（layout≈sortByPosition）→ 分块 Markdown */

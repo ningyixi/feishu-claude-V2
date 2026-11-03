@@ -21,7 +21,7 @@ class SupplierWorkflowGateTest {
         var node = new SupplierJobNode(); node.setContextStage("codegen");
         when(jobs.findById(1L)).thenReturn(Optional.of(job));
         when(nodes.findByJobIdAndNodeId(1L, "code")).thenReturn(Optional.of(node));
-        var service = spy(new SupplierJobService(jobs, nodes, null, null, null, kb, null));
+        var service = spy(new SupplierJobService(jobs, nodes, null, null, null, kb, null, null));
         doReturn("updated material").when(service).codegenPrompt(1L);
         var error = assertThrows(IllegalArgumentException.class, () -> service.completeNode(1L, "code"));
         assertTrue(error.getMessage().contains("重新生成"));
@@ -36,7 +36,7 @@ class SupplierWorkflowGateTest {
         var node = new SupplierJobNode(); node.setTitle("接口实测"); node.setArtifact("I tested all APIs successfully");
         when(jobs.findById(1L)).thenReturn(Optional.of(job));
         when(nodes.findByJobIdAndNodeId(1L, "n2")).thenReturn(Optional.of(node));
-        var service = new SupplierJobService(jobs, nodes, null, null, null, kb, null);
+        var service = new SupplierJobService(jobs, nodes, null, null, null, kb, null, null);
         assertThrows(IllegalArgumentException.class, () -> service.completeNode(1L, "n2"));
         verifyNoInteractions(kb);
         node.setToolEvidence("observed request and HTTP response");

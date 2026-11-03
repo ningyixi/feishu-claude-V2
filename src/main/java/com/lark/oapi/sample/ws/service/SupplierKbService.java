@@ -40,13 +40,18 @@ public class SupplierKbService {
 
     private final SupplierKbEntryRepository repo;
     private final com.lark.oapi.sample.ws.repository.SupplierKbRemovedRepository removedRepo;
+    private final com.lark.oapi.sample.ws.repository.SupplierKbPageRepository pageRepo;
     private final Path kbRoot;
+    /** 站点抓取取消标记（11-03-kb-site-crawl）：爬虫每页前检查 */
+    private final java.util.Set<Long> cancelledCrawls = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public SupplierKbService(SupplierKbEntryRepository repo,
                              com.lark.oapi.sample.ws.repository.SupplierKbRemovedRepository removedRepo,
+                             com.lark.oapi.sample.ws.repository.SupplierKbPageRepository pageRepo,
                              @Value("${feishu.kb-dir:D:/feishu-claude-data/supplier-kb}") String kbDir) {
         this.repo = repo;
         this.removedRepo = removedRepo;
+        this.pageRepo = pageRepo;
         this.kbRoot = Paths.get(kbDir);
     }
 
@@ -68,13 +73,13 @@ public class SupplierKbService {
 
     // ===== 入库 =====
 
-    /**
-     * 新增条目。
-     * url/pdf → 状态 RAW（只存原文引用，**用户在面板点"解析"后才生成 Markdown 产物**）；
-     * md → 本地 Markdown 文件，入库即产物（DONE，无需解析）；chat/note → 原文直接落盘为 DONE。
-     * @param value url=链接, pdf/md=本地绝对路径, chat/note=文本内容
-     */
     public SupplierKbEntry add(String kbCode, String type, String value, String title) {
+        return add(kbCode, type, value, title, false);
+    }
+
+    /** @param site url 类型时 true=同站点目录递归抓取(≤200页)；解析按钮触发爬虫 */
+    @SuppressWarnings("unchecked")
+    public SupplierKbEntry add(String kbCode, String type, String value, String title, boolean site) {
         if (kbCode == null || kbCode.isBlank()) throw new IllegalArgumentException("kbCode 不能为空");
         if (value == null || value.isBlank()) throw new IllegalArgumentException("内容不能为空");
         type = type == null ? "url" : type.trim().toLowerCase();
@@ -84,9 +89,14 @@ public class SupplierKbService {
         e.setTitle(title != null && !title.isBlank() ? title.trim() : deriveTitle(type, value));
         switch (type) {
             case "url" -> {
-                DocParser.assertSafeUrl(value.trim());   // 入库即拦 SSRF（解析时还会逐跳复核）
+                DocParser.assertSafeUrl(value.trim());   // 入库即拦 SSRF（解析/抓取时还会逐跳复核）
                 e.setSource(value.trim());
-                e.setStatus("RAW");                      // 手动解析语义：先只存引用
+                e.setStatus("RAW");                      // 手动解析语义：先只存原文引用
+                if (site) {
+                    JsonObject mt = new JsonObject();
+                    mt.addProperty("site", true);
+                    e.setMetaJson(mt.toString());
+                }
                 repo.save(e);
             }
             case "pdf" -> {
@@ -143,14 +153,36 @@ public class SupplierKbService {
         return e;
     }
 
-    /** 重新解析（DONE/FAILED 可用；人工纠错后想回到机析结果时用） */
+    /** 解析入口（面板"解析/重解析"按钮）：url+site → 站点爬虫；其余单页解析 */
     public void reparse(Long id) {
         SupplierKbEntry e = require(id);
-        if (!"url".equals(e.getType()) && !"pdf".equals(e.getType())) throw new IllegalArgumentException("仅 url/pdf 支持重新解析");
+        if (!"url".equals(e.getType()) && !"pdf".equals(e.getType()) && !"md".equals(e.getType())) {
+            throw new IllegalArgumentException("仅 url/pdf/md 支持解析");
+        }
         e.setStatus("PENDING");
         e.setError("");
         repo.save(e);
-        afterCommit(() -> parseNow(id));
+        if (isSiteCrawl(e)) {
+            pageRepo.deleteByEntryId(id);   // 重跑从头记
+            cancelledCrawls.remove(id);
+            afterCommit(() -> crawlNow(id));
+        } else {
+            afterCommit(() -> parseNow(id));
+        }
+    }
+
+    /** 取消站点抓取（下一次页边界生效，按"导入中断"分级处理） */
+    public void cancelCrawl(Long id) {
+        require(id);
+        cancelledCrawls.add(id);
+    }
+
+    static boolean isSiteCrawl(SupplierKbEntry e) {
+        if (!"url".equals(e.getType())) return false;
+        try {
+            JsonObject o = JsonParser.parseString(e.getMetaJson() == null || e.getMetaJson().isBlank() ? "{}" : e.getMetaJson()).getAsJsonObject();
+            return o.has("site") && o.get("site").getAsBoolean();
+        } catch (Exception ex) { return false; }
     }
 
     /** 删除条目：删元数据 + 落盘产物文件；有 source 的记墓碑，防止 docs_json 幂等同步再次带回 */
@@ -172,6 +204,15 @@ public class SupplierKbService {
             } catch (IOException ex) {
                 log.warn("[SupplierKb] 产物文件删除失败（元数据已删）: {}（{}）", e.getMdPath(), ex.getMessage());
             }
+        }
+        // 站点抓取条目：逐页行 + 页文件一并清理
+        try {
+            for (var p : pageRepo.findByEntryIdOrderByIdAsc(e.getId())) {
+                if (p.getMdPath() != null && !p.getMdPath().isBlank()) Files.deleteIfExists(Paths.get(p.getMdPath()));
+            }
+            pageRepo.deleteByEntryId(e.getId());
+        } catch (Exception ex) {
+            log.warn("[SupplierKb] 页面清单清理失败: {}", ex.getMessage());
         }
         repo.delete(e);
         log.info("[SupplierKb] 条目已删除: id={}, kb={}, type={}", id, e.getKbCode(), e.getType());
@@ -330,6 +371,7 @@ public class SupplierKbService {
     private void parseNow(Long id) {
         SupplierKbEntry e = repo.findById(id).orElse(null);
         if (e == null) return;
+        if (isSiteCrawl(e)) { crawlNow(id); return; }
         e.setStatus("PARSING");
         repo.save(e);
         try {
@@ -382,10 +424,148 @@ public class SupplierKbService {
         List<SupplierKbEntry> stalled = repo.findByStatusIn(List.of("PARSING", "PENDING"));
         if (stalled.isEmpty()) return;
         for (SupplierKbEntry e : stalled) {
+            if (isSiteCrawl(e)) {
+                if ("PARSING".equals(e.getStatus())) {
+                    e.setStatus("FAILED");
+                    e.setError("站点抓取中断（服务重启），点击「重解析」可重跑");
+                    repo.save(e);
+                }
+                continue;   // 站点条目不自动重爬（200页代价大，交给用户显式触发）
+            }
             if ("PARSING".equals(e.getStatus())) { e.setStatus("PENDING"); repo.save(e); }
             afterCommit(() -> parseNow(e.getId()));
         }
-        log.info("[SupplierKb] 重启续跑：{} 条滞留条目重新排队解析", stalled.size());
+        log.info("[SupplierKb] 重启续跑扫描：{} 条滞留条目", stalled.size());
+    }
+
+    // ===== 站点抓取执行体（11-03-kb-site-crawl） =====
+
+    private void crawlNow(Long id) {
+        SupplierKbEntry e = repo.findById(id).orElse(null);
+        if (e == null) return;
+        e.setStatus("PARSING");
+        e.setError("");
+        repo.save(e);
+        final SupplierKbEntry ent = e;
+        final Path dir = kbRoot.resolve(sanitize(ent.getKbCode())).resolve("site-" + id);
+        try {
+            SiteCrawler.Result r = SiteCrawler.crawl(ent.getSource(),
+                    url -> {
+                        try {
+                            return DocParser.fetchPage(url, dest -> sameOrigin(url, dest));
+                        } catch (IllegalArgumentException sec) {
+                            throw new SiteCrawler.FatalCrawlError("安全策略拒绝: " + sec.getMessage());
+                        }
+                    },
+                    pages -> persistPages(ent, pages),
+                    () -> cancelledCrawls.contains(id));
+            cancelledCrawls.remove(id);
+
+            int loaded = 0, failed = 0, pending = 0;
+            for (var p : r.pages) {
+                switch (p.status) { case "loaded" -> loaded++; case "failed" -> failed++; default -> pending++; }
+            }
+            if (r.fatal != null) {
+                ent.setStatus("FAILED");
+                ent.setError(truncErr(r.fatal));
+                repo.save(ent);
+                persistPages(ent, r.pages);
+                log.warn("[SupplierKb] 站点导入终止: entry={}, {}", id, r.fatal);
+                return;
+            }
+            // 成功/部分成功：loaded 页逐页落盘 + 索引文件
+            Files.createDirectories(dir);
+            StringBuilder idx = new StringBuilder();
+            idx.append("> 来源入口: ").append(ent.getSource())
+               .append("（同站点抓取：载入 ").append(loaded).append(" 页")
+               .append(failed > 0 ? "，失败 " + failed + " 页，属**部分导入**——缺口详见页面清单" : "").append("）\n\n");
+            int n = 0;
+            var pageRows = new java.util.HashMap<String, com.lark.oapi.sample.ws.model.entity.SupplierKbPage>();
+            pageRepo.findByEntryIdOrderByIdAsc(id).forEach(p -> pageRows.put(p.getUrlKey(), p));
+            for (var p : r.pages) {
+                if (!"loaded".equals(p.status)) continue;
+                n++;
+                Path f = dir.resolve("p" + n + ".md");
+                String body = DocParser.chunk("> 来源URL: " + p.url + "\n\n" + p.text.strip() + "\n");
+                Files.writeString(f, body, StandardCharsets.UTF_8);
+                var row = pageRows.get(SiteCrawler.logicKey(p.url));
+                if (row != null) {
+                    row.setMdPath(f.toString());
+                    row.setTitle(p.title);
+                    row.setStatus("loaded");
+                    row.setOrderIdx(n);
+                    pageRepo.save(row);
+                }
+                idx.append("## ").append(n).append(". ").append(p.title.isBlank() ? f.getFileName() : p.title).append("\n")
+                   .append("> 来源: ").append(p.url).append(" ｜ 正文文件: ").append(f.toString().replace('\\', '/')).append("\n\n");
+            }
+            Path index = dir.resolve("index.md");
+            Files.writeString(index, idx.toString(), StandardCharsets.UTF_8);
+            ent.setStatus("DONE");
+            ent.setMdPath(index.toString());
+            JsonObject mt = parseMeta(ent.getMetaJson());
+            mt.addProperty("site", true);
+            mt.addProperty("found", r.pages.size());
+            mt.addProperty("loaded", loaded);
+            mt.addProperty("failed", failed);
+            mt.addProperty("pending", pending);
+            mt.addProperty("partial", r.partial || failed > 0);
+            ent.setMetaJson(mt.toString());
+            repo.save(ent);
+            log.info("[SupplierKb] 站点导入完成: entry={}, 发现{}页 载入{} 失败{} 部分={}", id, r.pages.size(), loaded, failed, r.partial);
+        } catch (Exception ex) {
+            cancelledCrawls.remove(id);
+            ent.setStatus("FAILED");
+            ent.setError(truncErr("抓取异常: " + ex.getMessage()));
+            repo.save(ent);
+            log.error("[SupplierKb] 站点导入异常: entry={}", id, ex);
+        }
+    }
+
+    /** 逐页增量持久化 + meta 进度（前端"已发现X·已载入Y·失败Z·未抓取N"数据源） */
+    private void persistPages(SupplierKbEntry e, List<SiteCrawler.PageState> pages) {
+        try {
+            var existing = new java.util.HashMap<String, com.lark.oapi.sample.ws.model.entity.SupplierKbPage>();
+            pageRepo.findByEntryIdOrderByIdAsc(e.getId()).forEach(p -> existing.put(p.getUrlKey(), p));
+            int loaded = 0, failed = 0, pending = 0, idx = 0;
+            for (var p : pages) {
+                String key = SiteCrawler.logicKey(p.url);
+                var row = existing.get(key);
+                if (row == null) {
+                    row = new com.lark.oapi.sample.ws.model.entity.SupplierKbPage();
+                    row.setEntryId(e.getId());
+                    row.setUrlKey(key);
+                }
+                row.setUrl(p.url.length() > 780 ? p.url.substring(0, 780) : p.url);
+                row.setTitle(p.title != null && p.title.length() > 280 ? p.title.substring(0, 280) : p.title);
+                row.setStatus(p.status);
+                row.setError(p.error != null && p.error.length() > 560 ? p.error.substring(0, 560) + "…" : p.error);
+                row.setOrderIdx(idx++);
+                pageRepo.save(row);
+                switch (p.status) { case "loaded" -> loaded++; case "failed" -> failed++; default -> pending++; }
+            }
+            JsonObject mt = parseMeta(e.getMetaJson());
+            mt.addProperty("site", true);
+            mt.addProperty("found", pages.size());
+            mt.addProperty("loaded", loaded);
+            mt.addProperty("failed", failed);
+            mt.addProperty("pending", pending);
+            e.setMetaJson(mt.toString());
+            repo.save(e);
+        } catch (Exception ignore) {
+            // 进度落库失败不中断抓取
+        }
+    }
+
+    private static boolean sameOrigin(String from, String to) {
+        var a = SiteCrawler.safeUri(from);
+        var b = to == null ? null : SiteCrawler.safeUri(to);
+        if (a == null || b == null) return false;
+        return SiteCrawler.originOf(a).equals(SiteCrawler.originOf(b));
+    }
+
+    private static String truncErr(String s) {
+        return s == null ? "" : (s.length() > 400 ? s.substring(0, 400) + "…" : s);
     }
 
     // ===== 小工具 =====

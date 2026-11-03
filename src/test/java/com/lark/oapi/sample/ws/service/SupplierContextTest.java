@@ -15,7 +15,7 @@ class SupplierContextTest {
 
     @Test void deliversTextAndRejectsUnresolvedMissingAndOversizedMaterial() throws Exception {
         var repo = mock(SupplierKbEntryRepository.class);
-        var service = new SupplierKbService(repo, null, dir.toString());
+        var service = new SupplierKbService(repo, null, null, dir.toString());
         var entry = new SupplierKbEntry();
         entry.setId(1L);
         entry.setTitle("商务约定");

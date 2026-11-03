@@ -22,9 +22,12 @@ public class SupplierKbController {
     private static final Logger log = LoggerFactory.getLogger(SupplierKbController.class);
 
     private final SupplierKbService kbService;
+    private final com.lark.oapi.sample.ws.repository.SupplierKbPageRepository entryPageRepo;
 
-    public SupplierKbController(SupplierKbService kbService) {
+    public SupplierKbController(SupplierKbService kbService,
+                                com.lark.oapi.sample.ws.repository.SupplierKbPageRepository entryPageRepo) {
         this.kbService = kbService;
+        this.entryPageRepo = entryPageRepo;
     }
 
     /** 列条目（Jackson 直出实体，无大字段：正文在 md 文件里） */
@@ -33,7 +36,7 @@ public class SupplierKbController {
         return kbService.list(kbCode);
     }
 
-    /** 新增条目：{"type":"url|pdf|chat|note","value":"链接/路径/文本","title":"可选"} */
+    /** 新增条目：{"type":"url|pdf|md|chat|note","value":"链接/路径/文本","title":"可选","site":false} */
     @PostMapping(value = "/{kbCode}/entries", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> add(@PathVariable String kbCode, @RequestBody String rawBody) {
         try {
@@ -41,13 +44,44 @@ public class SupplierKbController {
             String type = body.has("type") && !body.get("type").isJsonNull() ? body.get("type").getAsString() : "url";
             String value = body.has("value") && !body.get("value").isJsonNull() ? body.get("value").getAsString() : "";
             String title = body.has("title") && !body.get("title").isJsonNull() ? body.get("title").getAsString() : "";
-            SupplierKbEntry e = kbService.add(kbCode, type, value, title);
+            boolean site = body.has("site") && !body.get("site").isJsonNull() && body.get("site").getAsBoolean();
+            SupplierKbEntry e = kbService.add(kbCode, type, value, title, site);
             return ResponseEntity.ok("{\"ok\":true,\"id\":" + e.getId() + ",\"status\":\"" + e.getStatus() + "\"}");
         } catch (IllegalArgumentException e) {
             return err(e.getMessage());
         } catch (Exception e) {
             log.error("[SupplierKb] 新增条目失败 kb={}", kbCode, e);
             return err("新增失败: " + e.getMessage());
+        }
+    }
+
+    /** 站点抓取页面清单（逐页状态/标题/错误，pending|loaded|failed） */
+    @GetMapping("/{kbCode}/entries/{id}/pages")
+    public java.util.List<com.lark.oapi.sample.ws.model.entity.SupplierKbPage> entryPages(@PathVariable String kbCode, @PathVariable Long id) {
+        return entryPageRepo.findByEntryIdOrderByIdAsc(id);
+    }
+
+    /** 取消站点抓取 */
+    @PostMapping(value = "/entries/{id}/cancel", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> cancel(@PathVariable Long id) {
+        kbService.cancelCrawl(id);
+        return ResponseEntity.ok("{\"ok\":true}");
+    }
+
+    /** 单页正文预览（站点抓取 loaded 页） */
+    @GetMapping(value = "/pages/{pageId}/md", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> pageMd(@PathVariable Long pageId) {
+        try {
+            var page = entryPageRepo.findById(pageId)
+                    .orElseThrow(() -> new IllegalArgumentException("页面不存在: " + pageId));
+            if (page.getMdPath() == null || page.getMdPath().isBlank()) throw new IllegalArgumentException("该页没有已保存正文");
+            JsonObject o = new JsonObject();
+            o.addProperty("content", java.nio.file.Files.readString(java.nio.file.Paths.get(page.getMdPath())));
+            return ResponseEntity.ok(o.toString());
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        } catch (Exception e) {
+            return err("读取失败: " + e.getMessage());
         }
     }
 

@@ -243,6 +243,52 @@ public class SupplierJobController {
         } catch (IllegalArgumentException ex) { return err(ex.getMessage()); }
     }
 
+    /** 开发期对话节点：发一句话，系统重写为可执行提示词（异步） */
+    @PostMapping(value = "/api/supplier-jobs/{id}/nodes/{nodeId}/devchat", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> devchat(@PathVariable Long id, @PathVariable String nodeId,
+                                          @RequestBody String rawBody) {
+        try {
+            JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            jobService.askNode(id, nodeId, opt(body, "text"));
+            return ResponseEntity.ok("{\"ok\":true}");
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        }
+    }
+
+    /** 开发期对话历史（Jackson 直出） */
+    @GetMapping("/api/supplier-jobs/{id}/nodes/{nodeId}/devchat")
+    public List<com.lark.oapi.sample.ws.model.entity.SupplierNodeChat> devchatHistory(@PathVariable Long id, @PathVariable String nodeId) {
+        return jobService.nodeChatHistory(id, nodeId);
+    }
+
+    /** n4 提示词要点自检：返回 8 项 √/× 清单 */
+    @PostMapping(value = "/api/supplier-jobs/{id}/codegen-check", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> codegenCheck(@PathVariable Long id, @RequestBody String rawBody) {
+        JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+        var checks = jobService.checkCodegenPrompt(opt(body, "prompt"));
+        com.google.gson.JsonArray arr = new com.google.gson.JsonArray();
+        for (var c : checks) {
+            JsonObject o = new JsonObject();
+            o.addProperty("item", c.item());
+            o.addProperty("pass", c.pass());
+            o.addProperty("hint", c.hint());
+            arr.add(o);
+        }
+        JsonObject out = new JsonObject();
+        out.add("checks", arr);
+        return ResponseEntity.ok(out.toString());
+    }
+
+    /** 按检查结果针对性修正提示词（补齐缺失要点，幂等） */
+    @PostMapping(value = "/api/supplier-jobs/{id}/codegen-fix", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> codegenFix(@PathVariable Long id, @RequestBody String rawBody) {
+        JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+        JsonObject out = new JsonObject();
+        out.addProperty("prompt", jobService.fixCodegenPrompt(opt(body, "prompt")));
+        return ResponseEntity.ok(out.toString());
+    }
+
     // ===== 工作流模板 =====
 
     @GetMapping("/api/workflows")
@@ -353,6 +399,7 @@ public class SupplierJobController {
             no.addProperty("progress", n.getProgress());
             no.addProperty("thinking", n.getThinking());
             no.addProperty("codegenPrep", n.isCodegenPrep());
+            no.addProperty("devChat", n.isDevChat());
             no.addProperty("lastRunAt", String.valueOf(n.getLastRunAt()));
             no.addProperty("doneAt", String.valueOf(n.getDoneAt()));
             arr.add(no);

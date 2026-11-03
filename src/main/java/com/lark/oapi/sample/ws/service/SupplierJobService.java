@@ -50,6 +50,7 @@ public class SupplierJobService {
     private final SupplierKbService kbService;
     private final SupplierReferenceContext referenceContext;
     private final com.lark.oapi.sample.ws.repository.SupplierJobChatRepository chatRepo;
+    private final com.lark.oapi.sample.ws.repository.SupplierNodeChatRepository nodeChatRepo;
 
     public SupplierJobService(SupplierJobRepository jobRepo,
                               SupplierJobNodeRepository nodeRepo,
@@ -57,7 +58,8 @@ public class SupplierJobService {
                               BotInstanceRepository instanceRepo,
                               ClaudeCodeService claudeService,
                               SupplierKbService kbService,
-                              com.lark.oapi.sample.ws.repository.SupplierJobChatRepository chatRepo) {
+                              com.lark.oapi.sample.ws.repository.SupplierJobChatRepository chatRepo,
+                              com.lark.oapi.sample.ws.repository.SupplierNodeChatRepository nodeChatRepo) {
         this.jobRepo = jobRepo;
         this.nodeRepo = nodeRepo;
         this.templateRepo = templateRepo;
@@ -66,6 +68,7 @@ public class SupplierJobService {
         this.kbService = kbService;
         this.referenceContext = new SupplierReferenceContext(kbService);
         this.chatRepo = chatRepo;
+        this.nodeChatRepo = nodeChatRepo;
     }
 
     // ===== 内置模板种子 =====
@@ -127,6 +130,123 @@ public class SupplierJobService {
         return title != null && title.contains("代码") && title.contains("写");
     }
 
+    // ===== 三期迁移（11-03-supplier-flow-polish-p3，幂等） =====
+
+    static final String N45_TITLE = "开发期沟通 → 提示词重写";
+    static final String N45_DESC = "开发中与供应商沟通得到的特殊业务处理、要调整的点——把原始话贴进来，系统结合知识库/历史对话/skill 重写成可直接发给实例的提示词，可无限轮。";
+    static final String N9_TITLE = "Review 供应商代码";
+    static final String N9_DESC = "填入公司的 review skill（目录路径或名称）作为补充指示执行：实例将用该 skill 对本供应商代码做一轮 review，指出问题与改进项（产物可编辑纠正）。";
+    static final String N9_PROMPT = "【供应商接入 · 代码 Review】\n供应商: {supplierName}，类库路径: {libraryPath}\n\n"
+            + "请使用玩家在补充指示中提供的 review skill（若未提供，先以【卡点】询问用哪个 skill），"
+            + "按该 skill 的检查项逐条 review 本供应商对接代码，输出问题清单：\n"
+            + "| 严重度 | 文件:行 | 问题 | 依据(skill 条目) | 建议改法 |\n"
+            + "只报真问题不凑数；无问题的检查项汇总说明\"已检查通过\"。\n{extra}";
+    static final String N8_APPEND = " 另需在 SS.AliyunLoggerConfig 补充该供应商的日志配置。";
+
+    /** 内置 API 模板与存量 ACTIVE 存档回填 n45/n9 与 n8 文案（判存幂等，重复启动安全） */
+    @PostConstruct
+    public void migrateFlowNodes() {
+        try {
+            for (WorkflowTemplate t : templateRepo.findAll()) {
+                if (!t.isBuiltin() || !"API".equals(t.getMode())) continue;
+                JsonArray arr = parseNodes(t.getNodesJson());
+                JsonArray migrated = migrateTemplateNodes(arr);
+                if (migrated != arr) { t.setNodesJson(migrated.toString()); templateRepo.save(t); }
+            }
+            for (SupplierJob job : jobRepo.findAll()) {
+                if (!"ACTIVE".equals(job.getStatus())) continue;
+                migrateJobNodes(job);
+            }
+        } catch (Exception e) {
+            log.warn("[SupplierJob] 三期节点迁移失败（不影响启动）: {}", e.getMessage());
+        }
+    }
+
+    private static JsonArray migrateTemplateNodes(JsonArray original) {
+        java.util.List<JsonElement> items = new java.util.ArrayList<>();
+        for (JsonElement el : original) items.add(el);
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        int n4Index = -1;
+        for (int i = 0; i < items.size(); i++) {
+            JsonElement el = items.get(i);
+            if (!el.isJsonObject()) continue;
+            String id = str(el.getAsJsonObject(), "id", "");
+            ids.add(id);
+            if ("n4".equals(id)) n4Index = i;
+        }
+        boolean changed = false;
+        if (!ids.contains("n45") && n4Index >= 0) {
+            JsonObject n45 = new JsonObject();
+            n45.addProperty("id", "n45");
+            n45.addProperty("type", "agent");
+            n45.addProperty("title", N45_TITLE);
+            n45.addProperty("description", N45_DESC);
+            n45.addProperty("prompt", "");
+            n45.addProperty("devChat", true);
+            items.add(n4Index + 1, n45);
+            changed = true;
+        }
+        boolean hasN9 = false;
+        for (JsonElement el : items) {
+            if (el.isJsonObject() && "n9".equals(str(el.getAsJsonObject(), "id", ""))) hasN9 = true;
+        }
+        if (!hasN9) {
+            JsonObject n9 = new JsonObject();
+            n9.addProperty("id", "n9");
+            n9.addProperty("type", "agent");
+            n9.addProperty("title", N9_TITLE);
+            n9.addProperty("description", N9_DESC);
+            n9.addProperty("prompt", N9_PROMPT);
+            items.add(n9);
+            changed = true;
+        }
+        for (JsonElement el : items) {
+            if (!el.isJsonObject()) continue;
+            JsonObject o = el.getAsJsonObject();
+            if (!"n8".equals(str(o, "id", ""))) continue;
+            String d = str(o, "description", "");
+            if (!d.contains("AliyunLoggerConfig")) { o.addProperty("description", d + N8_APPEND); changed = true; }
+        }
+        if (!changed) return original;
+        JsonArray rebuilt = new JsonArray();
+        for (JsonElement el : items) rebuilt.add(el);
+        return rebuilt;
+    }
+
+    private void migrateJobNodes(SupplierJob job) {
+        List<SupplierJobNode> nodes = nodeRepo.findByJobIdOrderBySeqAsc(job.getId());
+        if (nodes.isEmpty()) return;
+        java.util.Set<String> ids = new java.util.HashSet<>();
+        nodes.forEach(n -> ids.add(n.getNodeId()));
+        if (!ids.contains("n45")) {
+            SupplierJobNode n4 = nodes.stream().filter(n -> "n4".equals(n.getNodeId())).findFirst().orElse(null);
+            int target = n4 != null ? n4.getSeq() + 1 : nodes.size();
+            for (SupplierJobNode n : nodes) if (n.getSeq() >= target) { n.setSeq(n.getSeq() + 1); nodeRepo.save(n); }
+            SupplierJobNode n45 = new SupplierJobNode();
+            n45.setJobId(job.getId()); n45.setNodeId("n45"); n45.setSeq(target);
+            n45.setType("agent"); n45.setTitle(N45_TITLE); n45.setDescription(N45_DESC);
+            n45.setPrompt(""); n45.setDevChat(true); n45.setStatus("PENDING"); n45.setContextStage("auto");
+            nodeRepo.save(n45);
+            log.info("[SupplierJob] 存档 {} 回填 n45 开发期对话节点", job.getId());
+        }
+        if (!ids.contains("n9")) {
+            int maxSeq = nodes.stream().mapToInt(SupplierJobNode::getSeq).max().orElse(-1) + 1;
+            SupplierJobNode n9 = new SupplierJobNode();
+            n9.setJobId(job.getId()); n9.setNodeId("n9"); n9.setSeq(maxSeq + 10);   // 放最后（n8 之后）
+            n9.setType("agent"); n9.setTitle(N9_TITLE); n9.setDescription(N9_DESC);
+            n9.setPrompt(N9_PROMPT); n9.setStatus("PENDING"); n9.setContextStage("auto");
+            nodeRepo.save(n9);
+            log.info("[SupplierJob] 存档 {} 回填 n9 review 节点", job.getId());
+        }
+        nodes.stream().filter(n -> "n8".equals(n.getNodeId())).findFirst().ifPresent(n8 -> {
+            String d = n8.getDescription() == null ? "" : n8.getDescription();
+            if (!d.contains("AliyunLoggerConfig")) {
+                n8.setDescription(d + N8_APPEND);
+                nodeRepo.save(n8);
+            }
+        });
+    }
+
     private String apiTemplateNodes() {
         JsonArray nodes = new JsonArray();
         nodes.add(node("n1", "agent", "拉取接口文档 → 接口映射报告",
@@ -160,6 +280,11 @@ public class SupplierJobService {
                 "先在「写代码准备」提交三方会议文档（飞书云文档链接）与当前配置 key/value，"
                         + "再点「生成提示词」复制发给绑定实例（自动聚合知识库/实测档案/skill/spec/会议文档/配置）。代码写完并自查后点完成。", ""));
         nodes.get(3).getAsJsonObject().addProperty("codegenPrep", true);   // n4 写代码前置门禁
+        JsonObject n45 = node("n45", "agent", "开发期沟通 → 提示词重写",
+                "开发中与供应商沟通得到的特殊业务处理、要调整的点——把原始话贴进来，系统结合知识库/历史对话/skill 重写成可直接发给实例的提示词，可无限轮。",
+                "");
+        n45.addProperty("devChat", true);
+        nodes.add(n45);
         nodes.add(node("n5", "agent_check", "代码依赖扫描 → 配置提醒清单",
                 "让实例扫描生成的供应商代码，找出所有需要外部配置的依赖（redis、配置中心开关、账号参数、NuGet 枚举、防火墙/白名单等），"
                         + "产出「上线前必须配置的清单」。",
@@ -177,7 +302,16 @@ public class SupplierJobService {
                         + "验证数据落库与映射正确性。通过后点完成。", ""));
         nodes.add(node("n8", "reminder", "上线准备与归档",
                 "预发/生产环境配置核对、监控告警确认、把本次接入踩坑经验反馈给 Skill Hook 沉淀（如果有对应 hook 会自动处理）。"
-                        + "全部就绪后点完成，本局游戏通关 🎉", ""));
+                        + "另需在 SS.AliyunLoggerConfig 补充该供应商的日志配置。全部就绪后点完成，本局游戏通关 🎉", ""));
+        nodes.add(node("n9", "agent", "Review 供应商代码",
+                "填入公司的 review skill（目录路径或名称）作为补充指示执行：实例将用该 skill 对本供应商代码做一轮 review，指出问题与改进项（产物可编辑纠正）。",
+                "【供应商接入 · 代码 Review】\n"
+                        + "供应商: {supplierName}，类库路径: {libraryPath}\n\n"
+                        + "请使用玩家在补充指示中提供的 review skill（若未提供，先以【卡点】询问用哪个 skill），"
+                        + "按该 skill 的检查项逐条 review 本供应商对接代码，输出问题清单：\n"
+                        + "| 严重度 | 文件:行 | 问题 | 依据(skill 条目) | 建议改法 |\n"
+                        + "只报真问题不凑数；无问题的检查项汇总说明\"已检查通过\"。\n"
+                        + "{extra}"));
         return nodes.toString();
     }
 
@@ -234,6 +368,7 @@ public class SupplierJobService {
             n.setDescription(str(o, "description", ""));
             n.setPrompt(str(o, "prompt", ""));
             n.setCodegenPrep(o.has("codegenPrep") && o.get("codegenPrep").getAsBoolean());
+            n.setDevChat(o.has("devChat") && o.get("devChat").getAsBoolean());
             n.setStatus("PENDING");
             nodeRepo.save(n);
             if (firstNodeId == null) firstNodeId = n.getNodeId();
@@ -268,6 +403,7 @@ public class SupplierJobService {
     @Transactional
     public void deleteJob(Long id) {
         nodeRepo.deleteByJobId(id);
+        try { nodeChatRepo.deleteByJobId(id); } catch (Exception ignore) { }
         jobRepo.deleteById(id);
     }
 
@@ -640,6 +776,106 @@ public class SupplierJobService {
          .append("- 覆盖度自查：同步城市/国家/酒店/房型/报价、查价、验价、下单、查单、取消各接口映射齐全，鉴权方式与实测档案一致。\n")
          .append("- 按 create-supplier skill 的流程与项目规范落码，完成后自查并汇报。\n");
         return p.toString();
+    }
+
+    // ===== 开发期对话节点（三期 R4）：原始话 → 重写提示词，无限轮，记录存节点 =====
+
+    /** 玩家在本节点发一句话：结合知识库索引+本节点历史+skill，让实例重写为可执行提示词 */
+    public void askNode(Long jobId, String nodeId, String text) {
+        SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
+        if (text == null || text.isBlank()) throw new IllegalArgumentException("内容不能为空");
+        if (job.getInstanceId() == null) throw new IllegalArgumentException("存档未绑定执行实例，无法生成提示词");
+        BotInstance inst = instanceRepo.findById(job.getInstanceId())
+                .orElseThrow(() -> new IllegalArgumentException("绑定实例不存在"));
+        SupplierJobNode n = nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
+                .orElseThrow(() -> new IllegalArgumentException("节点不存在"));
+        if (!n.isDevChat()) throw new IllegalArgumentException("该节点不是开发期对话节点");
+
+        com.lark.oapi.sample.ws.model.entity.SupplierNodeChat u = new com.lark.oapi.sample.ws.model.entity.SupplierNodeChat();
+        u.setJobId(jobId); u.setNodeId(nodeId); u.setRole("user"); u.setText(text.strip());
+        nodeChatRepo.save(u);
+        com.lark.oapi.sample.ws.model.entity.SupplierNodeChat a = new com.lark.oapi.sample.ws.model.entity.SupplierNodeChat();
+        a.setJobId(jobId); a.setNodeId(nodeId); a.setRole("agent"); a.setStatus("PENDING"); a.setText("");
+        nodeChatRepo.save(a);
+
+        StringBuilder hist = new StringBuilder();
+        List<com.lark.oapi.sample.ws.model.entity.SupplierNodeChat> all = nodeChatRepo.findByJobIdAndNodeIdOrderByIdAsc(jobId, nodeId);
+        for (var m : all.subList(Math.max(0, all.size() - 31), all.size())) {
+            if (m.getId().equals(a.getId())) continue;
+            hist.append("user".equals(m.getRole()) ? "玩家: " : "重写结果: ")
+                .append(m.getText().strip().replaceAll("\\s+", " ")).append('\n');
+        }
+        String kbIndex = kbService.indexText(kbService.kbCode(job));
+        String skills = formatSkills(job.getSkillsJson());
+        Thread.ofVirtual().name("devchat-" + jobId + "-" + nodeId).start(() -> {
+            try {
+                String prompt = "【开发期提示词重写】你是供应商接入任务的提示词代笔。\n"
+                        + "供应商: " + job.getSupplierName() + "（ID: " + job.getSupplierCode() + "），类库: " + job.getLibraryPath() + "\n\n"
+                        + kbIndex + "\n\n【可用 Skill】\n" + (skills.isBlank() ? "（无）" : skills) + "\n\n"
+                        + "== 本节点历史沟通（旧→新，含本轮） ==\n" + hist + "\n\n"
+                        + "请把玩家本轮原始诉求重写成一条可直接交给开发实例执行的完整提示词："
+                        + "保留玩家本意，补齐必要上下文（该读哪些知识库文件、遵循哪个 skill、对照哪份会议文档/实测档案）；"
+                        + "信息不足以重写时不要瞎猜，单独一行【卡点】+问题。\n"
+                        + "只输出最终提示词正文，用 ```prompt 代码块包裹，不要任何解释。";
+                String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
+                String reply = claudeCodeService.chat(inst.getId(), "supplier-job-" + jobId,
+                        prompt, null, dir, inst.getClaudeModel(), new NoopListener());
+                boolean bad = reply == null || reply.startsWith("❌");
+                a.setText(bad ? (reply == null ? "（无回复）" : reply) : extractPromptBlock(reply));
+                a.setStatus(bad ? "FAILED" : "DONE");
+            } catch (Exception e) {
+                a.setText("生成失败: " + e.getMessage());
+                a.setStatus("FAILED");
+            }
+            nodeChatRepo.save(a);
+        });
+    }
+
+    public List<com.lark.oapi.sample.ws.model.entity.SupplierNodeChat> nodeChatHistory(Long jobId, String nodeId) {
+        return nodeChatRepo.findByJobIdAndNodeIdOrderByIdAsc(jobId, nodeId);
+    }
+
+    /** 从回复里取 ```prompt 代码块正文（没有代码块就原样返回） */
+    static String extractPromptBlock(String out) {
+        if (out == null) return "";
+        java.util.regex.Matcher m = java.util.regex.Pattern
+                .compile("(?s)```(?:prompt|text|md|markdown)?\\s*\\n(.*?)\\n```").matcher(out);
+        if (m.find()) return m.group(1).strip();
+        return out.strip();
+    }
+
+    // ===== n4 提示词要点自检（三期 R3，纯静态规则） =====
+
+    public record PromptCheck(String item, boolean pass, String hint) {}
+    private record Rule(String label, String[] keys, String hint) {}
+
+    static final List<Rule> PROMPT_RULES = List.of(
+            new Rule("trellis 任务管理", new String[]{"trellis"}, "开发过程用 trellis 任务管理：先建子任务（PRD+验收标准），按 before-dev→implement→check→finish 规范推进"),
+            new Rule("使用 skill", new String[]{"skill"}, "实现必须遵循提示词中列出的 skill（SKILL.md 及其引用文件），不确定时先读再写"),
+            new Rule("spec 文档", new String[]{"spec"}, "动手前先阅读 spec 文档并遵循项目规范"),
+            new Rule("知识库索引", new String[]{"知识库", ".md"}, "先查知识库索引并 Read 对应 .md 文件获取接口文档内容，不要重新抓取"),
+            new Rule("三方会议文档", new String[]{"feishu.cn", "larksuite.com", "会议"}, "业务约定以三方会议文档（飞书云文档链接）为准，逐条核对"),
+            new Rule("配置 key/value", new String[]{"配置", "key"}, "配置按 key/value 清单从配置中心读取，禁止硬编码"),
+            new Rule("redis 提醒", new String[]{"redis"}, "实现用到 redis（缓存 key/开关）时，记得去配置中心完成配置"),
+            new Rule("实测/Postman 档案", new String[]{"实测", "postman", "collection"}, "接口实现对照实测档案（Postman Collection 与差异记录），文档与实际不一致以实测为准"));
+
+    public static List<PromptCheck> checkCodegenPrompt(String prompt) {
+        String p = prompt == null ? "" : prompt.toLowerCase();
+        return PROMPT_RULES.stream()
+                .map(r -> new PromptCheck(r.label(),
+                        java.util.Arrays.stream(r.keys()).anyMatch(p::contains), r.hint()))
+                .toList();
+    }
+
+    /** 按检查结果把缺失要点针对性补写进提示词（幂等：再跑一遍检查全过） */
+    public static String fixCodegenPrompt(String prompt) {
+        String base = prompt == null ? "" : prompt;
+        List<PromptCheck> missing = checkCodegenPrompt(base).stream().filter(c -> !c.pass()).toList();
+        if (missing.isEmpty()) return base;
+        StringBuilder sb = new StringBuilder(base.stripTrailing());
+        sb.append("\n\n== 补充规范（自动检查补齐） ==\n");
+        for (PromptCheck c : missing) sb.append("- ").append(c.hint()).append('\n');
+        return sb.toString();
     }
 
     /** 手动编辑工件（玩家纠正报告） */

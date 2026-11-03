@@ -80,6 +80,10 @@ public class SupplierJobNode {
     @Column(name = "codegen_prep")
     private Boolean codegenPrep;
 
+    /** 开发期对话节点（三期 R4）：节点内多轮"原始话→重写提示词"对话（NULL 安全） */
+    @Column(name = "dev_chat")
+    private Boolean devChat;
+
     @Column(name = "started_at")
     private LocalDateTime startedAt;
 
@@ -119,6 +123,8 @@ public class SupplierJobNode {
     public void setThinking(String thinking) { this.thinking = thinking; }
     public boolean isCodegenPrep() { return codegenPrep != null && codegenPrep; }
     public void setCodegenPrep(boolean codegenPrep) { this.codegenPrep = codegenPrep; }
+    public boolean isDevChat() { return devChat != null && devChat; }
+    public void setDevChat(boolean devChat) { this.devChat = devChat; }
     public LocalDateTime getStartedAt() { return startedAt; }
     public void setStartedAt(LocalDateTime startedAt) { this.startedAt = startedAt; }
     public LocalDateTime getDoneAt() { return doneAt; }

@@ -18,7 +18,7 @@ class SupplierPrepTest {
         var job = new com.lark.oapi.sample.ws.model.entity.SupplierJob();
         when(kb.kbCode(job)).thenReturn("supplier-1");
         when(kb.contextText("supplier-1")).thenReturn("供应商专属知识库索引");
-        var service = new SupplierJobService(null, null, null, null, null, kb, null);
+        var service = new SupplierJobService(null, null, null, null, null, kb, null, null);
         assertTrue(service.renderPrompt("执行自定义任务", job, "").contains("供应商专属知识库索引"));
         String explicit = service.renderPrompt("材料：{docs}", job, "");
         assertEquals(explicit.indexOf("供应商专属知识库索引"), explicit.lastIndexOf("供应商专属知识库索引"));

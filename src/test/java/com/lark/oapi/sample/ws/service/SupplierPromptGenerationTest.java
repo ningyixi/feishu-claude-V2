@@ -23,7 +23,7 @@ class SupplierPromptGenerationTest {
         var instance = new BotInstance(); instance.setId(2L);
         when(jobs.findById(1L)).thenReturn(Optional.of(job));
         when(instances.findById(2L)).thenReturn(Optional.of(instance));
-        var service = spy(new SupplierJobService(jobs, null, null, instances, agent, kb, null));
+        var service = spy(new SupplierJobService(jobs, null, null, instances, agent, kb, null, null));
         doReturn("mandatory original supplier context").when(service).codegenPrompt(1L);
         when(agent.chat(eq(2L), eq("supplier-prompt-1"), contains("mandatory original supplier context"),
                 isNull(), anyString(), nullable(String.class), any(TurnListener.class))).thenReturn("generated development instructions");

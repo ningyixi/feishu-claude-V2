@@ -9,7 +9,7 @@ import static org.junit.jupiter.api.Assertions.*;
 class SupplierStreamEvidenceTest {
     @Test void actualStreamToolResultFlowsIntoNodeEvidence() throws Exception {
         var node = new SupplierJobNode();
-        var service = new SupplierJobService(null, null, null, null, null, null, null);
+        var service = new SupplierJobService(null, null, null, null, null, null, null, null);
         var progress = SupplierJobService.class.getDeclaredMethod("progressListener", SupplierJobNode.class);
         progress.setAccessible(true);
         TurnListener listener = (TurnListener) progress.invoke(service, node);

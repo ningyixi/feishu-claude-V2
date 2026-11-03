@@ -483,14 +483,17 @@ function GameView({ jobId, onBack, showToast }) {
                 {cur.description}
               </div>
 
-              {/* agent 节点：执行控制 */}
-              {(cur.type === 'agent' || cur.type === 'agent_check') && (
+              {/* agent 节点：执行控制（devChat 节点改为无限轮对话重写提示词） */}
+              {(cur.type === 'agent' || cur.type === 'agent_check') && cur.devChat && (
+                <DevChatPanel jobId={job.id} nodeId={cur.nodeId} disabled={!job.instanceId} showToast={showToast} />
+              )}
+              {(cur.type === 'agent' || cur.type === 'agent_check') && !cur.devChat && (
                 <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px dashed var(--border,#e5e7eb)' }}>
                   <div style={{ display: 'flex', gap: 8 }}>
-                    <input className="form-input" style={{ flex: 1, padding: '7px 10px', fontSize: 12.5 }}
-                      placeholder={cur.artifact ? '纠正/补充指示（如：验价接口映射错了，应该是 xxx），留空则重跑' : '补充指示（可选）'}
+                    <textarea className="form-input" rows={3} style={{ flex: 1, padding: '7px 10px', fontSize: 12.5, resize: 'vertical', fontFamily: 'inherit' }}
+                      placeholder={cur.artifact ? '纠正/补充指示（如：验价接口映射错了，应该是 xxx…），Enter 执行，Shift+Enter 换行' : '补充指示（可选），Shift+Enter 换行'}
                       value={instruction} onChange={e => setInstruction(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter') runNode(cur.nodeId) }} />
+                      onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runNode(cur.nodeId) } }} />
                     <button className="btn btn-primary" style={{ fontSize: 12.5, padding: '6px 16px', flexShrink: 0 }}
                       disabled={cur.status === 'RUNNING' || !job.instanceId}
                       onClick={() => runNode(cur.nodeId)}>
@@ -504,10 +507,10 @@ function GameView({ jobId, onBack, showToast }) {
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{cur.pendingQuestion}</ReactMarkdown>
                       </div>
                       <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
-                        <input className="form-input" style={{ flex: 1, padding: '7px 10px', fontSize: 12.5 }}
-                          placeholder="回答卡点（凭证 / 决定 / 材料说明…），回车发送"
+                        <textarea className="form-input" rows={2} style={{ flex: 1, padding: '7px 10px', fontSize: 12.5, resize: 'vertical', fontFamily: 'inherit' }}
+                          placeholder="回答卡点（凭证 / 决定 / 材料说明…），Enter 发送，Shift+Enter 换行"
                           value={steerAnswer} onChange={e => setSteerAnswer(e.target.value)}
-                          onKeyDown={e => { if (e.key === 'Enter') answerNode(cur.nodeId) }} />
+                          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); answerNode(cur.nodeId) } }} />
                         <button className="btn btn-primary" style={{ fontSize: 12.5, padding: '6px 16px', flexShrink: 0 }}
                           disabled={!steerAnswer.trim()}
                           onClick={() => answerNode(cur.nodeId)}>📤 发送答复</button>
@@ -644,6 +647,7 @@ function CodegenPrepCard({ job, reload, showToast }) {
   const [promptSkill, setPromptSkill] = useState(job.promptSkillPath || '')
   const [configs, setConfigs] = useState(parseConfigs())
   const [prompt, setPrompt] = useState(null)   // 生成结果文本
+  const [checks, setChecks] = useState(null)   // R3 自检结果
   const [busy, setBusy] = useState(false)
   const meetingDone = !!(job.meetingDocUrl || '').trim()
   const kvDone = parseConfigs().some(c => c.key && c.value)
@@ -671,6 +675,28 @@ function CodegenPrepCard({ job, reload, showToast }) {
   async function copy() {
     try { await navigator.clipboard.writeText(prompt); showToast('提示词已复制 — 去飞书粘贴发给实例吧', 'success') }
     catch { showToast('复制失败，请手动全选文本框内容', 'error') }
+  }
+  async function runCheck() {
+    setBusy(true)
+    const res = await fetch(`/api/supplier-jobs/${job.id}/codegen-check`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }),
+    })
+    const d = await res.json().catch(() => ({}))
+    setBusy(false)
+    if (!res.ok) return showToast(d.error || '检查失败', 'error')
+    setChecks(d.checks || [])
+  }
+  async function applyFix() {
+    setBusy(true)
+    const res = await fetch(`/api/supplier-jobs/${job.id}/codegen-fix`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt }),
+    })
+    const d = await res.json().catch(() => ({}))
+    setBusy(false)
+    if (!res.ok) return showToast(d.error || '修正失败', 'error')
+    setPrompt(d.prompt)
+    setChecks(null)
+    showToast('缺失要点已补写进提示词', 'success')
   }
 
   return (
@@ -735,12 +761,33 @@ function CodegenPrepCard({ job, reload, showToast }) {
       </div>
       {prompt && (
         <div style={{ marginTop: 10 }}>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 6, alignItems: 'center' }}>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 6, alignItems: 'center', flexWrap: 'wrap' }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-dim)' }}>发给实例的提示词（可直接编辑后复制）</span>
             <div style={{ flex: 1 }} />
+            <button className="btn" style={{ fontSize: 11, padding: '3px 12px' }} disabled={busy} onClick={runCheck}>🧪 自动检查要点</button>
             <button className="btn" style={{ fontSize: 11, padding: '3px 12px' }} onClick={() => setPrompt(null)}>收起</button>
             <button className="btn btn-primary" style={{ fontSize: 11, padding: '3px 12px' }} onClick={copy}>📋 一键复制</button>
           </div>
+          {checks && (
+            <div style={{ marginBottom: 8, border: '1px solid var(--border,#e5e7eb)', borderRadius: 8, overflow: 'hidden' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <tbody>
+                  {checks.map((c, i) => (
+                    <tr key={c.item} style={{ background: c.pass ? undefined : 'rgba(220,38,38,.05)', borderTop: i ? '1px solid var(--border,#eee)' : undefined }}>
+                      <td style={{ width: 36, textAlign: 'center', color: c.pass ? '#16a34a' : '#dc2626', fontWeight: 700 }}>{c.pass ? '√' : '×'}</td>
+                      <td style={{ padding: '5px 8px', whiteSpace: 'nowrap', fontWeight: 600 }}>{c.item}</td>
+                      <td style={{ padding: '5px 8px', color: 'var(--text-dim)', fontSize: 11.5 }}>{c.pass ? '' : '缺失 → ' + c.hint}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {checks.some(c => !c.pass) && (
+                <div style={{ padding: '6px 10px', borderTop: '1px solid var(--border,#eee)' }}>
+                  <button className="btn btn-primary" style={{ fontSize: 11, padding: '3px 12px' }} disabled={busy} onClick={applyFix}>🔧 按检查结果修正提示词</button>
+                </div>
+              )}
+            </div>
+          )}
           <textarea className="form-input" rows={16} style={{ fontFamily: 'var(--font-mono)', fontSize: 12, resize: 'vertical' }}
             value={prompt} onChange={e => setPrompt(e.target.value)} />
         </div>
@@ -771,22 +818,28 @@ function KbPanel({ kbCode, showToast }) {
   const [type, setType] = useState('chat')
   const [value, setValue] = useState('')
   const [title, setTitle] = useState('')
+  const [site, setSite] = useState(false)           // url 类型：同站点目录递归抓取(≤200页)
+  const [pagesModal, setPagesModal] = useState(null) // 打开页面清单的 entry
+  const [pview, setPview] = useState(null)           // 单页正文预览 {title, content}
   const [view, setView] = useState(null)   // {id, title, content, editing}
+
+  const kbMeta = (e) => { try { return JSON.parse(e.metaJson || '{}') } catch { return {} } }
 
   const load = () => fetch(`/api/supplier-kb/${encodeURIComponent(kbCode || '')}/entries`)
     .then(r => r.ok ? r.json() : []).then(setEntries).catch(() => {})
+  const busy = entries.some(e => e.status === 'PARSING' || e.status === 'PENDING')
   useEffect(() => {
     if (!kbCode) return
     load()
-    const t = setInterval(load, 5000)   // 解析是后台异步的，轮询状态
+    const t = setInterval(load, busy ? 2000 : 5000)   // 抓取/解析进行中加密轮询，进度 2s 内可见
     return () => clearInterval(t)
-  }, [kbCode])
+  }, [kbCode, busy])
 
   async function add() {
     if (!value.trim()) return showToast('内容不能为空', 'error')
     const res = await fetch(`/api/supplier-kb/${encodeURIComponent(kbCode)}/entries`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type, value, title }),
+      body: JSON.stringify({ type, value, title, site: type === 'url' && site }),
     })
     const d = await res.json().catch(() => ({}))
     if (!res.ok) return showToast(d.error || '添加失败', 'error')
@@ -844,6 +897,12 @@ function KbPanel({ kbCode, showToast }) {
         {type === 'chat' && <input className="form-input" style={{ width: 150, fontSize: 12 }} placeholder="标题(可选)" value={title} onChange={e => setTitle(e.target.value)} />}
         <textarea className="form-input" rows={type === 'chat' ? 3 : 1} style={{ flex: 1, minWidth: 260, fontSize: 12.5 }}
           placeholder={KB_TYPES[type].ph} value={value} onChange={e => setValue(e.target.value)} />
+        {type === 'url' && (
+          <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11.5, color: 'var(--text-dim)', alignSelf: 'center', cursor: 'pointer' }}
+            title="从入口页发现链接，按范围逐页抓取：严格同源 + 入口第一级路径（如 /docs/），最多发现 200 页；第 201 页发现即报错终止">
+            <input type="checkbox" checked={site} onChange={ev => setSite(ev.target.checked)} />🕸 导入同站点文档目录（最多 200 页）
+          </label>
+        )}
         <button className="btn btn-primary" style={{ fontSize: 12.5, padding: '6px 16px', alignSelf: 'flex-start' }}
           onClick={add}>＋ 补充入库</button>
       </div>
@@ -853,21 +912,37 @@ function KbPanel({ kbCode, showToast }) {
         {entries.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '8px 0' }}>（知识库还是空的 — 上方随时补充；创建时录入的旧文档已自动并入）</div>}
         {entries.map(e => {
           const st = KB_STATUS[e.status] || { label: e.status, color: '#6b7280' }
+          const m = kbMeta(e)
+          const isSite = e.type === 'url' && m.site
           return (
             <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderTop: '1px solid var(--border,#eee)', flexWrap: 'wrap' }}>
               <span style={{ fontSize: 14 }}>{KB_TYPES[e.type]?.icon || '•'}</span>
               <span style={{ fontSize: 12.5, fontWeight: 600, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.title}>{e.title || '(未命名)'}</span>
               <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.source}>{e.source}</span>
+              {isSite && <span className="hook-badge dim" title="同站点目录递归抓取（≤200页）">🕸站点</span>}
               <span className="hook-badge" style={{ color: st.color, background: st.color + '14', borderColor: st.color + '40' }}>
                 {(e.status === 'PARSING' || e.status === 'PENDING') && <span className="spinner" style={{ width: 8, height: 8, marginRight: 4, borderWidth: 1.5 }} />}
                 {st.label}
               </span>
+              {isSite && (e.status === 'PARSING' || e.status === 'DONE' || e.status === 'FAILED') && m.found != null && (
+                <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+                  已发现 {m.found} · 已载入 {m.loaded || 0} · 失败 {m.failed || 0} · 未抓取 {m.pending || 0}
+                </span>
+              )}
+              {isSite && m.partial && <span className="hook-badge" style={{ color: '#b45309', background: 'rgba(245,158,11,.12)', borderColor: 'rgba(245,158,11,.4)' }}>⚠️ 部分导入</span>}
               {e.status === 'FAILED' && <span style={{ fontSize: 11, color: 'var(--error)' }} title={e.error}>{String(e.error || '').slice(0, 40)}</span>}
               <select aria-label="材料使用阶段" className="form-input" style={{ width: 130, fontSize: 11 }} value={e.contextStage || 'all'} onChange={ev => changeStage(e.id, ev.target.value)}>
                 <option value="all">通用 · 每次交付</option><option value="analysis">文档分析</option><option value="probe">接口实测</option><option value="codegen">代码开发</option><option value="archive">仅留档</option>
               </select>
               <div style={{ flex: 1 }} />
               {e.status === 'DONE' && <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => openMd(e)}>👁 产物/校正</button>}
+              {isSite && e.status !== 'RAW' && (
+                <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => setPagesModal(e)}>📑 页面</button>
+              )}
+              {isSite && e.status === 'PARSING' && (
+                <button className="btn" style={{ fontSize: 11, padding: '2px 10px', color: 'var(--error)' }}
+                  onClick={async () => { await fetch(`/api/supplier-kb/entries/${e.id}/cancel`, { method: 'POST' }); showToast('已请求取消，当前页完成后停止', 'success') }}>✋ 取消</button>
+              )}
               {(e.type === 'url' || e.type === 'pdf') && e.status === 'RAW' && (
                 <button className="btn btn-primary" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔨 解析</button>
               )}
@@ -910,6 +985,83 @@ function KbPanel({ kbCode, showToast }) {
           </div>
         </div>
       )}
+
+      {pagesModal && (
+        <PagesModal kbCode={kbCode} entry={pagesModal} onClose={() => setPagesModal(null)} showToast={showToast}
+          onView={async (p) => {
+            const r = await fetch(`/api/supplier-kb/pages/${p.id}/md`)
+            const d = await r.json().catch(() => ({}))
+            if (!r.ok) return showToast(d.error || '读取失败', 'error')
+            setPview({ title: p.title || p.url, content: d.content || '' })
+          }} />
+      )}
+
+      {pview && (
+        <div className="modal-mask" onClick={() => setPview(null)}>
+          <div className="modal-box" style={{ maxWidth: 820, width: 'min(820px,94vw)' }} onClick={ev => ev.stopPropagation()}>
+            <div className="modal-title">📄 {pview.title}（页面正文）</div>
+            <div className="modal-body">
+              <div className="artifact-box md-body" style={{ maxHeight: 480, overflowY: 'auto' }}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{pview.content}</ReactMarkdown>
+              </div>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 10 }}>
+              <button className="btn" onClick={() => setPview(null)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ===== 站点抓取页面清单弹窗（11-03-kb-site-crawl） =====
+
+const PAGE_STATUS = {
+  pending: { label: '未抓取', color: '#6b7280' },
+  loaded: { label: '已载入', color: '#16a34a' },
+  failed: { label: '失败', color: '#dc2626' },
+}
+
+function PagesModal({ kbCode, entry, onClose, onView, showToast }) {
+  const [pages, setPages] = useState(null)
+  const load = () => fetch(`/api/supplier-kb/${encodeURIComponent(kbCode)}/entries/${entry.id}/pages`)
+    .then(r => r.ok ? r.json() : []).then(setPages).catch(() => setPages([]))
+  useEffect(() => {
+    load()
+    const t = setInterval(load, entry.status === 'PARSING' ? 2000 : 6000)
+    return () => clearInterval(t)
+  }, [entry.id, entry.status])
+  const m = (() => { try { return JSON.parse(entry.metaJson || '{}') } catch { return {} } })()
+  return (
+    <div className="modal-mask" onClick={onClose}>
+      <div className="modal-box" style={{ maxWidth: 920, width: 'min(920px,95vw)' }} onClick={ev => ev.stopPropagation()}>
+        <div className="modal-title">📑 站点页面清单 · {entry.title}
+          <span style={{ fontWeight: 400, fontSize: 12, color: 'var(--text-dim)', marginLeft: 8 }}>
+            已发现 {m.found ?? pages?.length ?? 0} · 已载入 {m.loaded ?? '-'} · 失败 {m.failed ?? '-'} · 未抓取 {m.pending ?? '-'}（发现数是实际抓到的，不代表全站总量）
+          </span>
+        </div>
+        {m.partial && <div style={{ margin: '0 0 8px', fontSize: 12, color: '#b45309' }}>⚠️ 部分导入：存在失败页面，正文索引已标注缺口</div>}
+        <div className="modal-body" style={{ maxHeight: '58vh', overflowY: 'auto' }}>
+          {!pages && <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>加载中…</div>}
+          {pages && pages.length === 0 && <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>（历史抓取无逐页记录，无法还原——重解析后可见）</div>}
+          {pages && pages.map(p => {
+            const ps = PAGE_STATUS[p.status] || { label: p.status, color: '#6b7280' }
+            return (
+              <div key={p.id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '6px 0', borderTop: '1px solid var(--border,#eee)', flexWrap: 'wrap' }}>
+                <span className="hook-badge" style={{ color: ps.color, background: ps.color + '14', borderColor: ps.color + '40', flexShrink: 0 }}>{ps.label}</span>
+                <span style={{ fontSize: 12, fontWeight: 600, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.title}>{p.title || '(无标题)'}</span>
+                <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', flex: 1, minWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.url}>{p.url}</span>
+                {p.status === 'failed' && <span style={{ fontSize: 11, color: 'var(--error)', maxWidth: 260, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={p.error}>{p.error}</span>}
+                {p.status === 'loaded' && p.mdPath && <button className="btn" style={{ fontSize: 11, padding: '2px 10px', flexShrink: 0 }} onClick={() => onView(p)}>预览</button>}
+              </div>
+            )
+          })}
+        </div>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 12 }}>
+          <button className="btn" onClick={onClose}>关闭</button>
+        </div>
+      </div>
     </div>
   )
 }
@@ -980,6 +1132,77 @@ function ChatPanel({ jobId, running, showToast }) {
         <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={!q.trim() || sending} onClick={send}>
           {sending ? '发送中…' : '📤 提问'}
         </button>
+      </div>
+    </div>
+  )
+}
+
+// ===== 开发期对话节点（三期 R4）：贴原始话 → 实例重写为可执行提示词，无限轮 =====
+
+function DevChatPanel({ jobId, nodeId, disabled, showToast }) {
+  const [msgs, setMsgs] = useState([])
+  const [text, setText] = useState('')
+  const [sending, setSending] = useState(false)
+  const [copiedId, setCopiedId] = useState(null)
+  const bodyRef = useRef(null)
+
+  const load = () => fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/devchat`)
+    .then(r => r.ok ? r.json() : []).then(setMsgs).catch(() => {})
+  const pending = msgs.some(m => m.status === 'PENDING')
+  useEffect(() => {
+    load()
+    const t = setInterval(load, pending ? 2000 : 7000)
+    return () => clearInterval(t)
+  }, [jobId, nodeId, pending])
+  useEffect(() => { if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight }, [msgs.length, msgs[msgs.length - 1]?.text?.length])
+
+  async function send() {
+    if (!text.trim() || sending) return
+    setSending(true)
+    const res = await fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/devchat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }),
+    })
+    const d = await res.json().catch(() => ({}))
+    setSending(false)
+    if (!res.ok) return showToast(d.error || '发送失败', 'error')
+    setText(''); load()
+  }
+  async function copyMsg(m) {
+    try { await navigator.clipboard.writeText(m.text); setCopiedId(m.id); setTimeout(() => setCopiedId(null), 1500) }
+    catch { showToast('复制失败', 'error') }
+  }
+
+  return (
+    <div style={{ marginTop: 12, border: '1px dashed var(--border,#e5e7eb)', borderRadius: 10, padding: 12 }}>
+      <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 8 }}>🗣 开发期沟通 → 提示词重写
+        <span style={{ fontWeight: 400, fontSize: 11, color: 'var(--text-dim)', marginLeft: 8 }}>贴入与供应商沟通的原始结论/要调整的点，结合知识库与历史重写成可执行提示词（可无限轮）</span>
+      </div>
+      <div ref={bodyRef} style={{ maxHeight: 320, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {msgs.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-dim)', textAlign: 'center', padding: '10px 0' }}>（还没有沟通 — 例如贴"供应商刚说查价接口批量上限是 20 不是 50，报价缓存要 5 分钟过期"）</div>}
+        {msgs.map(m => m.role === 'user' ? (
+          <div key={m.id} style={{ alignSelf: 'flex-end', maxWidth: '80%', background: 'var(--accent,#2563eb)', color: '#fff', borderRadius: '10px 10px 2px 10px', padding: '7px 11px', fontSize: 12.5, whiteSpace: 'pre-wrap' }}>{m.text}</div>
+        ) : (
+          <div key={m.id} style={{ alignSelf: 'flex-start', maxWidth: '92%', background: 'rgba(22,163,74,.06)', border: '1px solid rgba(22,163,74,.25)', borderRadius: '10px 10px 10px 2px', padding: '7px 11px', fontSize: 12.5 }}>
+            {m.status === 'PENDING'
+              ? <span style={{ color: 'var(--text-dim)' }}><span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />结合上下文重写中…</span>
+              : <>
+                <div style={{ whiteSpace: 'pre-wrap', color: m.status === 'FAILED' ? 'var(--error)' : 'var(--text)' }}>{m.text}</div>
+                {m.status === 'DONE' && (
+                  <button className="btn" style={{ fontSize: 10.5, padding: '2px 10px', marginTop: 6 }} onClick={() => copyMsg(m)}>
+                    {copiedId === m.id ? '✅ 已复制，去发给实例' : '📋 复制这条提示词'}
+                  </button>
+                )}
+              </>}
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <textarea className="form-input" rows={3} style={{ flex: 1, fontSize: 12.5, resize: 'vertical', fontFamily: 'inherit' }}
+          placeholder={disabled ? '先在右上角绑定执行实例' : '原始诉求（Shift+Enter 换行，Enter 生成）'}
+          value={text} onChange={e => setText(e.target.value)} disabled={disabled}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
+        <button className="btn btn-primary" style={{ fontSize: 12.5, padding: '6px 14px', flexShrink: 0 }}
+          disabled={disabled || !text.trim() || sending} onClick={send}>✨ 生成</button>
       </div>
     </div>
   )
