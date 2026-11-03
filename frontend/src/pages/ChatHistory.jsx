@@ -232,7 +232,7 @@ export default function ChatHistory({ instanceId, instanceName, onBack }) {
 
         {/* 最新队头在顶（ticket 降序显示，消费顺序仍是 FIFO） */}
         {queue.slice().reverse().map(q => (
-          <div key={q.ticket} style={{
+          <div key={q.ticket} className="anim-in" style={{
             marginTop: 8, padding: '8px 10px', borderRadius: 8,
             background: 'rgba(245,158,11,.07)', border: '1px solid rgba(245,158,11,.28)',
           }}>

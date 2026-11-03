@@ -915,7 +915,7 @@ function KbPanel({ kbCode, showToast }) {
           const m = kbMeta(e)
           const isSite = e.type === 'url' && m.site
           return (
-            <div key={e.id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderTop: '1px solid var(--border,#eee)', flexWrap: 'wrap' }}>
+            <div key={e.id} className="anim-in" style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '7px 0', borderTop: '1px solid var(--border,#eee)', flexWrap: 'wrap' }}>
               <span style={{ fontSize: 14 }}>{KB_TYPES[e.type]?.icon || '•'}</span>
               <span style={{ fontSize: 12.5, fontWeight: 600, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.title}>{e.title || '(未命名)'}</span>
               <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={e.source}>{e.source}</span>

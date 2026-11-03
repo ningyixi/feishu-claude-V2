@@ -1323,3 +1323,40 @@ textarea.form-input, .form-input.mono { font-family: var(--font-mono); }
 @media (max-width: 1100px) {
   .e2e-main .chat-header > span:not(.e2e-chat-title):not(.conn-badge):not(.e2e-status):not(.spinner) { display: none; }
 }
+
+/* ===== 动画顺滑度优化（覆盖前文同名规则，后声明优先） ===== */
+/* 根因：box-shadow 逐帧动画触发重绘=卡顿；统一改为只走合成层的 transform/opacity */
+
+/* 让 pulse 更柔（缩放 1.7→1.35），同名 keyframes 覆盖上方定义 */
+@keyframes status-pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50%      { transform: scale(1.35); opacity: 0.6; }
+}
+/* glow 去 box-shadow：改为极轻的透明度呼吸（合成层，不重绘） */
+@keyframes status-glow {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.72; }
+}
+
+/* busy 徽章外圈不再做 box-shadow 动画，仅保留小圆点 pulse（GPU） */
+.status-badge.busy { animation: none; box-shadow: 0 0 0 3px rgba(59,130,246,0.10); }
+/* ask-banner 是整块大区域，重绘最贵：去掉外扩光晕动画，改静态柔影 */
+.ask-banner { animation: none; box-shadow: 0 1px 6px rgba(245,158,11,0.18); }
+
+/* 参与 transform/opacity 动画的元素提前提层，避免动画时栅格化抖动 */
+.status-badge .status-dot, .wf-dot.pulse, .task-dot, .live-cursor, .unread-dot { will-change: transform, opacity; }
+.spinner { will-change: transform; border-width: 2px; }
+
+/* 收窄 transition:all → 仅合成安全属性，杜绝 width/height/box-shadow 联动重排 */
+.job-card { transition: transform .12s ease, border-color .12s ease, box-shadow .12s ease; }
+.job-card:hover { transform: translateY(-1px); }
+.nav-item { transition: background-color .12s ease, color .12s ease; }
+.wf-node { transition: background-color .12s ease, border-color .12s ease; }
+
+/* 动态行/弹窗进场：杜绝"啪"地闪现造成的卡顿观感（transform/opacity，合成层） */
+@keyframes row-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+.anim-in { animation: row-in .2s ease both; }
+@keyframes modal-fade { from { opacity: 0 } to { opacity: 1 } }
+@keyframes modal-pop { from { opacity: 0; transform: scale(.97) translateY(6px); } to { opacity: 1; transform: none; } }
+.modal-mask { animation: modal-fade .16s ease both; }
+.modal-box { animation: modal-pop .22s cubic-bezier(.2,.9,.3,1) both; }
