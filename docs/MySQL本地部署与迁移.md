@@ -1,5 +1,7 @@
 # OrbStack 本地部署、迁移与换电脑
 
+本页命令依赖 OrbStack/Docker。Windows 主力机没有 Docker、仍使用旧 H2 的情况，请先读 [Windows 无 Docker 迁移交接](./Windows无Docker迁移交接.md)，不要直接套用下方容器命令。跨 Windows/Linux 的 Flowable 表名大小写兼容仍需单独验证。
+
 ## 一键启动
 
 前端、后端和 MySQL 全部在容器中。宿主机只需 OrbStack/Docker 与 Python 3；不依赖宿主机的 Java、Node 或 Maven。

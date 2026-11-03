@@ -30,3 +30,6 @@ Run Maven verify in Java 21 container, scripts.tests.test_migration against a re
 ## 7. Wrong vs correct
 Wrong: `@Lob @Column(name="nodes_json")` with implicit length=255 and direct H2 SQL import into MySQL.
 Correct: explicit large text length, MySQL driver/profile, portable JDBC migration, content checksums and durable container volumes. Never use docker compose down -v as a routine stop command.
+
+## Windows handoff boundary
+The runtime can use native Windows Java/MySQL, but `scripts/database.py` explicitly requires Docker. Native migration/backup wrappers and the user's actual source data are not yet verified. The converter lowercases table names; do not assume existing Flowable ACT_* tables or Windows/Linux MySQL dumps are portable without identifier-case and engine-version validation. MySQL lower_case_table_names is an initialization-time setting; never change an existing store to conceal a migration mismatch. See `docs/Windows无Docker迁移交接.md` before native Windows migration.

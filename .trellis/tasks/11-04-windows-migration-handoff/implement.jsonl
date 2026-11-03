@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/database-guidelines.md", "reason": "Migration invariants and actual Docker tooling"}
+{"file": ".trellis/spec/backend/supplier-wiki.md", "reason": "Actual compiled Wiki storage and access contract"}
