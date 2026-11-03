@@ -778,6 +778,8 @@ public class TerminalSession {
         log.info("[Terminal] [result] 完成: isError={}, {}字, {}ms, tools={}",
                 isError, finalText.length(), r.durationMs, r.toolSteps.size());
 
+        try { turn.listener.onResultAvailable(r); }
+        catch (RuntimeException ex) { log.warn("[Terminal] result observer failed", ex); }
         turn.future.complete(r);          // 先 complete，解锁 sendMessage 等待线程
         turn.listener.onTurnComplete(r);  // 再回调收尾卡片
     }

@@ -49,6 +49,7 @@ public class SupplierJobService {
     private final ClaudeCodeService claudeCodeService;
     private final SupplierKbService kbService;
     private final SupplierReferenceContext referenceContext;
+    private final SupplierKnowledgeService knowledgeService;
     private final com.lark.oapi.sample.ws.repository.SupplierJobChatRepository chatRepo;
     private final com.lark.oapi.sample.ws.repository.SupplierNodeChatRepository nodeChatRepo;
 
@@ -60,6 +61,18 @@ public class SupplierJobService {
                               SupplierKbService kbService,
                               com.lark.oapi.sample.ws.repository.SupplierJobChatRepository chatRepo,
                               com.lark.oapi.sample.ws.repository.SupplierNodeChatRepository nodeChatRepo) {
+        this(jobRepo, nodeRepo, templateRepo, instanceRepo, claudeService, kbService, chatRepo, nodeChatRepo, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public SupplierJobService(SupplierJobRepository jobRepo,
+                              SupplierJobNodeRepository nodeRepo,
+                              WorkflowTemplateRepository templateRepo,
+                              BotInstanceRepository instanceRepo,
+                              ClaudeCodeService claudeService,
+                              SupplierKbService kbService,
+                              com.lark.oapi.sample.ws.repository.SupplierJobChatRepository chatRepo,
+                              com.lark.oapi.sample.ws.repository.SupplierNodeChatRepository nodeChatRepo, SupplierKnowledgeService knowledgeService) {
         this.jobRepo = jobRepo;
         this.nodeRepo = nodeRepo;
         this.templateRepo = templateRepo;
@@ -67,6 +80,7 @@ public class SupplierJobService {
         this.claudeCodeService = claudeService;
         this.kbService = kbService;
         this.referenceContext = new SupplierReferenceContext(kbService);
+        this.knowledgeService = knowledgeService;
         this.chatRepo = chatRepo;
         this.nodeChatRepo = nodeChatRepo;
     }
@@ -336,6 +350,8 @@ public class SupplierJobService {
         job.setName(draft.getName() != null && !draft.getName().isBlank()
                 ? draft.getName() : "接入 " + draft.getSupplierName());
         job.setMode(tpl.getMode());
+        if (!List.of("TEXT", "WIKI").contains(draft.getKnowledgeMode())) throw new IllegalArgumentException("知识表示必须是 TEXT 或 WIKI");
+        job.setKnowledgeMode(draft.getKnowledgeMode());
         job.setTemplateId(tpl.getId());
         job.setSupplierCode(nullSafe(draft.getSupplierCode()));
         job.setSupplierName(nullSafe(draft.getSupplierName()));
@@ -443,11 +459,13 @@ public class SupplierJobService {
         kbService.syncFromJob(job);   // 幂等：确保存量文档在知识库中有索引（执行时先查库勿重抓）
 
         String generated = "codegen".equals(contextStage(n)) ? generatedDevelopmentPrompt(job, codegenPrompt(jobId)) : "";
-        String prompt = renderPrompt(n.getPrompt(), job, extraInstruction, contextStage(n));
+        Rendered rendered = renderWithKnowledge(n.getPrompt(), job, extraInstruction, contextStage(n));
+        String prompt = rendered.prompt();
         if (!generated.isBlank()) prompt += "\n\n## 公司 Skill 生成的开发提示词\n" + generated;
         if (prompt.length() > 400000) throw new IllegalArgumentException("派发请求超过 400000 字符，请拆分任务");
         n.setDeliveryManifest("准备时间：" + LocalDateTime.now() + "\n知识库：" + kbService.kbCode(job) + "\n阶段：" + contextStage(n) + "\n" + kbService.snapshotDelivery(kbService.kbCode(job), prompt));
         n.setToolEvidence("");
+        if (knowledgeService != null) n.setKnowledgeRunId(knowledgeService.record(job, nodeId, contextStage(n), rendered.pack(), prompt));
         n.setStatus("RUNNING");
         n.setStartedAt(n.getStartedAt() != null ? n.getStartedAt() : LocalDateTime.now());
         n.setNote("");
@@ -467,11 +485,13 @@ public class SupplierJobService {
         }
         if (answer == null || answer.isBlank()) throw new IllegalArgumentException("答复内容不能为空");
         if (job.getInstanceId() == null) throw new IllegalArgumentException("存档未绑定执行实例");
-        String context = kbService.contextText(kbService.kbCode(job), contextStage(n)) + referenceContext.load(job, n.isCodegenPrep());
+        var pack = knowledge(job, contextStage(n));
+        String context = pack.rendered() + referenceContext.load(job, n.isCodegenPrep());
         String message = "【卡点答复】继续未完成的工作，完成后按动作规范输出：\n\n" + answer.strip() + "\n\n" + context;
         n.setDeliveryManifest(n.getDeliveryManifest() + "\n续跑准备：" + LocalDateTime.now() + "\n"
                 + kbService.snapshotDelivery(kbService.kbCode(job), message));
         n.setPendingQuestion("");
+        if (knowledgeService != null) n.setKnowledgeRunId(knowledgeService.record(job, nodeId, contextStage(n), pack, message));
         nodeRepo.save(n);
         deliverToInstance(job, n, "job-answer-" + jobId + "-" + nodeId, message);
     }
@@ -482,13 +502,17 @@ public class SupplierJobService {
         String nodeId = n.getNodeId();
         BotInstance inst = instanceRepo.findById(job.getInstanceId())
                 .orElseThrow(() -> new IllegalArgumentException("绑定实例不存在: " + job.getInstanceId()));
+        Long auditId = n.getKnowledgeRunId();
+        var usage = new java.util.concurrent.atomic.AtomicReference<TurnResult>();
         Thread.ofVirtual().name(threadName).start(() -> {
             try {
                 String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
-                String reply = claudeCodeService.chat(inst.getId(), "supplier-job-" + jobId,
-                        message, null, dir, inst.getClaudeModel(), progressListener(n));
+                String reply = claudeCodeService.chatInLane(supplierLane(job), inst.getId(),
+                        message, dir, inst.getClaudeModel(), progressListener(n, usage));
+                if (knowledgeService != null) knowledgeService.finish(auditId, usage.get(), reply);
                 applyNodeReply(n, reply);
             } catch (Exception e) {
+                if (knowledgeService != null) knowledgeService.finish(auditId, usage.get(), null);
                 log.error("[SupplierJob] 节点执行异常: job={}, node={}", jobId, nodeId, e);
                 n.setNote("执行异常: " + e.getMessage());
                 n.setStatus("PENDING");
@@ -499,7 +523,9 @@ public class SupplierJobService {
     }
 
     /** 执行进度监听：工具事件写 progress；思考增量节流(≥1.5s)写 thinking 尾部片段，前端轮询即见"在做什么+在想什么" */
-    private TurnListener progressListener(SupplierJobNode n) {
+    private TurnListener progressListener(SupplierJobNode n) { return progressListener(n, null); }
+
+    private TurnListener progressListener(SupplierJobNode n, java.util.concurrent.atomic.AtomicReference<TurnResult> usage) {
         return new TurnListener() {
             private final StringBuilder think = new StringBuilder();
             private long lastThinkWrite;
@@ -538,6 +564,7 @@ public class SupplierJobService {
                     }
                 }
             }
+            @Override public void onResultAvailable(TurnResult result) { if (usage != null) usage.set(result); }
             @Override public void onTurnComplete(TurnResult result) { }
             @Override public void onTurnError(String message, boolean aborted) { }
         };
@@ -697,10 +724,15 @@ public class SupplierJobService {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow();
         if (job.getInstanceId() == null) throw new IllegalArgumentException("请先绑定执行实例");
         BotInstance inst = instanceRepo.findById(job.getInstanceId()).orElseThrow(() -> new IllegalArgumentException("执行实例不存在"));
+        var pack = knowledgeService == null ? null : knowledge(job, "codegen");
+        if (pack != null && !original.contains(pack.rendered())) throw new IllegalArgumentException("生成前材料发生变化，请重试");
         String context = original + SupplierTrellisContext.prepare(job, original);
-        String result = claudeCodeService.chat(inst.getId(), "supplier-prompt-" + jobId,
+        String promptLane = "supplier-prompt-" + jobId + "-" + job.getKnowledgeMode() + "-" + java.util.UUID.randomUUID();
+        String result;
+        try { result = measuredChat(job, "prompt-generation", "codegen", pack, promptLane, inst,
                 "按下方公司提示词生成 Skill 执行提示词生成任务。只输出用于下一步供应商开发的最终提示词，保留所有必需材料、来源与 Trellis 流程；本轮不要修改代码，不要调用供应商接口。\n\n" + context,
-                null, firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), ""), inst.getClaudeModel(), new NoopListener());
+                firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "")); }
+        finally { claudeCodeService.destroyLane(promptLane); }
         if (result == null || result.isBlank() || result.startsWith("❌") || STANDBLOCK.matcher(result).find()) {
             throw new IllegalArgumentException("提示词 Skill 执行未完成：" + result);
         }
@@ -725,13 +757,14 @@ public class SupplierJobService {
     public String codegenPrompt(Long jobId) {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
         if (!prepComplete(job.getMeetingDocUrl(), job.getConfigJson())) throw new IllegalArgumentException("请先保存会议文档和完整配置");
-        String kbIndex = kbService.contextText(kbService.kbCode(job), "codegen") + referenceContext.load(job, true);
+        String kbIndex = knowledge(job, "codegen").rendered() + referenceContext.load(job, true);
         String skills = formatSkills(job.getSkillsJson());
         List<SupplierJobNode> probes = nodeRepo.findByJobIdOrderBySeqAsc(jobId).stream()
                 .filter(x -> isProbeNode(x) && "DONE".equals(x.getStatus()) && !x.getToolEvidence().isBlank()).toList();
         if (probes.isEmpty()) throw new IllegalArgumentException("请先完成带真实 Postman 工具证据的实测节点");
-        String n2 = probes.stream().map(x -> x.getArtifact() + "\n\n" + x.getToolEvidence())
-                .collect(java.util.stream.Collectors.joining("\n\n"));
+        String n2 = "WIKI".equals(job.getKnowledgeMode())
+                ? "实测结论已编译进本版本 Wiki；完整请求/响应按 Wiki 中的来源 ID 阅读。已校验实测节点：" + probes.stream().map(SupplierJobNode::getNodeId).toList()
+                : probes.stream().map(x -> x.getArtifact() + "\n\n" + x.getToolEvidence()).collect(java.util.stream.Collectors.joining("\n\n"));
         String prompt = buildCodegenPrompt(job.getSupplierName(), job.getSupplierCode(), job.getLibraryPath(),
                 kbIndex, skills, job.getMeetingDocUrl(), job.getSpecDocPath(), job.getConfigJson(), n2);
         if (prompt.length() > 240000) throw new IllegalArgumentException("开发上下文超过 240000 字符，请按使用阶段整理知识库或拆分任务");
@@ -790,6 +823,8 @@ public class SupplierJobService {
         SupplierJobNode n = nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
                 .orElseThrow(() -> new IllegalArgumentException("节点不存在"));
         if (!n.isDevChat()) throw new IllegalArgumentException("该节点不是开发期对话节点");
+        var chatPack = chatKnowledge(job, "codegen");
+        String kbIndex = chatPack.rendered();
 
         com.lark.oapi.sample.ws.model.entity.SupplierNodeChat u = new com.lark.oapi.sample.ws.model.entity.SupplierNodeChat();
         u.setJobId(jobId); u.setNodeId(nodeId); u.setRole("user"); u.setText(text.strip());
@@ -805,7 +840,6 @@ public class SupplierJobService {
             hist.append("user".equals(m.getRole()) ? "玩家: " : "重写结果: ")
                 .append(m.getText().strip().replaceAll("\\s+", " ")).append('\n');
         }
-        String kbIndex = kbService.indexText(kbService.kbCode(job));
         String skills = formatSkills(job.getSkillsJson());
         Thread.ofVirtual().name("devchat-" + jobId + "-" + nodeId).start(() -> {
             try {
@@ -818,8 +852,7 @@ public class SupplierJobService {
                         + "信息不足以重写时不要瞎猜，单独一行【卡点】+问题。\n"
                         + "只输出最终提示词正文，用 ```prompt 代码块包裹，不要任何解释。";
                 String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
-                String reply = claudeCodeService.chat(inst.getId(), "supplier-job-" + jobId,
-                        prompt, null, dir, inst.getClaudeModel(), new NoopListener());
+                String reply = measuredChat(job, nodeId, "codegen", chatPack, supplierLane(job), inst, prompt, dir);
                 boolean bad = reply == null || reply.startsWith("❌");
                 a.setText(bad ? (reply == null ? "（无回复）" : reply) : extractPromptBlock(reply));
                 a.setStatus(bad ? "FAILED" : "DONE");
@@ -901,6 +934,8 @@ public class SupplierJobService {
         if (job.getInstanceId() == null) throw new IllegalArgumentException("存档未绑定执行实例，无法提问");
         BotInstance inst = instanceRepo.findById(job.getInstanceId())
                 .orElseThrow(() -> new IllegalArgumentException("绑定实例不存在"));
+        var chatPack = chatKnowledge(job, "all");
+        String chatContext = chatPack.rendered();
         com.lark.oapi.sample.ws.model.entity.SupplierJobChat u = new com.lark.oapi.sample.ws.model.entity.SupplierJobChat();
         u.setJobId(jobId); u.setRole("user"); u.setText(question.strip());
         chatRepo.save(u);
@@ -910,10 +945,10 @@ public class SupplierJobService {
         Thread.ofVirtual().name("job-chat-" + jobId).start(() -> {
             try {
                 String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
-                String reply = claudeCodeService.chat(inst.getId(), "supplier-job-" + jobId,
+                String reply = measuredChat(job, "chat", "all", chatPack, supplierLane(job), inst,
                         "【玩家提问】关于本次供应商接入任务（" + job.getName() + "），请就你当前掌握的情况直接、简短回答；"
-                                + "不要因此重跑或中断任何任务，只回答：\n\n" + question.strip(),
-                        null, dir, inst.getClaudeModel(), new NoopListener());
+                                + "不要因此重跑或中断任何任务，只回答：\n\n" + question.strip() + "\n\n" + chatContext,
+                        dir);
                 boolean bad = reply == null || reply.startsWith("❌");
                 a.setText(bad ? (reply == null ? "（无回复）" : reply) : reply);
                 a.setStatus(bad ? "FAILED" : "DONE");
@@ -952,10 +987,44 @@ public class SupplierJobService {
 
     String renderPrompt(String template, SupplierJob job, String extra) { return renderPrompt(template, job, extra, "all"); }
 
-    String renderPrompt(String template, SupplierJob job, String extra, String stage) {
+    private String measuredChat(SupplierJob job, String nodeId, String stage, SupplierKnowledgeService.Pack pack,
+                                String lane, BotInstance instance, String prompt, String directory) {
+        Long audit = knowledgeService == null ? null : knowledgeService.record(job, nodeId, stage, pack, prompt);
+        var usage = new java.util.concurrent.atomic.AtomicReference<TurnResult>();
+        try {
+            String reply = claudeCodeService.chatInLane(lane, instance.getId(), prompt, directory, instance.getClaudeModel(),
+                    new NoopListener() { @Override public void onResultAvailable(TurnResult result) { usage.set(result); } });
+            if (knowledgeService != null) knowledgeService.finish(audit, usage.get(), reply);
+            return reply;
+        } catch (RuntimeException ex) {
+            if (knowledgeService != null) knowledgeService.finish(audit, usage.get(), null);
+            throw ex;
+        }
+    }
+
+    static String supplierLane(SupplierJob job) {
+        return "supplier-job-" + job.getId() + "-" + job.getKnowledgeMode() + "-" + job.getInstanceId();
+    }
+    private SupplierKnowledgeService.Pack chatKnowledge(SupplierJob job, String stage) {
+        if (knowledgeService != null) return knowledgeService.chatContext(job, stage);
+        if ("WIKI".equals(job.getKnowledgeMode())) throw new IllegalArgumentException("Wiki 服务不可用");
+        return new SupplierKnowledgeService.Pack("TEXT", kbService.indexText(kbService.kbCode(job)), "", null, -1, List.of());
+    }
+    private SupplierKnowledgeService.Pack knowledge(SupplierJob job, String stage) {
+        if (knowledgeService != null) return knowledgeService.context(job, stage);
+        if ("WIKI".equals(job.getKnowledgeMode())) throw new IllegalArgumentException("Wiki 服务不可用，禁止退回纯文本");
+        String body = "all".equals(stage) ? kbService.contextText(kbService.kbCode(job)) : kbService.contextText(kbService.kbCode(job), stage);
+        return new SupplierKnowledgeService.Pack("TEXT", body, "", null, -1, List.of());
+    }
+
+    private record Rendered(String prompt, SupplierKnowledgeService.Pack pack) {}
+    String renderPrompt(String template, SupplierJob job, String extra, String stage) { return renderWithKnowledge(template, job, extra, stage).prompt(); }
+
+    private Rendered renderWithKnowledge(String template, SupplierJob job, String extra, String stage) {
         if (template == null) template = "";
         template = template.replace("用 curl 真实调用", "用 Postman MCP 真实调用");
-        String docs = "all".equals(stage) ? kbService.contextText(kbService.kbCode(job)) : kbService.contextText(kbService.kbCode(job), stage);
+        var pack = knowledge(job, stage);
+        String docs = pack.rendered();
         String skills = formatSkills(job.getSkillsJson());
         String out = template
                 .replace("{supplierName}", nullSafe(job.getSupplierName()))
@@ -984,7 +1053,7 @@ public class SupplierJobService {
             m.appendReplacement(sb, Matcher.quoteReplacement(artifact));
         }
         m.appendTail(sb);
-        return sb + "\n\n" + referenceContext.load(job, false) + "\n\n" + ACTION_SPEC;
+        return new Rendered(sb + "\n\n" + referenceContext.load(job, false) + "\n\n" + ACTION_SPEC, pack);
     }
 
     /** R5/R6/R7 统一动作规范：Trellis 四段纪律 + 卡点协议 + Postman 实测协议（追加在所有 agent prompt 末尾） */

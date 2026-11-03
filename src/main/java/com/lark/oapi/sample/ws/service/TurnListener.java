@@ -14,6 +14,9 @@ package com.lark.oapi.sample.ws.service;
  */
 public interface TurnListener {
 
+    /** Non-blocking result handoff before the waiting caller is released. */
+    default void onResultAvailable(TurnResult result) {}
+
     /** 轮次开始（stdin 已写入），实现方应立即创建"思考中"卡片 */
     void onTurnStart();
 

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import SupplierWikiPanel from '../components/SupplierWikiPanel'
 
 // ===== 常量 =====
 
@@ -98,7 +99,7 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 8, lineHeight: 1.9 }}>
                 <div>供应商: {j.supplierName || '—'}{j.supplierCode ? ` (ID: ${j.supplierCode})` : ''}</div>
-                <div>执行实例: {instName(j.instanceId)} · 当前节点: {j.currentNodeId || (done ? '已通关' : '—')}</div>
+                <div>知识表示: {j.knowledgeMode || 'TEXT'} · 执行实例: {instName(j.instanceId)} · 当前节点: {j.currentNodeId || (done ? '已通关' : '—')}</div>
                 <div>更新: {String(j.updatedAt || '').replace('T', ' ').substring(5, 16)}</div>
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
@@ -122,7 +123,7 @@ function CreateJob({ onBack, onCreated, showToast }) {
   const [instances, setInstances] = useState([])
   const [form, setForm] = useState({
     name: '', supplierCode: '', supplierName: '', libraryPath: '',
-    docs: [{ ...emptyDoc }], skills: [], instanceId: '', templateId: '',
+    docs: [{ ...emptyDoc }], skills: [], instanceId: '', templateId: '', knowledgeMode: 'TEXT',
   })
   const [saving, setSaving] = useState(false)
 
@@ -176,6 +177,14 @@ function CreateJob({ onBack, onCreated, showToast }) {
               <div style={{ fontWeight: 700, margin: '8px 0 4px' }}>新接 CM 供应商</div>
               <div style={{ fontSize: 12, color: 'var(--text-dim)'}}>即将上线（可先到工作流模板里自行设计）</div>
             </div>
+          </div>
+          <div className="form-group" style={{ marginTop: 16 }}>
+            <label className="form-label">知识组织方式（本次工作固定，用于 A/B 测试）</label>
+            <select className="form-input" value={form.knowledgeMode} onChange={e => setForm(f => ({ ...f, knowledgeMode: e.target.value }))}>
+              <option value="TEXT">A · 纯文本：按阶段交付原文正文</option>
+              <option value="WIKI">B · LLM Wiki：编译知识页、关键约束与来源链接</option>
+            </select>
+            <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 6 }}>两种方式均保留原始材料。Wiki 模式需要绑定实例完成编译，不会自动退回纯文本。</div>
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 16 }}>
             <button className="btn" onClick={onBack}>取消</button>
@@ -630,6 +639,7 @@ function GameView({ jobId, onBack, showToast }) {
       )}
 
       {/* R3 统一补充入口：供应商知识库（URL/PDF/聊天记录/笔记 随时补充） */}
+      <SupplierWikiPanel job={job} showToast={showToast} />
       <KbPanel kbCode={job.kbCode} showToast={showToast} />
 
       {/* 对话区：执行过程中随时问实例"现在什么情况" */}

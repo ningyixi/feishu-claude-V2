@@ -2,6 +2,7 @@
 
 ## 1. Scope / Trigger
 Supplier task dispatch, blocked-node resume, evidence capture and codegen prompt generation.
+For WIKI jobs, use [Supplier Wiki](./supplier-wiki.md): knowledge strategy selection, immutable published versions and phase entry pages replace raw text delivery. Existing probe/spec/skill/Trellis gates still apply.
 
 ## 2. Signatures
 - `SupplierKbService.contextText(kbCode, stage)` resolves supplier-scoped text.
@@ -36,7 +37,7 @@ SupplierReferenceContextTest: company entrypoint resolution, fingerprints and mi
 SupplierProbeEvidenceTest: executable tool names and actual request/response structure.
 SupplierWorkflowGateTest: prose-only probe cannot complete; verified evidence is archived; source changes require prompt regeneration.
 SupplierTrellisContextTest: task creation, immutable snapshots, PRD preservation, latest JSONL references.
-Live smoke: fresh H2 schema, entry CRUD/readback, persisted stage/prep values, node audit fields, bad stage and missing-evidence errors.
+Live smoke: MySQL-backed stack, entry CRUD/readback, persisted mode/stage/prep values, node audit fields, bad stage and missing-evidence errors. H2 remains an explicit legacy profile and migration source.
 
 ## 7. Wrong vs Correct
 Wrong: include only file paths and ask the agent to remember to read them; accept its prose as test evidence.

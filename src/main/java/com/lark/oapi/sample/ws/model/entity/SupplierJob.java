@@ -18,6 +18,11 @@ public class SupplierJob {
     @Column(nullable = false)
     private String name = "";
 
+    @Column(name = "knowledge_mode", length = 16)
+    private String knowledgeMode = "TEXT";
+    public String getKnowledgeMode() { return knowledgeMode == null || knowledgeMode.isBlank() ? "TEXT" : knowledgeMode; }
+    public void setKnowledgeMode(String value) { knowledgeMode = value; }
+
     /** API | CM */
     private String mode = "API";
 

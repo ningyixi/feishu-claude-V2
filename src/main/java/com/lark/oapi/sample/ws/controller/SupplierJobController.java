@@ -48,6 +48,7 @@ public class SupplierJobController {
             JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
             SupplierJob draft = new SupplierJob();
             draft.setName(opt(body, "name"));
+            draft.setKnowledgeMode(body.has("knowledgeMode") ? opt(body, "knowledgeMode") : "TEXT");
             draft.setSupplierCode(opt(body, "supplierCode"));
             draft.setSupplierName(opt(body, "supplierName"));
             draft.setLibraryPath(opt(body, "libraryPath"));
@@ -101,6 +102,11 @@ public class SupplierJobController {
         try {
             JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
             SupplierJob patch = new SupplierJob();
+            patch.setName(null); patch.setSupplierCode(null); patch.setSupplierName(null); patch.setLibraryPath(null); patch.setDocsJson(null); patch.setSkillsJson(null);
+            if (body.has("knowledgeMode")) {
+                var existing = jobService.getJob(id).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
+                if (!existing.getKnowledgeMode().equals(opt(body, "knowledgeMode"))) throw new IllegalArgumentException("A/B 模式在创建后固定，请新建工作进行另一模式测试");
+            }
             if (body.has("name")) patch.setName(opt(body, "name"));
             if (body.has("supplierCode")) patch.setSupplierCode(opt(body, "supplierCode"));
             if (body.has("supplierName")) patch.setSupplierName(opt(body, "supplierName"));
@@ -372,6 +378,7 @@ public class SupplierJobController {
         }
         o.addProperty("createdAt", String.valueOf(job.getCreatedAt()));
         o.addProperty("updatedAt", String.valueOf(job.getUpdatedAt()));
+        o.addProperty("knowledgeMode", job.getKnowledgeMode());
         o.addProperty("kbCode", jobService.getKbCode(job));   // 知识库归属码（前端面板按它拉取）
         o.addProperty("meetingDocUrl", job.getMeetingDocUrl());
         o.addProperty("specDocPath", job.getSpecDocPath());

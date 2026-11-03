@@ -197,6 +197,7 @@ public class ClaudeCodeService {
                 .orElse(SandboxPolicy.LEVEL_FULL);
         TerminalSession s = lanes.get(lane);
         if (s != null && s.isAlive() && nullSafeEquals(s.getWorkingDir(), workingDir == null ? "" : workingDir)
+                && nullSafeEquals(s.getModel(), model == null ? "" : model)
                 && s.getSandboxLevel() == sandboxLevel && s.getExtraDirs().equals(extraDirs) && s.getExtraEnv().equals(env)) {
             return s;
         }

@@ -47,6 +47,10 @@ public class SupplierJobNode {
     @Column(length = 2147483647)
     private String artifact = "";
 
+    private Long knowledgeRunId;
+    public Long getKnowledgeRunId() { return knowledgeRunId; }
+    public void setKnowledgeRunId(Long value) { knowledgeRunId = value; }
+
     private String contextStage = "auto";
     public String getContextStage() { return contextStage == null ? "auto" : contextStage; }
     public void setContextStage(String value) { contextStage = value; }
