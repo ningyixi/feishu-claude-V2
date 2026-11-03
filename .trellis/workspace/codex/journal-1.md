@@ -39,3 +39,37 @@
 ### Next Steps
 
 - None - task complete
+
+
+## Session 2: OrbStack MySQL 与供应商 LLM Wiki 双模式
+
+**Date**: 2026-11-03
+**Task**: OrbStack MySQL 与供应商 LLM Wiki 双模式
+**Branch**: `master`
+
+### Summary
+
+OrbStack 全栈运行及 MySQL/H2 迁移备份工具已提交。完成 GitHub MCP 源码调研、TEXT/WIKI 固定模式、完整来源快照、带引用编译、过期门禁、阶段必读页直接交付、隔离会话及观测用量。80 项默认测试、真实 MySQL 集成（模型桩）及在线 HTTP smoke 全通过，前端与 Docker 构建通过。旧 H2 文件仍在另一台电脑尚未导入；新容器暂无已认证模型实例，真实材料语义质量 A/B 待用户配置后开展。
+
+### Main Changes
+
+(Add details)
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `febf141` | (see git log) |
+| `f78f3c5` | (see git log) |
+
+### Testing
+
+- [OK] (Add test results)
+
+### Status
+
+[OK] **Completed**
+
+### Next Steps
+
+- None - task complete
