@@ -67,6 +67,7 @@ public class SupplierWikiService {
         if(latest==null){state.put("status","EMPTY");return state;}
         state.put("revision",latest.getId());state.put("status",latest.getStatus());state.put("error",latest.getError());
         state.put("sourceDigest",latest.getSourceDigest());state.put("sourceCount",latest.getSourceCount());state.put("completedSources",latest.getCompletedSources());
+        state.put("phase",latest.getPhase());state.put("updatedAt",String.valueOf(latest.getUpdatedAt()));
         state.put("rawChars",latest.getRawChars());state.put("inputTokens",latest.getInputTokens());state.put("outputTokens",latest.getOutputTokens());state.put("costUsd",latest.getCostUsd());
         state.put("createdAt",String.valueOf(latest.getCreatedAt()));state.put("finishedAt",String.valueOf(latest.getFinishedAt()));
         if("READY".equals(latest.getStatus())) {
@@ -184,7 +185,7 @@ public class SupplierWikiService {
             if(out.has("critical")&&out.get("critical").isJsonArray()) for(var el:out.getAsJsonArray("critical")) critical.add(el.getAsString());
             if(out.has("entrypoints")&&out.get("entrypoints").isJsonObject()) { JsonObject epv=out.getAsJsonObject("entrypoints");
                 for(String st:SupplierWikiContract.STAGES) if(epv.has(st)&&epv.get(st).isJsonArray()) for(var el:epv.getAsJsonArray(st)) entry.get(st).add(el.getAsString()); }
-            row.setCompletedSources(row.getCompletedSources()); revisions.save(row); // 心跳，避免长期无进度
+            row.setPhase("发布中 第"+(start/batch+1)+"/"+((extracted.size()+batch-1)/batch)+"批 · 已产页 "+seenPage.size()); revisions.save(row); // 心跳+阶段
         }
         } finally { claude.destroyLane(lane); }
         java.util.Set<String> pageIds=new java.util.HashSet<>(); for(var el:pages) pageIds.add(el.getAsJsonObject().get("id").getAsString());
@@ -239,7 +240,7 @@ public class SupplierWikiService {
                     Files.writeString(cache,JSON.toJson(facts),StandardCharsets.UTF_8);
                 }
                 JsonObject item=SupplierWikiSources.metadata(source);item.addProperty("rawFile","raw/"+source.id()+".md");item.add("extraction",facts);extracted.add(item);
-                row.setCompletedSources(row.getCompletedSources()+1);revisions.save(row);
+                row.setCompletedSources(row.getCompletedSources()+1);row.setPhase("抽取中 "+row.getCompletedSources()+"/"+snapshot.sources().size());revisions.save(row);
             }
             if(extracted.toString().length()>500000)throw new IllegalArgumentException("Wiki 汇编输入超过预算，请按业务域组织材料后重建");
             String previous=revisions.findTop20ByKbCodeOrderByIdDesc(snapshot.kbCode()).stream().filter(r->"READY".equals(r.getStatus())).findFirst().map(SupplierWikiRevision::getManifestJson).orElse("{}");

@@ -214,8 +214,11 @@ public class SupplierWorkflowService {
             Object q=pending.get(0).get("question"); detail=q==null?"":q.toString();
         } else if(live!=null && "WAITING_WIKI".equals(live.status)){
             phase="Wiki 编译中"; var job=jobs.findById(run.jobId).orElse(null);
-            if(job!=null){ var w=wiki.status(job); text="正在编译供应商 Wiki · "+w.get("status");
-                detail="来源覆盖 "+w.get("completedSources")+"/"+w.get("sourceCount"); String fin=String.valueOf(w.get("finishedAt")); // 无 updatedAt，用状态推进即心跳 createdAt 之外，退而用 run.updatedAt
+            if(job!=null){ var w=wiki.status(job);
+                String ph=String.valueOf(w.getOrDefault("phase",""));
+                text="正在编译供应商 Wiki · "+ph+" · "+w.get("status");
+                detail="来源覆盖 "+w.get("completedSources")+"/"+w.get("sourceCount")+(w.get("error")==null||"".equals(w.get("error"))?"":" · "+w.get("error"));
+                String ua=String.valueOf(w.get("updatedAt")); if(!ua.equals("null")&&!ua.isBlank()){ try{ last=java.time.LocalDateTime.parse(ua.replace(" ","T")); }catch(Exception ignore){} }
             }
         } else if(live!=null){
             phase="实例执行节点中"; var node=nodes.findByJobIdAndNodeId(run.jobId,live.nodeId).orElse(null);

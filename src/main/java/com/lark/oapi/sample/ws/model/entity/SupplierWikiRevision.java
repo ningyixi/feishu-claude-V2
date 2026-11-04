@@ -21,8 +21,12 @@ public class SupplierWikiRevision {
     private long outputTokens=-1;
     private double costUsd=-1;
     @Lob @Column(length=2147483647) private String manifestJson="{}";
+    private String phase="";
     private LocalDateTime createdAt=LocalDateTime.now();
+    @Column(name="updated_at") private LocalDateTime updatedAt=LocalDateTime.now();
     private LocalDateTime finishedAt;
+
+    @PreUpdate void touch(){ updatedAt=LocalDateTime.now(); }
     public Long getId(){return id;}
     public String getKbCode(){return kbCode;} public void setKbCode(String v){kbCode=v;}
     public String getSourceDigest(){return sourceDigest;} public void setSourceDigest(String v){sourceDigest=v;}
@@ -38,6 +42,8 @@ public class SupplierWikiRevision {
     public long getOutputTokens(){return outputTokens;} public void setOutputTokens(long v){outputTokens=v;}
     public double getCostUsd(){return costUsd;} public void setCostUsd(double v){costUsd=v;}
     public String getManifestJson(){return manifestJson;} public void setManifestJson(String v){manifestJson=v;}
+    public String getPhase(){return phase;} public void setPhase(String v){phase=v;}
+    public LocalDateTime getUpdatedAt(){return updatedAt;}
     public LocalDateTime getCreatedAt(){return createdAt;}
     public LocalDateTime getFinishedAt(){return finishedAt;} public void setFinishedAt(LocalDateTime v){finishedAt=v;}
 }
