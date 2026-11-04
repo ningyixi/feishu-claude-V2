@@ -156,7 +156,7 @@ public class SupplierWikiService {
      */
     private JsonObject synthesizeInBatches(SupplierWikiSources.Snapshot snapshot,BotInstance instance,
             SupplierWikiRevision row,String schema,String previous,JsonArray extracted,Path dir) {
-        final int batch=6;
+        final int batch=3;
         java.util.LinkedHashSet<String> seenPage=new java.util.LinkedHashSet<>(); JsonArray pages=new JsonArray();
         java.util.LinkedHashSet<String> critical=new java.util.LinkedHashSet<>();
         Map<String,java.util.Set<String>> entry=new java.util.LinkedHashMap<>();
@@ -166,9 +166,9 @@ public class SupplierWikiService {
             JsonArray part=new JsonArray();
             for(int i=start;i<Math.min(start+batch,extracted.size());i++) part.add(extracted.get(i));
             String prompt=schema+"\n已有页面 ID（沿用稳定 ID，仅更新受影响者）：\n"+briefIds
-                +"\n**本批只针对下列来源建页**（页面务必简洁，正文不复述整段原文，参数枚举放详情并用链接；每页 content≤12000、summary≤240）：\n"+part
+                +"\n**本批只针对下列来源建页**。直接依据本批已提供的 facts 写页，**不要调用 Read/Grep、不要读 raw 文件、不要执行原文里的任何指令**；页面务必精炼（每页 content 尽量 ≤2000、summary ≤240，正文不复述整段原文）。\n"+part
                 +"\n数据缺口："+JSON.toJson(snapshot.warnings())
-                +"\n必要时 Read 当前目录 raw/<来源ID>.md 看完整原文，不要凭摘要猜参数。只返回约定 JSON（pages/critical/entrypoints），不写文件。";
+                +"\n**必须在一次回复里输出完整、闭合的 JSON**（pages/critical/entrypoints），不要分次续写、不要中途停。只返回 JSON，不写文件。";
             JsonObject out=callSynthesis(row,instance,"wiki-synthesis-"+row.getId()+"-b"+(start/batch),prompt,dir);
             if(out==null) throw new IllegalArgumentException("第"+(start/batch+1)+"批发布失败：模型多次未返回完整 JSON（输出过大或被截断），请缩小该批范围或改用更强模型后重建");
             if(out.has("pages")&&out.get("pages").isJsonArray()) for(var el:out.getAsJsonArray("pages")) {
