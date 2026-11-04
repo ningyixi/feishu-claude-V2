@@ -1,0 +1,64 @@
+/* Material only. Geometry and motion belong to ProductUI.css / App.css. */
+@property --glass-tint { syntax: '<color>'; inherits: true; initial-value: white; }
+@property --glass-alpha { syntax: '<number>'; inherits: true; initial-value: .22; }
+@property --glass-saturation { syntax: '<number>'; inherits: true; initial-value: 1.8; }
+@property --glass-brightness { syntax: '<number>'; inherits: true; initial-value: 1.06; }
+@property --glass-highlight { syntax: '<number>'; inherits: true; initial-value: .3; }
+@property --glass-primary { syntax: '<color>'; inherits: true; initial-value: rgb(0 0 0 / .86); }
+@property --glass-secondary { syntax: '<color>'; inherits: true; initial-value: rgb(58 58 64 / .7); }
+@property --glass-edge-top { syntax: '<color>'; inherits: true; initial-value: rgb(255 255 255 / .95); }
+@property --glass-edge-bottom { syntax: '<color>'; inherits: true; initial-value: rgb(255 255 255 / .55); }
+@property --glass-edge-line { syntax: '<color>'; inherits: true; initial-value: rgb(255 255 255 / .3); }
+@property --glass-outline { syntax: '<color>'; inherits: true; initial-value: rgb(0 0 0 / .06); }
+@property --glass-shadow { syntax: '<color>'; inherits: true; initial-value: rgb(0 0 0 / .08); }
+@property --glass-icon-opacity { syntax: '<number>'; inherits: true; initial-value: .86; }
+@property --glass-light-scale { syntax: '<number>'; inherits: true; initial-value: 1; }
+@property --glass-dark-scale { syntax: '<number>'; inherits: true; initial-value: 1; }
+:root { color-scheme: light; }
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --canvas: #11151d; --surface: #1b2130; --surface-2: #222a3a; --line: #343e50;
+  --ink: #eef1f8; --ink-2: #bac5d9; --ink-3: #9eabc1; --rail: var(--surface); --rail-ink: #bac5d9;
+  --bg: var(--surface); --brand-soft: #29365a; --accent-glow: #6c88ff26;
+  --shadow-pop: 0 16px 56px #0006, 0 2px 8px #0003;
+}
+:root[data-theme='dark'] .workspace-header { background: var(--surface); }
+:root[data-theme='dark'] .btn:disabled { background: var(--surface-2); }
+:root[data-theme='dark'] .form-input { border-color: var(--line); color: var(--ink); }
+[data-glass-active] {
+  --glass-primary: rgb(0 0 0 / .86); --glass-secondary: rgb(58 58 64 / .7); --glass-blend: multiply;
+  --glass-edge-top: rgb(255 255 255 / .95); --glass-edge-bottom: rgb(255 255 255 / .55);
+  --glass-edge-line: rgb(255 255 255 / .3); --glass-outline: rgb(0 0 0 / .06); --glass-shadow: rgb(0 0 0 / .08);
+  --glass-ink-opaque: #000; --glass-icon-opacity: .86;
+  --ink: var(--glass-primary); --ink-2: var(--glass-secondary); --ink-3: var(--glass-secondary); --text: var(--glass-primary); --text-dim: var(--glass-secondary);
+  background: radial-gradient(ellipse at top left, rgb(255 255 255 / var(--glass-highlight)), transparent 55%), color-mix(in srgb, var(--glass-tint) calc(var(--glass-alpha) * 100%), transparent);
+  backdrop-filter: blur(2px) saturate(var(--glass-saturation)) brightness(var(--glass-brightness)) var(--glass-lens,);
+  --glass-edge: inset 1.5px 1.5px 1px -1px var(--glass-edge-top), inset -1.5px -1.5px 1px -1px var(--glass-edge-bottom), inset 0 0 0 .5px var(--glass-edge-line), 0 0 0 .5px var(--glass-outline), 0 6px 24px var(--glass-shadow), inset 4px 4px 12px -10px var(--glass-edge-top), inset -3px -4px 10px -9px var(--glass-outline);
+  box-shadow: var(--glass-edge);
+  color: var(--glass-primary);
+  transition: --glass-tint .2s, --glass-alpha .2s, --glass-saturation .2s, --glass-brightness .2s, --glass-highlight .2s, --glass-primary .2s, --glass-secondary .2s, --glass-edge-top .2s, --glass-edge-bottom .2s, --glass-edge-line .2s, --glass-outline .2s, --glass-shadow .2s;
+}
+[data-glass-active='light'] {
+  --glass-primary: rgb(255 255 255 / .94); --glass-secondary: rgb(235 235 245 / .64); --glass-blend: plus-lighter;
+  --glass-ink-opaque: #fff; --glass-icon-opacity: .94;
+  --glass-edge-top: rgb(255 255 255 / .32); --glass-edge-bottom: rgb(255 255 255 / .18); --glass-edge-line: rgb(255 255 255 / .1);
+  --glass-outline: rgb(0 0 0 / .35); --glass-shadow: rgb(0 0 0 / .24);
+}
+[data-glass-state='dark-area'] { --glass-edge-top: rgb(255 255 255 / .3); --glass-edge-bottom: rgb(255 255 255 / .12); }
+[data-glass-active]:hover { background-color: color-mix(in srgb, var(--glass-tint) min(100%, calc(var(--glass-alpha) * 114%)), transparent); box-shadow: var(--glass-edge); }
+[data-glass-active] [data-glass-ink] { mix-blend-mode: var(--glass-blend); }
+[data-glass-active] svg:not([width='0']):not(button svg):not(a svg):not(.confirmation-icon svg) { color: var(--glass-ink-opaque); opacity: var(--glass-icon-opacity); mix-blend-mode: var(--glass-blend); }
+/* Solid controls keep their theme ink and all semantic colors keep their rules. */
+[data-glass-active] :is(input,textarea,select,.btn,.surface-close) { --ink: #18233b; --ink-2: #56637a; --ink-3: #64728a; --text: var(--ink); --text-dim: var(--ink-2); }
+:root[data-theme='dark'] [data-glass-active] :is(input,textarea,select,.btn,.surface-close) { --ink: #eef1f8; --ink-2: #bac5d9; --ink-3: #9eabc1; }
+[data-glass-active='dark'] [role='option']:hover { background: rgb(255 255 255 / .42); box-shadow: inset 0 0 0 .5px #fff; }
+[data-glass-active='dark'] [role='option'][aria-selected='true'] { background: rgb(255 255 255 / .76); box-shadow: inset 0 0 0 .5px #fff; }
+/* The settings use the existing form/dialog controls. No new surface pattern. */
+@media (prefers-reduced-transparency: reduce) {
+  [data-glass-active], [data-glass-active]:hover { background: var(--surface); backdrop-filter: none; color: var(--ink); --glass-primary: #18233b; --glass-secondary: #56637a; --glass-blend: normal; }
+  :root[data-theme='dark'] [data-glass-active] { --glass-primary: #eef1f8; --glass-secondary: #bac5d9; }
+}
+@media (forced-colors: active) {
+  [data-glass-active], [data-glass-active]:hover { background: Canvas; color: CanvasText; backdrop-filter: none; box-shadow: none; --glass-primary: CanvasText; --glass-secondary: CanvasText; --glass-blend: normal; }
+}
+@media (prefers-reduced-motion: reduce) { [data-glass-active] { transition: none; } }

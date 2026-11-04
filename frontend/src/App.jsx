@@ -6,6 +6,7 @@ import Hooks from './pages/Hooks'
 import Supplier from './pages/Supplier'
 import Employees from './pages/Employees'
 import Icon from './components/ui/Icon'
+import Appearance from './components/ui/Appearance'
 import { NavigationGuard } from './components/ui/FloatingUI'
 
 const NAV = [
@@ -38,7 +39,7 @@ function Panel() {
       <div className="workspace-footer"><span className="workspace-status-dot"/><span>本地工作空间<small>OrbStack · MySQL</small></span><span className="workspace-key">LOCAL</span></div>
     </aside>
     <div className="workspace-content">
-      <header className="workspace-header"><div className="workspace-breadcrumb">工作空间<span>/</span><strong>{current.title}</strong></div><div className="workspace-header-note">{current.subtitle}</div></header>
+      <header className="workspace-header"><div className="workspace-breadcrumb">工作空间<span>/</span><strong>{current.title}</strong></div><div className="workspace-header-note">{current.subtitle}</div><Appearance /></header>
       <main className="main"><Routes><Route path="/" element={<Instances/>}/><Route path="/e2e" element={<E2ETest/>}/><Route path="/hooks" element={<Hooks/>}/><Route path="/supplier" element={<Supplier/>}/><Route path="/employees" element={<Employees/>}/></Routes></main>
     </div>
   </div>

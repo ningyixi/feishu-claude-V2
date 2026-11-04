@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/frontend/floating-ui.md", "reason": "Preserve existing surface geometry and interaction contracts"}
+{"file": ".trellis/spec/frontend/glass-material.md", "reason": "Scene eligibility, browser and corner constraints"}
