@@ -29,3 +29,6 @@
 
 ## Technical Notes
 * 触点：SupplierJobService(apiTemplateNodes 种子/快照/askNode/check/fix/@PostConstruct 迁移)、SupplierJobController(3 新端点+detail devChat)、SupplierJobNode.devChat(Boolean!)、新实体 SupplierNodeChat+repo、Supplier.jsx(CodegenPrepCard 检查表/NodeChatPanel/textarea×2)
+
+## Delivery (2026-11-03)
+五项全交付并线上验证：n8 AliyunLoggerConfig 文案+n45 开发期对话节点+n9 Review 节点（存量存档自动回填）、n4 提示词 8 项自检表+一键修正、多行输入框(Enter提交/Shift+Enter换行)。提交见 11-03 当日 push 记录。
