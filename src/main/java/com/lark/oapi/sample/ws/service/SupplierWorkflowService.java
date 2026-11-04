@@ -200,7 +200,41 @@ public class SupplierWorkflowService {
         var history=engine.getHistoryService().createHistoricTaskInstanceQuery().processInstanceId(run.processId).finished().includeTaskLocalVariables().orderByHistoricTaskInstanceEndTime().desc().listPage(0,100).stream().map(t->{
             Map<String,Object> item=new LinkedHashMap<>();item.put("id",t.getId());item.put("name",t.getName());item.put("finishedAt",t.getEndTime());item.put("response",t.getTaskLocalVariables());return item;
         }).toList();
-        return Map.of("status",run.status,"run",run,"tasks",pending,"history",history,"notices",notices.findTop100ByRunIdOrderByIdDesc(run.id),"attempts",attempts.findByRunIdOrderByIdDesc(run.id));
+        return activityState(run,pending,history);
+    }
+    /** 把 run 的返回体组装成含 activity(现在在干嘛/最后活动/空闲秒/是否疑似卡住) 的 map */
+    private Map<String,Object> activityState(SupplierWorkflowRun run,List<Map<String,Object>> pending,List<Map<String,Object>> history){
+        Map<String,Object> act=new LinkedHashMap<>();
+        java.time.LocalDateTime last=run.updatedAt; String phase="推进中",text="流程推进中",detail="";
+        var live=attempts.findByRunIdOrderByIdDesc(run.id).stream()
+                .filter(a->"DISPATCHED".equals(a.status)||"RUNNING".equals(a.status)||"WAITING_WIKI".equals(a.status))
+                .findFirst().orElse(null);
+        if(!pending.isEmpty()){
+            phase="等待你处理"; text="等待你处理待办："+pending.get(0).get("name");
+            Object q=pending.get(0).get("question"); detail=q==null?"":q.toString();
+        } else if(live!=null && "WAITING_WIKI".equals(live.status)){
+            phase="Wiki 编译中"; var job=jobs.findById(run.jobId).orElse(null);
+            if(job!=null){ var w=wiki.status(job); text="正在编译供应商 Wiki · "+w.get("status");
+                detail="来源覆盖 "+w.get("completedSources")+"/"+w.get("sourceCount"); String fin=String.valueOf(w.get("finishedAt")); // 无 updatedAt，用状态推进即心跳 createdAt 之外，退而用 run.updatedAt
+            }
+        } else if(live!=null){
+            phase="实例执行节点中"; var node=nodes.findByJobIdAndNodeId(run.jobId,live.nodeId).orElse(null);
+            if(node!=null){ text="执行节点 "+live.nodeId+"："+node.getTitle();
+                detail=!node.getThinking().isBlank()?"💭 "+node.getThinking():(!node.getProgress().isBlank()?node.getProgress():"已派发，等待实例响应…");
+                if(node.getUpdatedAt()!=null) last=node.getUpdatedAt(); }
+        } else {
+            var nn=notices.findTop100ByRunIdOrderByIdDesc(run.id).stream()
+                    .filter(x->"PENDING".equals(x.status)||"SENDING".equals(x.status)||"FAILED".equals(x.status)).findFirst().orElse(null);
+            if(nn!=null){ phase="通知投递"; text="飞书通知"+("FAILED".equals(nn.status)?"投递失败（可点重试）":"投递/退避重试中")+" · 第 "+nn.attempts+" 次"; detail=nn.error==null?"":nn.error; }
+        }
+        long idle = last==null?0:Math.max(0, java.time.Duration.between(last, java.time.LocalDateTime.now()).getSeconds());
+        boolean stalled = "ACTIVE".equals(run.status) && pending.isEmpty() && idle>240;   // 没待办、>4分钟无心跳 → 疑似卡住
+        act.put("phase",phase); act.put("text",text); act.put("detail",detail); act.put("idleSeconds",idle); act.put("stalled",stalled);
+        Map<String,Object> out=new LinkedHashMap<>();
+        out.put("status",run.status); out.put("run",run); out.put("tasks",pending); out.put("history",history);
+        out.put("notices",notices.findTop100ByRunIdOrderByIdDesc(run.id)); out.put("attempts",attempts.findByRunIdOrderByIdDesc(run.id));
+        out.put("activity",act);
+        return out;
     }
     @Transactional(isolation=org.springframework.transaction.annotation.Isolation.READ_COMMITTED)
     public SupplierWorkflowRun activeTaskForUpload(Long jobId,String taskId){var run=lock(run(jobId).id);if(!"ACTIVE".equals(run.status))throw new IllegalArgumentException("流程不可上传材料");task(run,taskId);return run;}

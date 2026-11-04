@@ -103,6 +103,15 @@ public class SupplierJobNode {
     @Column(name = "last_run_at")
     private LocalDateTime lastRunAt;
 
+    /** 活动心跳：progress/thinking 每次变化即刷新，供前端判断"是否还在推进/疑似卡住" */
+    @Column(name = "updated_at")
+    private LocalDateTime updatedAt;
+
+    @jakarta.persistence.PrePersist
+    void touchCreate() { updatedAt = LocalDateTime.now(); }
+    @jakarta.persistence.PreUpdate
+    void touchUpdate() { updatedAt = LocalDateTime.now(); }
+
     public Long getId() { return id; }
     public void setId(Long id) { this.id = id; }
     public Long getJobId() { return jobId; }
@@ -141,4 +150,5 @@ public class SupplierJobNode {
     public void setDoneAt(LocalDateTime doneAt) { this.doneAt = doneAt; }
     public LocalDateTime getLastRunAt() { return lastRunAt; }
     public void setLastRunAt(LocalDateTime lastRunAt) { this.lastRunAt = lastRunAt; }
+    public LocalDateTime getUpdatedAt() { return updatedAt; }
 }

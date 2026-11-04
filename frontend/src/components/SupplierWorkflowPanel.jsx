@@ -62,7 +62,16 @@ export default function SupplierWorkflowPanel({ job, showToast, onManaged }) {
         </div>
         {task.attachments?.map(file => <div key={file.id}>📎 {file.filename} · 已入供应商知识库 #{file.entryId}</div>)}
       </article></DraftPage>)}
-      {active && !state.tasks?.length && <p>流程正在派发或执行当前节点，结果就绪后会生成审批待办。</p>}
+      {state.activity && active && <div style={{ marginTop: 12, padding: '10px 14px', borderRadius: 8, border: `1px solid ${state.activity.stalled ? 'rgba(220,38,38,.4)' : 'rgba(59,130,246,.3)'}`, background: state.activity.stalled ? 'rgba(220,38,38,.06)' : 'rgba(59,130,246,.06)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 700, color: state.activity.stalled ? 'var(--error)' : '#2563eb' }}>
+          {!state.activity.stalled && <span className="spinner" style={{ width: 10, height: 10 }} />}
+          {state.activity.stalled ? '⚠️ 疑似卡住' : '▶'} {state.activity.phase} · {state.activity.text}
+          <span style={{ marginLeft: 'auto', fontWeight: 400, fontSize: 11, color: 'var(--text-dim)' }}>最后活动 {state.activity.idleSeconds}s 前</span>
+        </div>
+        {state.activity.detail && <div style={{ marginTop: 6, fontSize: 12, color: 'var(--text-dim)', whiteSpace: 'pre-wrap', maxHeight: 96, overflowY: 'auto', wordBreak: 'break-all' }}>{state.activity.detail}</div>}
+        {state.activity.stalled && <div style={{ marginTop: 6, fontSize: 11.5, color: 'var(--error)' }}>已 {Math.round(state.activity.idleSeconds / 60)} 分钟无进展——可能模型卡住/超长输出截断/等待外部。可"暂停"后"恢复"，或展开下方通知查看错误重试。</div>}
+      </div>}
+      {active && !state.tasks?.length && !state.activity && <p>流程正在派发或执行当前节点，结果就绪后会生成审批待办。</p>}
       <details style={{ marginTop: 16 }}><summary>通知及发送状态</summary>{state.notices?.map(notice => <div key={notice.id} style={{ padding: 8, borderBottom: '1px solid var(--border)' }}>
         <span>{notice.kind} · {notice.status} · 已尝试 {notice.attempts} 次</span>
         <div style={{ whiteSpace: 'pre-wrap' }}>{notice.message}</div>
