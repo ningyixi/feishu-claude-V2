@@ -28,13 +28,13 @@ public final class SupplierWikiContract {
         return object.getAsJsonArray(key);
     }
     static void quote(String quote,SupplierWikiSources.Source source) {
-        // 归一化后仍必须是原文连续子串；容忍换行/空格/全半角差异
+        // 归一化后逐字子串优先；再容忍空白/全半角之外的“漏抄转义/标点”按序子序列兜底
         String q=normalize(quote), s=normalize(source.content());
-        if(q.length()<Math.min(8,s.length()) || !s.contains(q)) {
-            // 兜底：模型常漏抄代码块里的转义(如 \n)或标点 → 允许“按序子序列”，但限较长引文以防误放
-            if(!(q.length()>=12 && isSubsequence(q,s)))
-                throw new IllegalArgumentException("Wiki 引文无法在原文核对："+source.id()+"（已忽略空白/全半角、并允许子序列容错仍未命中；引文起始「"+preview(quote)+"」）");
-        }
+        if(q.length()<Math.min(4,s.length()))                 // 过短无法承载“依据”语义
+            throw new IllegalArgumentException("Wiki 引文过短(需≥4字)："+source.id()+"（引文「"+preview(quote)+"」）");
+        if(s.contains(q)) return;                             // 逐字命中
+        if(q.length()>=6 && isSubsequence(q,s)) return;       // 漏抄 \n 等转义/标点的容错
+        throw new IllegalArgumentException("Wiki 引文无法在原文核对："+source.id()+"（逐字与子序列容错均未命中；引文起始「"+preview(quote)+"」）");
     }
     private static boolean isSubsequence(String sub,String full){
         int i=0;
