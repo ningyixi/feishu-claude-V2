@@ -98,23 +98,34 @@ public class SupplierWikiService {
         LinkedHashSet<String> required=new LinkedHashSet<>();manifest.getAsJsonArray("critical").forEach(id->required.add(id.getAsString()));
         manifest.getAsJsonObject("entrypoints").getAsJsonArray(phase).forEach(id->required.add(id.getAsString()));
         StringBuilder text=new StringBuilder("【供应商 LLM Wiki】供应商："+row.getKbCode()+"；版本："+row.getId()+"；来源指纹："+row.getSourceDigest()+"\n");
-        text.append("以下必读页由工作台按当前阶段直接交付。其他页面沿链接按需读取，禁止凭记忆猜测。需要细节时读取该页列出的完整原文，无法访问时输出卡点。\n");
+        text.append("下列必读页仅内联「摘要 + critical 页硬约束节选」；**完整正文一律按给出的文件路径用 Read 读取**（或走固定版本接口），禁止凭记忆猜测。需要更细原文时读证据来源指向的 raw 文件，无法访问时输出卡点。\n");
         text.append("知识地图：").append(Path.of(row.getDirectory()).resolve("wiki/index.md")).append("\n");
         text.append("可用的固定版本读取接口：/api/supplier-jobs/").append(job.getId()).append("/wiki/revisions/").append(row.getId()).append("/pages/<页面ID>；原文 /sources/<来源ID>。仅返回本供应商、本版本登记的材料。\n");
         for(var warning:manifest.getAsJsonArray("warnings"))text.append("【资料缺口】").append(warning.getAsString()).append('\n');
         Map<String,Integer> kinds=new TreeMap<>();for(var el:manifest.getAsJsonArray("pages"))kinds.merge(el.getAsJsonObject().get("kind").getAsString(),1,Integer::sum);
         for(var kind:kinds.entrySet())text.append("- ").append(kind.getKey()).append("（").append(kind.getValue()).append(" 页）：").append(Path.of(row.getDirectory()).resolve("wiki/index-"+kind.getKey()+".md")).append('\n');
+        // 指针化载荷（11-04-wiki-context-pointers）：不内联页面全文；critical 页附硬约束节选（合计≤4000字）；证据按来源去重每页一行
+        LinkedHashSet<String> criticalIds=new LinkedHashSet<>();manifest.getAsJsonArray("critical").forEach(id->criticalIds.add(id.getAsString()));
+        int excerptBudget=4000;
         for(String id:required) {
             var page=page(manifest,id); verifyFile(Path.of(row.getDirectory()).resolve("wiki/"+id+".md"),page.get("fileHash").getAsString());
-            text.append("\n## ").append(page.get("title").getAsString()).append(" [").append(id).append("]\n")
-                    .append("文件：").append(Path.of(row.getDirectory()).resolve("wiki/"+id+".md")).append('\n')
-                    .append(page.get("content").getAsString()).append('\n');
-            for(var evidence:page.getAsJsonArray("evidence")) {
-                String sourceId=evidence.getAsJsonObject().get("sourceId").getAsString();
-                text.append("证据：").append(sourceId).append(" → ").append(Path.of(row.getDirectory()).resolve("raw/"+sourceId+".md")).append('\n');
+            boolean isCritical=criticalIds.contains(id);
+            text.append("\n## ").append(page.get("title").getAsString()).append(" [").append(id).append("]").append(isCritical?"（必读约束）":"").append('\n')
+                    .append("摘要：").append(page.has("summary")?page.get("summary").getAsString():"").append('\n')
+                    .append("全文：").append(Path.of(row.getDirectory()).resolve("wiki/"+id+".md")).append("（Read 读取）\n");
+            LinkedHashSet<String> srcIds=new LinkedHashSet<>();
+            for(var evidence:page.getAsJsonArray("evidence")) srcIds.add(evidence.getAsJsonObject().get("sourceId").getAsString());
+            if(!srcIds.isEmpty()) text.append("证据来源：").append(String.join(", ",srcIds))
+                    .append(" → ").append(Path.of(row.getDirectory()).resolve("raw")).append("/<来源ID>.md（或 /sources/<来源ID>）\n");
+            if(isCritical && excerptBudget>0) {
+                String content=page.get("content").getAsString();
+                String excerpt=content.length()<=500?content:content.substring(0,500)+"…（节选，全文见上）";
+                if(excerpt.length()>excerptBudget) excerpt=excerpt.substring(0,excerptBudget)+"…";
+                text.append("硬约束节选：\n").append(excerpt).append('\n');
+                excerptBudget-=excerpt.length();
             }
         }
-        if(text.length()>32000)throw new IllegalArgumentException("Wiki 阶段入口超过 32000 字符，请精简入口页并用链接保留详情");
+        if(text.length()>32000)throw new IllegalArgumentException("Wiki 阶段入口超过 32000 字符（指针化后仍超，请精简入口页摘要）");
         return new Context(text.toString(),row.getSourceDigest(),row.getId(),row.getRawChars(),List.copyOf(required));
     }
     public String read(SupplierJob job,Long revisionId,String id,boolean raw) {
