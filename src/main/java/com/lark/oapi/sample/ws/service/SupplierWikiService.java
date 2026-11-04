@@ -148,6 +148,72 @@ public class SupplierWikiService {
             return reply;
         } finally {claude.destroyLane(lane);}
     }
+
+    /**
+     * 分批综合：每批只产少量页（小 JSON），从根上避免"一次吐整本 wiki"超模型输出上限被截断
+     * （历史即因此报 "Wiki 编译器需要完整 JSON 输出"）。批次不闭合→换 lane 名重试；程序合并去重，
+     * 并对 critical/entrypoints 做程序兜底，最后交由 publication() 统一跑全局门禁。
+     */
+    private JsonObject synthesizeInBatches(SupplierWikiSources.Snapshot snapshot,BotInstance instance,
+            SupplierWikiRevision row,String schema,String previous,JsonArray extracted,Path dir) {
+        final int batch=6;
+        java.util.LinkedHashSet<String> seenPage=new java.util.LinkedHashSet<>(); JsonArray pages=new JsonArray();
+        java.util.LinkedHashSet<String> critical=new java.util.LinkedHashSet<>();
+        Map<String,java.util.Set<String>> entry=new java.util.LinkedHashMap<>();
+        for(String st:SupplierWikiContract.STAGES) entry.put(st,new java.util.LinkedHashSet<>());
+        String briefIds=previousPageIds(previous);
+        for(int start=0;start<extracted.size();start+=batch) {
+            JsonArray part=new JsonArray();
+            for(int i=start;i<Math.min(start+batch,extracted.size());i++) part.add(extracted.get(i));
+            String prompt=schema+"\n已有页面 ID（沿用稳定 ID，仅更新受影响者）：\n"+briefIds
+                +"\n**本批只针对下列来源建页**（页面务必简洁，正文不复述整段原文，参数枚举放详情并用链接；每页 content≤12000、summary≤240）：\n"+part
+                +"\n数据缺口："+JSON.toJson(snapshot.warnings())
+                +"\n必要时 Read 当前目录 raw/<来源ID>.md 看完整原文，不要凭摘要猜参数。只返回约定 JSON（pages/critical/entrypoints），不写文件。";
+            JsonObject out=callSynthesis(row,instance,"wiki-synthesis-"+row.getId()+"-b"+(start/batch),prompt,dir);
+            if(out==null) throw new IllegalArgumentException("第"+(start/batch+1)+"批发布失败：模型多次未返回完整 JSON（输出过大或被截断），请缩小该批范围或改用更强模型后重建");
+            if(out.has("pages")&&out.get("pages").isJsonArray()) for(var el:out.getAsJsonArray("pages")) {
+                if(!el.isJsonObject()) continue; var pg=el.getAsJsonObject(); String id=pg.has("id")?pg.get("id").getAsString():"";
+                if(!id.isEmpty()&&seenPage.add(id)) pages.add(pg);
+            }
+            if(out.has("critical")&&out.get("critical").isJsonArray()) for(var el:out.getAsJsonArray("critical")) critical.add(el.getAsString());
+            if(out.has("entrypoints")&&out.get("entrypoints").isJsonObject()) { JsonObject epv=out.getAsJsonObject("entrypoints");
+                for(String st:SupplierWikiContract.STAGES) if(epv.has(st)&&epv.get(st).isJsonArray()) for(var el:epv.getAsJsonArray(st)) entry.get(st).add(el.getAsString()); }
+            row.setCompletedSources(row.getCompletedSources()); revisions.save(row); // 心跳，避免长期无进度
+        }
+        java.util.Set<String> pageIds=new java.util.HashSet<>(); for(var el:pages) pageIds.add(el.getAsJsonObject().get("id").getAsString());
+        critical.retainAll(pageIds);
+        JsonArray crit=new JsonArray(); critical.forEach(crit::add);
+        if(crit.size()==0) { for(var el:pages){ var pg=el.getAsJsonObject(); String k=pg.has("kind")?pg.get("kind").getAsString():"";
+                if(k.equals("constraints")||k.equals("overview")) crit.add(pg.get("id").getAsString()); }
+            if(crit.size()==0 && pages.size()>0) crit.add(pages.get(0).getAsJsonObject().get("id").getAsString()); }
+        JsonObject ep=new JsonObject();
+        for(String st:SupplierWikiContract.STAGES) { java.util.Set<String> ids=entry.get(st); ids.retainAll(pageIds);
+            JsonArray arr=new JsonArray(); ids.forEach(arr::add);
+            if(arr.size()==0) for(var el:pages){ var pg=el.getAsJsonObject(); if(pg.has("stages")&&pg.get("stages").isJsonArray())
+                for(var s:pg.getAsJsonArray("stages")){ String sv=s.getAsString(); if(sv.equals(st)||sv.equals("all")){ arr.add(pg.get("id").getAsString()); break; } } if(arr.size()>0) break; }
+            if(arr.size()==0 && pages.size()>0) arr.add(pages.get(0).getAsJsonObject().get("id").getAsString());
+            ep.add(st,arr);
+        }
+        JsonObject publication=new JsonObject(); publication.add("pages",pages); publication.add("critical",crit); publication.add("entrypoints",ep);
+        return publication;
+    }
+
+    /** 单批 synthesis：json() 解析失败(含截断不闭合)则换 lane 名重试一次；仍失败返回 null */
+    private JsonObject callSynthesis(SupplierWikiRevision row,BotInstance instance,String laneBase,String prompt,Path dir) {
+        for(int attempt=0;attempt<2;attempt++) {
+            try { return SupplierWikiContract.json(model(row,instance,laneBase+"-r"+attempt,prompt,dir)); }
+            catch(RuntimeException e){ System.err.println("[Wiki] 发布批次 JSON 解析失败(尝试"+(attempt+1)+"): "+e.getMessage()); }
+        }
+        return null;
+    }
+
+    private String previousPageIds(String previous) {
+        try { JsonObject pv=JsonParser.parseString(previous).getAsJsonObject(); StringBuilder sb=new StringBuilder();
+            if(pv.has("pages")&&pv.get("pages").isJsonArray()) for(var el:pv.getAsJsonArray("pages")) { var o=el.getAsJsonObject();
+                if(o.has("id")) sb.append(o.get("id").getAsString()).append(" — ").append(o.has("title")?o.get("title").getAsString():"").append('\n'); }
+            String s=sb.toString(); return s.length()>8000? s.substring(0,8000):s;
+        } catch(Exception e){ return ""; }
+    }
     private void compile(SupplierJob job,SupplierWikiSources.Snapshot snapshot,BotInstance instance,SupplierWikiRevision row) {
         try {
             Path supplierRoot=supplierRoot(snapshot.kbCode());
@@ -173,10 +239,9 @@ public class SupplierWikiService {
             if(previous.length()>200000)previous="{}";
             String schema=SCHEMA+"\n补充知识整理要求：\n"+instructions;
             Files.writeString(dir.resolve("schema.md"),schema,StandardCharsets.UTF_8);
-            String prompt=schema+"\n现有页面（保留仍有效的页面 ID，更新受影响事实，删除失去来源支持的结论）：\n"+previous
-                    +"\n全部来源提取：\n"+extracted+"\n明确的数据缺口："+JSON.toJson(snapshot.warnings())
-                    +"\n必要时用 Read 阅读当前目录 raw/<来源ID>.md 的完整原文，不要仅靠摘要猜参数。只返回约定 JSON，不写文件。";
-            JsonObject publication=SupplierWikiContract.publication(SupplierWikiContract.json(model(row,instance,"wiki-synthesis-"+row.getId(),prompt,dir)),snapshot);
+            // 分批综合，避免"一次吐出整本 wiki"超模型输出上限被截断（历史版本因此报"需要完整 JSON 输出"）
+            JsonObject publication=synthesizeInBatches(snapshot,instance,row,schema,previous,extracted,dir);
+            publication=SupplierWikiContract.publication(publication,snapshot);
             publication.addProperty("schemaHash",schemaHash);publication.addProperty("sourceDigest",snapshot.digest());publication.addProperty("revision",row.getId());publication.add("warnings",JSON.toJsonTree(snapshot.warnings()));
             JsonArray inventory=new JsonArray();for(var source:snapshot.sources())inventory.add(SupplierWikiSources.metadata(source));publication.add("sources",inventory);
             Map<String,StringBuilder> categories=new TreeMap<>();StringBuilder index=new StringBuilder("# 供应商 Wiki\n\n版本："+row.getId()+"\n来源指纹："+snapshot.digest()+"\n\n");
