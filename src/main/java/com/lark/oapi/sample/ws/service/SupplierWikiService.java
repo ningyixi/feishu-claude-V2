@@ -140,13 +140,35 @@ public class SupplierWikiService {
         try {String text=Files.readString(path,StandardCharsets.UTF_8);if(!SupplierReferenceContext.digest(text).equals(hash))throw new IllegalArgumentException("Wiki 已发布文件被修改，请重新编译："+path.getFileName());return text;}
         catch(java.io.IOException ex){throw new IllegalArgumentException("Wiki 文件不可读："+path.getFileName(),ex);}
     }
+    /** 启动清扫：上个进程被杀遗留的 BUILDING 版本 → FAILED，前端不再永远显示"编译中" */
+    @jakarta.annotation.PostConstruct
+    public void sweepBuilding() {
+        try {
+            for (var r : revisions.findByStatus("BUILDING")) {
+                r.setStatus("FAILED"); r.setError("编译因服务重启中断，请重新编译"); r.setFinishedAt(LocalDateTime.now()); revisions.save(r);
+            }
+        } catch (Exception e) { System.err.println("[Wiki] BUILDING 清扫失败: "+e.getMessage()); }
+    }
     private String model(SupplierWikiRevision row,BotInstance instance,String lane,String prompt,Path directory) {
         return model(row,instance,lane,prompt,directory,false);
     }
     /** keepLane=true：跑完不销毁该 lane，供多批复用同一常驻会话（避免每批冷启动 CLI 进程） */
     private String model(SupplierWikiRevision row,BotInstance instance,String lane,String prompt,Path directory,boolean keepLane) {
         AtomicReference<TurnResult> usage=new AtomicReference<>();
-        TurnListener listener=new QuietListener(){@Override public void onResultAvailable(TurnResult result){usage.set(result);}};
+        java.util.concurrent.atomic.AtomicLong lastBeat=new java.util.concurrent.atomic.AtomicLong();
+        TurnListener listener=new QuietListener(){
+            @Override public void onResultAvailable(TurnResult result){usage.set(result);}
+            /** 流式心跳：模型生成期间持续打点(≤1次/10s)，"疑似卡住"只会在真无事件时触发 */
+            private void beat(){
+                long now=System.currentTimeMillis(); long prev=lastBeat.get();
+                if(now-prev>10_000 && lastBeat.compareAndSet(prev,now)){
+                    try{ row.setUpdatedAt(java.time.LocalDateTime.now()); revisions.save(row); }catch(RuntimeException ignore){}
+                }
+            }
+            @Override public void onTextDelta(String s){beat();}
+            @Override public void onThinkingDelta(String s){beat();}
+            @Override public void onToolStart(ToolStep s){beat();}
+        };
         try {
             String reply=claude.chatInLane(lane,instance.getId(),prompt,directory.toString(),instance.getClaudeModel(),listener);
             var result=usage.get();if(result!=null){if(result.inputTokens>=0)row.setInputTokens(Math.max(0,row.getInputTokens())+result.inputTokens);if(result.outputTokens>=0)row.setOutputTokens(Math.max(0,row.getOutputTokens())+result.outputTokens);if(result.costUsd>=0)row.setCostUsd(Math.max(0,row.getCostUsd())+result.costUsd);if(result.model!=null && !result.model.isBlank())row.setModel(result.model);}
@@ -177,6 +199,7 @@ public class SupplierWikiService {
                 +"\n数据缺口："+JSON.toJson(snapshot.warnings())
                 +"\n**必须在一次回复里输出完整、闭合的 JSON**（pages/critical/entrypoints），不要分次续写。只返回 JSON，不写文件。";
             // 每批用独立干净会话(避免上下文累积→后批越来越易截断)；解析失败换会话重试一次，仍失败→跳过该批不拖垮整版
+            row.setPhase("发布中 第"+(bi+1)+"/"+total+"批 · 生成中"); revisions.save(row);   // 批前心跳
             JsonObject out=null;
             for(int attempt=0;attempt<2 && out==null;attempt++)
                 out=safeJson(model(row,instance,"wiki-syn-"+row.getId()+"-b"+bi+"-a"+attempt,prompt,dir));

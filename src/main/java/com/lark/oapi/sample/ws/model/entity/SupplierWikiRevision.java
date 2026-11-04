@@ -44,6 +44,7 @@ public class SupplierWikiRevision {
     public String getManifestJson(){return manifestJson;} public void setManifestJson(String v){manifestJson=v;}
     public String getPhase(){return phase;} public void setPhase(String v){phase=v;}
     public LocalDateTime getUpdatedAt(){return updatedAt;}
+    public void setUpdatedAt(LocalDateTime v){updatedAt=v;}
     public LocalDateTime getCreatedAt(){return createdAt;}
     public LocalDateTime getFinishedAt(){return finishedAt;} public void setFinishedAt(LocalDateTime v){finishedAt=v;}
 }
