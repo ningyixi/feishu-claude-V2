@@ -580,19 +580,24 @@ function GameView({ jobId, onBack, showToast }) {
         {/* 右：工作流竖排节点线 */}
         <div className="card workflow-rail">
           <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-dim)', marginBottom: 10 }}>🗺 游戏路径</div>
-          {nodes.map((n, i) => {
+          {(() => {
+            const activeId = nodes.find(n => n.status === 'RUNNING')?.nodeId || job.currentNodeId
+            const seqOf = new Map(nodes.map((n, idx) => [n.nodeId, idx]))
+            const railNodes = [...nodes.filter(n => n.nodeId === activeId), ...nodes.filter(n => n.nodeId !== activeId)]
+            return railNodes.map((n, i) => {
             const st = NODE_STATUS[n.status] || NODE_STATUS.PENDING
             const isCur = n.nodeId === job.currentNodeId
             const isSel = cur && n.nodeId === cur.nodeId
             return (
               <div key={n.nodeId} className="wf-row">
                 <div className="wf-line-col">
-                  <span className={'wf-dot' + (isCur && n.status !== 'DONE' ? ' pulse' : '')}
-                    style={{ background: n.status === 'DONE' ? '#16a34a' : (isCur ? '#3b82f6' : '#93c5fd') }}>
-                    {n.status === 'DONE' ? '✓' : n.status === 'RUNNING' ? '' : i + 1}
+                  <span className="wf-dot"
+                    style={{ background: n.status === 'DONE' ? '#16a34a' : (isCur ? '#3b82f6' : '#93c5fd'),
+                             boxShadow: isCur && n.status !== 'DONE' ? '0 0 0 3px rgba(59,130,246,.22)' : undefined }}>
+                    {n.status === 'DONE' ? '✓' : n.status === 'RUNNING' ? '' : (seqOf.get(n.nodeId) + 1)}
                     {n.status === 'RUNNING' && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
                   </span>
-                  {i < nodes.length - 1 && <span className="wf-line" />}
+                  {i < railNodes.length - 1 && <span className="wf-line" />}
                 </div>
                 <div className={'wf-node' + (isSel ? ' sel' : '')} onClick={() => { setSelected(n.nodeId); setEditingArtifact(false) }}>
                   <div style={{ fontSize: 12.5, fontWeight: isSel ? 700 : 500, color: n.status === 'DONE' ? '#16a34a' : 'var(--text)' }}>
@@ -612,7 +617,8 @@ function GameView({ jobId, onBack, showToast }) {
                 </div>
               </div>
             )
-          })}
+          })
+        })()}
           {running && <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 10 }}>🔄 实例执行中，状态每 4 秒自动刷新…</div>}
         </div>
       </div>

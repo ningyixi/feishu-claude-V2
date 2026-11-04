@@ -28,8 +28,16 @@ public final class SupplierWikiContract {
         return object.getAsJsonArray(key);
     }
     private static void quote(String quote,SupplierWikiSources.Source source) {
-        if(quote.length()<Math.min(8,source.content().length()) || !source.content().contains(quote)) throw new IllegalArgumentException("Wiki 引文无法在原文核对："+source.id());
+        // 归一化后仍必须是原文的连续子串：容忍换行/空格/全半角等无害差异，但改写文字、缩写、省略号仍判不通过
+        String q=normalize(quote), s=normalize(source.content());
+        if(q.length()<Math.min(8,s.length()) || !s.contains(q))
+            throw new IllegalArgumentException("Wiki 引文无法在原文核对："+source.id()+"（已忽略空白/全半角差异仍未逐字命中；引文起始「"+preview(quote)+"」）");
     }
+    /** NFKC 统一全半角/兼容字符，再删除所有空白与零宽字符后比对（两端同规则） */
+    static String normalize(String x){
+        return java.text.Normalizer.normalize(x, java.text.Normalizer.Form.NFKC).replaceAll("[\\s\\u00A0\\u200B\\u200E\\u200F\\uFEFF]+","");
+    }
+    private static String preview(String x){ String p=x.strip().replaceAll("\\s+"," "); return p.length()>60?p.substring(0,60)+"…":p; }
     public static JsonObject extraction(JsonObject value,SupplierWikiSources.Source source) {
         string(value,"summary",4000);
         var facts=array(value,"facts");
