@@ -580,11 +580,7 @@ function GameView({ jobId, onBack, showToast }) {
         {/* 右：工作流竖排节点线 */}
         <div className="card workflow-rail">
           <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-dim)', marginBottom: 10 }}>🗺 游戏路径</div>
-          {(() => {
-            const activeId = nodes.find(n => n.status === 'RUNNING')?.nodeId || job.currentNodeId
-            const seqOf = new Map(nodes.map((n, idx) => [n.nodeId, idx]))
-            const railNodes = [...nodes.filter(n => n.nodeId === activeId), ...nodes.filter(n => n.nodeId !== activeId)]
-            return railNodes.map((n, i) => {
+          {nodes.map((n, i) => {
             const st = NODE_STATUS[n.status] || NODE_STATUS.PENDING
             const isCur = n.nodeId === job.currentNodeId
             const isSel = cur && n.nodeId === cur.nodeId
@@ -594,10 +590,10 @@ function GameView({ jobId, onBack, showToast }) {
                   <span className="wf-dot"
                     style={{ background: n.status === 'DONE' ? '#16a34a' : (isCur ? '#3b82f6' : '#93c5fd'),
                              boxShadow: isCur && n.status !== 'DONE' ? '0 0 0 3px rgba(59,130,246,.22)' : undefined }}>
-                    {n.status === 'DONE' ? '✓' : n.status === 'RUNNING' ? '' : (seqOf.get(n.nodeId) + 1)}
+                    {n.status === 'DONE' ? '✓' : n.status === 'RUNNING' ? '' : (i + 1)}
                     {n.status === 'RUNNING' && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
                   </span>
-                  {i < railNodes.length - 1 && <span className="wf-line" />}
+                  {i < nodes.length - 1 && <span className="wf-line" />}
                 </div>
                 <div className={'wf-node' + (isSel ? ' sel' : '')} onClick={() => { setSelected(n.nodeId); setEditingArtifact(false) }}>
                   <div style={{ fontSize: 12.5, fontWeight: isSel ? 700 : 500, color: n.status === 'DONE' ? '#16a34a' : 'var(--text)' }}>
@@ -617,8 +613,7 @@ function GameView({ jobId, onBack, showToast }) {
                 </div>
               </div>
             )
-          })
-        })()}
+          })}
           {running && <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 10 }}>🔄 实例执行中，状态每 4 秒自动刷新…</div>}
         </div>
       </div>
@@ -851,6 +846,7 @@ function KbPanel({ kbCode, showToast }) {
   const [value, setValue] = useState('')
   const [title, setTitle] = useState('')
   const [site, setSite] = useState(false)           // url 类型：同站点目录递归抓取(≤200页)
+  const [listOpen, setListOpen] = useState(true)     // 知识库列表折叠(文档多时限高/收起)
   const [pagesModal, setPagesModal] = useState(null) // 打开页面清单的 entry
   const [pview, setPview] = useState(null)           // 单页正文预览 {title, content}
   const [view, setView] = useState(null)   // {id, title, content, editing}
@@ -918,6 +914,11 @@ function KbPanel({ kbCode, showToast }) {
         <span style={{ fontSize: 14, fontWeight: 700 }}>📚 供应商知识库</span>
         <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>统一补充入口：文档随时进，解析一次永久复用；节点执行自动引用（先查库勿重抓）</span>
         <div style={{ flex: 1 }} />
+        {entries.length > 0 && (
+          <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => setListOpen(o => !o)}>
+            {listOpen ? '▾ 收起列表' : '▸ 展开列表'}（{entries.length}）
+          </button>
+        )}
         <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>{kbCode}</span>
       </div>
 
@@ -939,8 +940,13 @@ function KbPanel({ kbCode, showToast }) {
           onClick={add}>＋ 补充入库</button>
       </div>
 
-      {/* 条目列表 */}
-      <div style={{ marginTop: 12 }}>
+      {/* 条目列表：默认展开但限高内滚动(侧边滚动条)，可一键收起，文档多时页面不再无限长 */}
+      {!listOpen && entries.length > 0 && (
+        <div style={{ marginTop: 10, fontSize: 12, color: 'var(--text-dim)' }}>
+          已收起 {entries.length} 条材料 · <button className="btn" style={{ fontSize: 11, padding: '1px 8px', marginLeft: 4 }} onClick={() => setListOpen(true)}>▸ 展开</button>
+        </div>
+      )}
+      <div style={{ marginTop: 12, maxHeight: 340, overflowY: listOpen ? 'auto' : 'hidden', display: listOpen ? 'block' : 'none' }}>
         {entries.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '8px 0' }}>（知识库还是空的 — 上方随时补充；创建时录入的旧文档已自动并入）</div>}
         {entries.map(e => {
           const st = KB_STATUS[e.status] || { label: e.status, color: '#6b7280' }
