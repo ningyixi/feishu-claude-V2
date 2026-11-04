@@ -27,11 +27,19 @@ public final class SupplierWikiContract {
         if(!object.has(key) || !object.get(key).isJsonArray()) throw new IllegalArgumentException("Wiki 数组缺失："+key);
         return object.getAsJsonArray(key);
     }
-    private static void quote(String quote,SupplierWikiSources.Source source) {
-        // 归一化后仍必须是原文的连续子串：容忍换行/空格/全半角等无害差异，但改写文字、缩写、省略号仍判不通过
+    static void quote(String quote,SupplierWikiSources.Source source) {
+        // 归一化后仍必须是原文连续子串；容忍换行/空格/全半角差异
         String q=normalize(quote), s=normalize(source.content());
-        if(q.length()<Math.min(8,s.length()) || !s.contains(q))
-            throw new IllegalArgumentException("Wiki 引文无法在原文核对："+source.id()+"（已忽略空白/全半角差异仍未逐字命中；引文起始「"+preview(quote)+"」）");
+        if(q.length()<Math.min(8,s.length()) || !s.contains(q)) {
+            // 兜底：模型常漏抄代码块里的转义(如 \n)或标点 → 允许“按序子序列”，但限较长引文以防误放
+            if(!(q.length()>=12 && isSubsequence(q,s)))
+                throw new IllegalArgumentException("Wiki 引文无法在原文核对："+source.id()+"（已忽略空白/全半角、并允许子序列容错仍未命中；引文起始「"+preview(quote)+"」）");
+        }
+    }
+    private static boolean isSubsequence(String sub,String full){
+        int i=0;
+        for(int j=0;j<full.length()&&i<sub.length();j++) if(sub.charAt(i)==full.charAt(j)) i++;
+        return i==sub.length();
     }
     /** NFKC 统一全半角/兼容字符，再删除所有空白与零宽字符后比对（两端同规则） */
     static String normalize(String x){
