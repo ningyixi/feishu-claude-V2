@@ -144,6 +144,22 @@ public class SupplierJobService {
         return title != null && title.contains("代码") && title.contains("写");
     }
 
+    /** 启动清扫：进程被杀遗留的 RUNNING 节点回到待执行并提示重跑（对齐 hook 孤儿清理，11-04-postman-cli-spec 附带修复） */
+    @PostConstruct
+    public void sweepOrphanRunningNodes() {
+        try {
+            for (SupplierJobNode n : nodeRepo.findAll()) {
+                if ("RUNNING".equals(n.getStatus())) {
+                    n.setStatus("PENDING");
+                    n.setNote("服务重启中断了本节点执行（外部操作结果未知，请核对后重新执行）");
+                    n.setPendingQuestion(""); n.setProgress(""); n.setThinking("");
+                    nodeRepo.save(n);
+                    log.warn("[SupplierJob] 孤儿 RUNNING 节点已复位: job={}, node={}", n.getJobId(), n.getNodeId());
+                }
+            }
+        } catch (Exception e) { log.warn("[SupplierJob] 孤儿节点清扫失败: {}", e.getMessage()); }
+    }
+
     // ===== 三期迁移（11-03-supplier-flow-polish-p3，幂等） =====
 
     static final String N45_TITLE = "开发期沟通 → 提示词重写";
@@ -283,7 +299,7 @@ public class SupplierJobService {
                         + "上一步的接口映射报告:\n{artifact:n1}\n\n"
                         + "请对映射报告中的每个接口：\n"
                         + "1. 生成合理的查询条件（小数据量、真实可执行；需要凭证时先从文档/配置中找，找不到就列出\"需要玩家提供\"清单并跳过该接口）\n"
-                        + "2. 用 Postman MCP 真实调用（注意鉴权头/签名；不可用时输出【卡点】），记录：请求(方法+URL+关键头+body) 与 响应(状态码+body 截断到 2000 字)\n"
+                        + "2. 用 Postman 真实调用（MCP 或本机 postman CLI `postman collection run` 均可；两个通道都不可用时输出【卡点】），记录：请求(方法+URL+关键头+body) 与 响应(状态码+body 截断到 2000 字)\n"
                         + "3. 对比响应与文档描述的差异，重点标注文档滞后之处（字段名/类型/枚举值不一致等）\n"
                         + "输出 markdown 实测报告，按接口分节。无法调用的接口明确标注原因。\n"
                         + "{extra}"));
@@ -616,7 +632,7 @@ public class SupplierJobService {
         }
         if ("codegen".equals(contextStage(n))) generatedDevelopmentPrompt(job, codegenPrompt(jobId));
         if (isProbeNode(n) && (n.getToolEvidence().isBlank() || n.getArtifact().isBlank())) {
-            throw new IllegalArgumentException("缺少成功的 Postman 实测工具记录，请运行实测节点；文字报告不能代替真实请求/返回");
+            throw new IllegalArgumentException("缺少成功的 Postman 实测工具记录（MCP 或 postman CLI 执行均可），请运行实测节点；文字报告与自由 curl 不能代替真实请求/返回");
         }
         kbService.archiveArtifact(job, nodeId, n.getTitle(), n.getArtifact()
                 + (n.getToolEvidence().isBlank() ? "" : "\n\n# 实测执行证据\n" + n.getToolEvidence()));
@@ -761,7 +777,7 @@ public class SupplierJobService {
         String skills = formatSkills(job.getSkillsJson());
         List<SupplierJobNode> probes = nodeRepo.findByJobIdOrderBySeqAsc(jobId).stream()
                 .filter(x -> isProbeNode(x) && "DONE".equals(x.getStatus()) && !x.getToolEvidence().isBlank()).toList();
-        if (probes.isEmpty()) throw new IllegalArgumentException("请先完成带真实 Postman 工具证据的实测节点");
+        if (probes.isEmpty()) throw new IllegalArgumentException("请先完成带真实 Postman 工具证据（MCP 或 CLI）的实测节点");
         String n2 = "WIKI".equals(job.getKnowledgeMode())
                 ? "实测结论已编译进本版本 Wiki；完整请求/响应按 Wiki 中的来源 ID 阅读。已校验实测节点：" + probes.stream().map(SupplierJobNode::getNodeId).toList()
                 : probes.stream().map(x -> x.getArtifact() + "\n\n" + x.getToolEvidence()).collect(java.util.stream.Collectors.joining("\n\n"));
@@ -1070,10 +1086,11 @@ public class SupplierJobService {
                做法：在输出中另起一行、以【卡点】开头写清需要玩家提供的材料和具体问法（可给 A/B/C 选项），然后结束本轮；
                问题会转给玩家，答复将以「【卡点答复】」消息送达本会话，收到后继续未完成的工作。
                注意：【卡点】必须是此刻真正在向玩家提出的问题；转述规则、举例说明时不要使用该标记行。
-            6. 接口实测协议（凡真实调用供应商 HTTP 接口）：必须经 Postman 插件(MCP) 执行——
+            6. 接口实测协议（凡真实调用供应商 HTTP 接口）：走 Postman 合规通道执行——Postman MCP 工具，或本机 Postman CLI
+               （postman collection run <collection.json> -e <env.json>，勿加 --silent，本机已装已登录）；两者任一可用即可，**自由 curl 不算合规实测**。
                a) 先把待测接口整理成 Postman Collection（v2.1 JSON，命名 <供应商代码>-<yyyyMMdd>，含环境变量/鉴权配置）；
-               b) 经插件发送请求、采集真实响应；c) 工件中附 Collection 定义与逐接口"文档 vs 实际"差异对比。
-               官方 runCollection 默认只返回测试摘要。每个请求须配置以下 Tests 脚本，让插件返回真实请求/响应的结构化证据（禁止用静态假数据替换）：
+               b) 经 MCP 或 CLI 发送请求、采集真实响应；c) 工件中附 Collection 定义与逐接口"文档 vs 实际"差异对比。
+               官方 runCollection/CLI 默认只返回测试摘要。每个请求须配置以下 Tests 脚本，让执行输出携带真实请求/响应的结构化证据行（禁止用静态假数据替换）：
                pm.test("SUPPLIER_EVIDENCE:" + JSON.stringify({request:{name:pm.info.requestName,method:pm.request.method,url:pm.variables.replaceIn(pm.request.url.toString()),body:pm.request.body ? pm.variables.replaceIn(pm.request.body.toString()) : ""},response:{code:pm.response.code,body:pm.response.text()}}), function(){ pm.expect(pm.response.code).to.be.within(100,599); });
                证据必须由实际响应生成，报告正文不能替代插件事件。响应过大时拆分请求范围，不要省略正文后宣称已完整取证。
                Postman 插件不可用时输出【卡点】，配置可用插件后重试；自由 curl 不算合规实测产物。""";

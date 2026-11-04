@@ -85,4 +85,15 @@ class SupplierPrepTest {
         assertTrue(SupplierJobService.isCodegenTitle("让实例写供应商代码"));
         assertFalse(SupplierJobService.isCodegenTitle("接口实测"));
     }
+
+    // ===== 实测执行通道判定（11-04-postman-cli-spec） =====
+
+    @Test void probeExecutionChannelAcceptsMcpAndPostmanCliOnly() {
+        com.google.gson.JsonElement bashRun = com.google.gson.JsonParser.parseString("{\"command\":\"postman collection run c.json -e env.json\"}");
+        com.google.gson.JsonElement curlCmd = com.google.gson.JsonParser.parseString("{\"command\":\"curl -X POST https://api.supplier/quote\"}");
+        assertTrue(SupplierProbeEvidence.isExecutionTool("mcp__postman__runCollection"));
+        assertTrue(SupplierProbeEvidence.isExecutionTool("Bash", bashRun), "官方 postman CLI 是合规通道");
+        assertFalse(SupplierProbeEvidence.isExecutionTool("Bash", curlCmd), "自由 curl 不合规");
+        assertFalse(SupplierProbeEvidence.isExecutionTool("Read", bashRun));
+    }
 }

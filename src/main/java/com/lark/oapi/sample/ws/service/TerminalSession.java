@@ -688,7 +688,7 @@ public class TerminalSession {
                 String name = obj.has("name") ? obj.get("name").getAsString() : "?";
                 String detail = extractToolDetail(name, obj.has("input") ? obj.getAsJsonObject("input") : null);
                 ToolStep step = new ToolStep(id, name, detail, "Task".equalsIgnoreCase(name));
-                if (SupplierProbeEvidence.isExecutionTool(name)) {
+                if (SupplierProbeEvidence.isExecutionTool(name, obj.has("input") ? obj.get("input") : null)) {
                     step.evidenceInput = SupplierProbeEvidence.capture(obj.get("input"));
                 }
                 turn.toolSteps.add(step);

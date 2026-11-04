@@ -58,10 +58,17 @@ final class SupplierProbeEvidence {
         }
         return false;
     }
-    static boolean isExecutionTool(String name) {
+    static boolean isExecutionTool(String name) { return isExecutionTool(name, null); }
+    /** 合规执行通道：Postman MCP 工具，或 Bash 调官方 Postman CLI 跑集合（11-04-postman-cli-spec）；裸 curl 不算 */
+    static boolean isExecutionTool(String name, JsonElement input) {
         String normalized = name.toLowerCase(Locale.ROOT).replace("_", "");
-        return normalized.contains("postman") && (normalized.contains("sendrequest")
-                || normalized.contains("runcollection") || normalized.contains("executecollection"));
+        if (normalized.contains("postman") && (normalized.contains("sendrequest")
+                || normalized.contains("runcollection") || normalized.contains("executecollection"))) return true;
+        if (normalized.equals("bash") && input != null && input.isJsonObject() && input.getAsJsonObject().has("command")) {
+            String cmd = input.getAsJsonObject().get("command").getAsString().toLowerCase(Locale.ROOT);
+            return cmd.matches("(?s).*\\bpostman\\s+collection\\s+run\\b.*") || cmd.matches("(?s).*\\bpostman\\s+run\\b.*");
+        }
+        return false;
     }
     static String capture(JsonElement value) {
         if (value == null || value.isJsonNull()) return null;
