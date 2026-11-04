@@ -22,4 +22,13 @@ class SupplierWikiContractTest {
     @Test void emptyOrZeroWidthStripped() {
         assertEquals("ab", SupplierWikiContract.normalize("a​ \n b　")); // 零宽空格 + 全角空格
     }
+
+    @Test void injectedBoilerplateRemovedFromSources() {
+        String src = "> 来源URL: https://x/docs （解析于 2026-11-04T10:00:00）\n\n真实业务约定：取消必须传订单号。\n";
+        String cleaned = SupplierWikiSources.stripInjected(src);
+        assertFalse(cleaned.contains("来源URL"), "程序注入的头部应被剥离");
+        assertTrue(cleaned.contains("真实业务约定：取消必须传订单号"), "真实正文应保留");
+        // 站点 index 清单里的 "载入 N 页）" 外壳不应再作为可引用内容
+        assertFalse(SupplierWikiSources.stripInjected("> 来源入口: https://x （同站点抓取：载入 1 页）\n").contains("载入 1 页"));
+    }
 }

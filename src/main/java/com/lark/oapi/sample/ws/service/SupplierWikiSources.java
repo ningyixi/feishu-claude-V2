@@ -48,8 +48,21 @@ public class SupplierWikiSources {
             Path path=Path.of(file);
             if(Files.size(path)>2_000_000) throw new IllegalArgumentException("单份 Wiki 来源超过读取预算，请按完整章节整理来源："+id);
             String text=Files.readString(path,StandardCharsets.UTF_8);
+            text=stripInjected(text);
             if(text.isBlank() || text.length()>500000) throw new IllegalArgumentException("Wiki 来源为空或超过 500000 字符："+id);
             return new Source(id,title,type,stage,origin,SupplierReferenceContext.digest(text),text);
         } catch(java.io.IOException ex){throw new IllegalArgumentException("Wiki 无法读取来源："+id,ex);}
+    }
+    /** 去掉程序注入的样板头部/清单行，只留真实文档正文，避免模型把外壳当逐字引文 */
+    static String stripInjected(String text) {
+        StringBuilder out=new StringBuilder();
+        for(String line:text.split("\n",-1)) {
+            String t=line.strip();
+            if(t.startsWith("> 来源URL:") || t.startsWith("> 来源MD文件:") || t.startsWith("> 来源入口:")
+                    || t.startsWith("> 来源PDF:") || t.startsWith("> 聊天记录补充") || t.startsWith("> 笔记（")
+                    || (t.startsWith("> 来源:") && t.contains("正文文件"))) continue;
+            out.append(line).append('\n');
+        }
+        return out.toString().strip();
     }
 }
