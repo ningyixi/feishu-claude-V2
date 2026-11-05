@@ -299,7 +299,7 @@ public class SupplierJobService {
                         + "上一步的接口映射报告:\n{artifact:n1}\n\n"
                         + "请对映射报告中的每个接口：\n"
                         + "1. 生成合理的查询条件（小数据量、真实可执行；需要凭证时先从文档/配置中找，找不到就列出\"需要玩家提供\"清单并跳过该接口）\n"
-                        + "2. 用 Postman 真实调用（MCP 或本机 postman CLI `postman collection run` 均可；两个通道都不可用时输出【卡点】），记录：请求(方法+URL+关键头+body) 与 响应(状态码+body 截断到 2000 字)\n"
+                        + "2. 用本机 Postman CLI 真实调用（`postman collection run`；工具清单里有 Postman MCP 时可替代；两者均不可用输出【卡点】），记录：请求(方法+URL+关键头+body) 与 响应(状态码+body 截断到 2000 字)\n"
                         + "3. 对比响应与文档描述的差异，重点标注文档滞后之处（字段名/类型/枚举值不一致等）\n"
                         + "输出 markdown 实测报告，按接口分节。无法调用的接口明确标注原因。\n"
                         + "{extra}"));
@@ -1086,13 +1086,13 @@ public class SupplierJobService {
                做法：在输出中另起一行、以【卡点】开头写清需要玩家提供的材料和具体问法（可给 A/B/C 选项），然后结束本轮；
                问题会转给玩家，答复将以「【卡点答复】」消息送达本会话，收到后继续未完成的工作。
                注意：【卡点】必须是此刻真正在向玩家提出的问题；转述规则、举例说明时不要使用该标记行。
-            6. 接口实测协议（凡真实调用供应商 HTTP 接口）：走 Postman 合规通道执行——Postman MCP 工具，或本机 Postman CLI
-               （postman collection run <collection.json> -e <env.json>，勿加 --silent，本机已装已登录）；两者任一可用即可，**自由 curl 不算合规实测**。
+            6. 接口实测协议（凡真实调用供应商 HTTP 接口）：走 Postman 合规通道——**首选本机 Postman CLI**
+               （postman collection run <collection.json> -e <env.json>，已装已登录，勿加 --silent）；仅当你的工具清单中真实存在 Postman MCP 工具时可用 MCP 替代，**不要为寻找 MCP 浪费步骤，自由 curl 不算合规实测**。
                a) 先把待测接口整理成 Postman Collection（v2.1 JSON，命名 <供应商代码>-<yyyyMMdd>，含环境变量/鉴权配置）；
-               b) 经 MCP 或 CLI 发送请求、采集真实响应；c) 工件中附 Collection 定义与逐接口"文档 vs 实际"差异对比。
+               b) 经 CLI（或可用的 MCP）发送请求、采集真实响应；c) 工件中附 Collection 定义与逐接口"文档 vs 实际"差异对比。
                官方 runCollection/CLI 默认只返回测试摘要。每个请求须配置以下 Tests 脚本，让执行输出携带真实请求/响应的结构化证据行（禁止用静态假数据替换）：
                pm.test("SUPPLIER_EVIDENCE:" + JSON.stringify({request:{name:pm.info.requestName,method:pm.request.method,url:pm.variables.replaceIn(pm.request.url.toString()),body:pm.request.body ? pm.variables.replaceIn(pm.request.body.toString()) : ""},response:{code:pm.response.code,body:pm.response.text()}}), function(){ pm.expect(pm.response.code).to.be.within(100,599); });
-               证据必须由实际响应生成，报告正文不能替代插件事件。响应过大时拆分请求范围，不要省略正文后宣称已完整取证。
+               证据必须由实际响应生成，报告正文不能替代执行输出中的真实响应。响应过大时拆分请求范围，不要省略正文后宣称已完整取证。
                Postman 插件不可用时输出【卡点】，配置可用插件后重试；自由 curl 不算合规实测产物。""";
 
     /** skill 目录列表 → prompt 段落（空配置返回空串） */
