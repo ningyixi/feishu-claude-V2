@@ -166,8 +166,13 @@ public class SupplierWorkflowService {
         if((!review || "REJECT".equals(action)) && text.isBlank() && files.isEmpty())throw new IllegalArgumentException("请填写答复、修改意见或上传所缺材料");
         for(var file:files){var entry=entries.findById(file.entryId).orElseThrow(()->new IllegalArgumentException("上传材料已删除"));if(!"DONE".equals(entry.getStatus()))throw new IllegalArgumentException("请等待上传材料解析完成");text+="\n补充材料："+file.filename+"，知识库来源 ID "+file.entryId;}
         if("APPROVE".equals(action) || task.getTaskDefinitionKey().startsWith("manual_")) {
-            if(!review && !text.isBlank())execution.saveArtifact(jobId,node.getNodeId(),text);
-            execution.completeNode(jobId,node.getNodeId()); // Existing Postman/spec/skill/Trellis gates remain authoritative.
+            var job=jobs.findById(jobId).orElseThrow(()->new IllegalArgumentException("工作不存在"));
+            if(!review && !text.isBlank())execution.setArtifactForCompletion(jobId,node.getNodeId(),text); // 只落工件不入 KB；归档由 completeNode 尾部在门禁校验后统一完成，避免同事务自脏 Wiki 来源
+            if(!review && node.isCodegenPrep()) {
+                String link=SupplierJobService.extractFeishuDocUrl(text);
+                if(link!=null && job.getMeetingDocUrl().isBlank())execution.savePrep(jobId,link,null,null);
+            }
+            execution.completeNode(jobId,node.getNodeId(),!review && node.isCodegenPrep() && !files.isEmpty()); // Existing Postman/spec/skill/Trellis gates remain authoritative. 待办已上传会议材料=文档已交。
         }
         var local=new HashMap<String,Object>();local.put("action",action);local.put("answer",text);local.put("respondedAt",LocalDateTime.now().toString());
         engine.getTaskService().setVariablesLocal(taskId,local);
@@ -195,7 +200,13 @@ public class SupplierWorkflowService {
             item.put("id",task.getId());item.put("name",task.getName());item.put("kind",task.getTaskDefinitionKey().split("_")[0]);item.put("nodeId",node.getNodeId());item.put("nodeTitle",node.getTitle());
             item.put("description",node.getDescription());item.put("artifact",node.getArtifact());
             item.put("question",task.getTaskDefinitionKey().startsWith("input_")?engine.getRuntimeService().getVariable(run.processId,"question"):"");
-            item.put("attachments",attachments.findByRunIdAndTaskIdOrderByIdAsc(run.id,task.getId()));pending.add(item);
+            var attach=attachments.findByRunIdAndTaskIdOrderByIdAsc(run.id,task.getId());
+            item.put("attachments",attach);
+            if(task.getTaskDefinitionKey().startsWith("manual_") && node.isCodegenPrep()){
+                var job=jobs.findById(run.jobId).orElseThrow(()->new IllegalArgumentException("工作不存在"));
+                item.put("prepStatus",Map.of("docDone",!job.getMeetingDocUrl().isBlank() || !attach.isEmpty(),"kvDone",SupplierJobService.configsComplete(job.getConfigJson())));
+            }
+            pending.add(item);
         }
         var history=engine.getHistoryService().createHistoricTaskInstanceQuery().processInstanceId(run.processId).finished().includeTaskLocalVariables().orderByHistoricTaskInstanceEndTime().desc().listPage(0,100).stream().map(t->{
             Map<String,Object> item=new LinkedHashMap<>();item.put("id",t.getId());item.put("name",t.getName());item.put("finishedAt",t.getEndTime());item.put("response",t.getTaskLocalVariables());return item;

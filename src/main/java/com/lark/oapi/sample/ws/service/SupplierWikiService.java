@@ -86,8 +86,12 @@ public class SupplierWikiService {
     }
     private SupplierWikiRevision ready(SupplierJob job) {
         var row=revisions.findFirstByKbCodeOrderByIdDesc(kb.kbCode(job)).orElseThrow(()->new IllegalArgumentException("Wiki 尚未编译，请先生成"));
-        if(!"READY".equals(row.getStatus()))throw new IllegalArgumentException("Wiki 尚未就绪："+row.getStatus()+"；"+row.getError());
-        if(!row.getSourceDigest().equals(sources.snapshot(job).digest()))throw new IllegalArgumentException("Wiki 已过期：来源发生变化，请重新编译；不会自动切换纯文本");
+        if(!"READY".equals(row.getStatus())) {
+            // BUILDING：多为工件归档触发的自动重编译（SupplierJobService.scheduleWikiRecompile），给出可等待的引导而非死路
+            if("BUILDING".equals(row.getStatus()))throw new IllegalArgumentException("LLM Wiki 正在自动重新编译（新工件已排队入编），编译完成后即可生成提示词，请稍候重试");
+            throw new IllegalArgumentException("Wiki 尚未就绪："+row.getStatus()+"；"+row.getError());
+        }
+        if(!row.getSourceDigest().equals(sources.snapshot(job).digest()))throw new IllegalArgumentException("LLM Wiki 来源已更新，自动重编译进行中或启动失败，请到 Wiki 面板查看状态并手动重新编译");
         if(!JsonParser.parseString(row.getManifestJson()).getAsJsonObject().get("schemaHash").getAsString().equals(schemaHash(job)))throw new IllegalArgumentException("Wiki 编译规则已更新，请重新编译");
         return row;
     }

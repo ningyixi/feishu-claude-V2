@@ -48,6 +48,47 @@ class SupplierPrepTest {
         assertTrue(SupplierJobService.prepComplete("https://a.feishu.cn/docx/x", "[{\"key\":\"k\",\"value\":\"v\"}]"));
     }
 
+    // ===== 门禁拆分与飞书链接提取（写代码准备三通道修复） =====
+
+    @Test
+    void extractFeishuDocUrlScansFreeText() {
+        assertEquals("https://x.feishu.cn/docx/abc", SupplierJobService.extractFeishuDocUrl("https://x.feishu.cn/docx/abc"));
+        assertEquals("https://x.feishu.cn/docx/abc", SupplierJobService.extractFeishuDocUrl("参考 https://x.feishu.cn/docx/abc 开会定的"));
+        assertEquals("https://xxx.feishu.cn/wiki/W123", SupplierJobService.extractFeishuDocUrl("纪要见 https://xxx.feishu.cn/wiki/W123 请查收"));
+        assertEquals("https://dida.larksuite.com/docx/d1", SupplierJobService.extractFeishuDocUrl("https://dida.larksuite.com/docx/d1"));
+        assertEquals("https://x.feishu.cn/docx/abc", SupplierJobService.extractFeishuDocUrl("链接：https://x.feishu.cn/docx/abc。请查收"), "中文标点紧跟链接");
+        assertNull(SupplierJobService.extractFeishuDocUrl("https://feishu.cn.evil.com/a"), "后缀伪装域必须 null");
+        assertNull(SupplierJobService.extractFeishuDocUrl("https://sub.feishu.cn.evil.com/a"), "子域前缀截断伪装也必须 null");
+        assertNull(SupplierJobService.extractFeishuDocUrl("http://x.feishu.cn/docx/abc"), "非 https 必须 null");
+        assertNull(SupplierJobService.extractFeishuDocUrl("今天开会讨论了接口，没有链接"));
+        assertNull(SupplierJobService.extractFeishuDocUrl(""));
+        assertNull(SupplierJobService.extractFeishuDocUrl(null));
+        assertEquals("https://a.feishu.cn/docx/1", SupplierJobService.extractFeishuDocUrl("https://a.feishu.cn/docx/1 和 https://b.feishu.cn/docx/2"), "多链接返回第一个");
+        assertEquals("https://b.feishu.cn/docx/2", SupplierJobService.extractFeishuDocUrl("https://feishu.cn.evil.com/a 和 https://b.feishu.cn/docx/2"), "伪装域跳过取下一个合法链接");
+    }
+
+    @Test
+    void configsCompleteChecksPairsIndependently() {
+        assertFalse(SupplierJobService.configsComplete("[]"));
+        assertFalse(SupplierJobService.configsComplete(""));
+        assertFalse(SupplierJobService.configsComplete(null));
+        assertFalse(SupplierJobService.configsComplete("[{\"key\":\"k\",\"value\":\"\"}]"));
+        assertTrue(SupplierJobService.configsComplete("[{\"key\":\"k\",\"value\":\"v\"}]"));
+    }
+
+    @Test
+    void prepMissingMessageListsOnlyMissingItems() {
+        String docMissing = SupplierJobService.prepMissingMessage(false, true);
+        assertTrue(docMissing.contains("未收到三方会议文档"));
+        assertFalse(docMissing.contains("配置"), "只缺文档时不能提配置，避免用户误判链接没提交上");
+        String kvMissing = SupplierJobService.prepMissingMessage(true, false);
+        assertTrue(kvMissing.contains("配置 key/value"));
+        assertFalse(kvMissing.contains("未收到三方会议文档"));
+        String both = SupplierJobService.prepMissingMessage(false, false);
+        assertTrue(both.contains("未收到三方会议文档") && both.contains("配置 key/value"));
+        assertTrue(both.startsWith("【写代码准备】未完成："));
+    }
+
     // ===== 写代码提示词组装 =====
 
     @Test

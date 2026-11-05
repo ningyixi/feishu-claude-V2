@@ -55,7 +55,12 @@ export default function SupplierWorkflowPanel({ job, showToast, onManaged }) {
         <p>{task.description}</p>
         {task.question && <div style={{ whiteSpace: 'pre-wrap', background: 'var(--bg)', padding: 12 }}>{task.question}</div>}
         {task.artifact && <details open={task.kind === 'review'}><summary>本节点产物</summary><ReactMarkdown>{task.artifact}</ReactMarkdown></details>}
-        <textarea className="form-input" aria-label={`答复 ${task.name}`} rows={4} style={{ width: '100%', marginTop: 10 }} placeholder={task.kind === 'review' ? '审批备注；驳回时请说明需要怎样修改' : '填写答案、补充信息，或上传所缺材料后提交'} value={answers[task.id] || ''} onChange={e => setAnswers(a => ({ ...a, [task.id]: e.target.value }))} />
+        {task.prepStatus && <div style={{ marginTop: 10, fontSize: 12, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+          <span style={{ color: task.prepStatus.docDone ? '#16a34a' : '#d97706' }}>{task.prepStatus.docDone ? '✅' : '☐'} 三方会议文档{task.prepStatus.docDone ? '' : '（粘贴飞书链接或上传材料即可）'}</span>
+          <span style={{ opacity: .5 }}>·</span>
+          <span style={{ color: task.prepStatus.kvDone ? '#16a34a' : '#dc2626' }}>{task.prepStatus.kvDone ? '✅' : '☐'} 配置 key/value（在下方节点卡「写代码准备」保存≥1组）</span>
+        </div>}
+        <textarea className="form-input" aria-label={`答复 ${task.name}`} rows={4} style={{ width: '100%', marginTop: 10 }} placeholder={task.kind === 'review' ? '审批备注；驳回时请说明需要怎样修改' : task.prepStatus ? '填写答复…；三方会议文档可直接粘贴飞书云文档链接，点「提交并继续」自动收录' : '填写答案、补充信息，或上传所缺材料后提交'} value={answers[task.id] || ''} onChange={e => setAnswers(a => ({ ...a, [task.id]: e.target.value }))} />
         <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
           <label>补充文件 <input type="file" disabled={!active || busy} accept=".pdf,.txt,.md,.markdown,.json,.csv,.yaml,.yml,.xml,.log" onChange={e => { const file = e.target.files?.[0]; if (!file) return; if (file.size > 10 * 1024 * 1024) { showToast('文件不能超过 10MB', 'error'); return } const data = new FormData(); data.append('file', file); post(`/tasks/${task.id}/files`, data, true); e.target.value = '' }} /></label>
           {(task.kind === 'review' ? ['APPROVE', 'REJECT'] : ['SUBMIT']).map(action => <button className={action === 'REJECT' ? 'btn' : 'btn btn-primary'} key={action} disabled={!active || busy} onClick={() => post(`/tasks/${task.id}/respond`, { action, answer: answers[task.id] || '' })}>{action === 'APPROVE' ? '同意并继续' : action === 'REJECT' ? '驳回并重做' : '提交并继续'}</button>)}

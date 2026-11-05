@@ -53,6 +53,10 @@ public class SupplierJobService {
     private final com.lark.oapi.sample.ws.repository.SupplierJobChatRepository chatRepo;
     private final com.lark.oapi.sample.ws.repository.SupplierNodeChatRepository nodeChatRepo;
 
+    /** Wiki 自动重编译入口（ObjectProvider 延迟解析，不进构造器签名——多处测试直接 new） */
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<SupplierWikiService> wikiProvider;
+
     public SupplierJobService(SupplierJobRepository jobRepo,
                               SupplierJobNodeRepository nodeRepo,
                               WorkflowTemplateRepository templateRepo,
@@ -307,7 +311,7 @@ public class SupplierJobService {
                 "核对存档信息：供应商 ID/枚举值是否已申请（NuGet 包 Suppliers 枚举）、测试账号/凭证是否到位、类库路径是否正确。"
                         + "缺什么先去申请，齐了再点完成。", ""));
         nodes.add(node("n4", "manual", "让实例写供应商代码",
-                "先在「写代码准备」提交三方会议文档（飞书云文档链接）与当前配置 key/value，"
+                "先在「写代码准备」或直接在本待办粘贴三方会议文档飞书链接/上传会议材料，并配置 key/value；"
                         + "再点「生成提示词」复制发给绑定实例（自动聚合知识库/实测档案/skill/spec/会议文档/配置）。代码写完并自查后点完成。", ""));
         nodes.get(3).getAsJsonObject().addProperty("codegenPrep", true);   // n4 写代码前置门禁
         JsonObject n45 = node("n45", "agent", "开发期沟通 → 提示词重写",
@@ -622,13 +626,19 @@ public class SupplierJobService {
 
     /** 玩家确认节点完成：蓝→绿，推进当前节点。带写代码门禁的节点必须先交齐会议文档+KV配置 */
     @Transactional
-    public void completeNode(Long jobId, String nodeId) {
+    public void completeNode(Long jobId, String nodeId) { completeNode(jobId, nodeId, false); }
+
+    /** meetingMaterialsUploaded=true：工作流待办已上传会议材料，会议文档视为已交（三通道断连修复） */
+    @Transactional
+    public void completeNode(Long jobId, String nodeId, boolean meetingMaterialsUploaded) {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
         SupplierJobNode n = nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
                 .orElseThrow(() -> new IllegalArgumentException("节点不存在: " + nodeId));
         if ("RUNNING".equals(n.getStatus())) throw new IllegalArgumentException("节点尚在执行，不能标记完成");
-        if (n.isCodegenPrep() && !prepComplete(job.getMeetingDocUrl(), job.getConfigJson())) {
-            throw new IllegalArgumentException("【写代码准备】未完成：需先提交三方会议文档（飞书云文档链接），并补充至少一组完整的配置 key/value");
+        if (n.isCodegenPrep()) {
+            boolean docDone = !job.getMeetingDocUrl().isBlank() || meetingMaterialsUploaded;
+            boolean kvDone = configsComplete(job.getConfigJson());
+            if (!docDone || !kvDone) throw new IllegalArgumentException(prepMissingMessage(docDone, kvDone));
         }
         if ("codegen".equals(contextStage(n))) generatedDevelopmentPrompt(job, codegenPrompt(jobId));
         if (isProbeNode(n) && (n.getToolEvidence().isBlank() || n.getArtifact().isBlank())) {
@@ -649,6 +659,27 @@ public class SupplierJobService {
                     log.info("[SupplierJob] 🎉 存档通关: id={}, name={}", jobId, job.getName());
                 });
         jobRepo.save(job);
+        scheduleWikiRecompile(job);
+    }
+
+    /** 工件归档进 KB 弄脏 Wiki 来源后自动重编译（镜像 dispatch 的门槛条件）；事务提交后执行，best-effort */
+    private void scheduleWikiRecompile(SupplierJob job) {
+        Runnable run = () -> {
+            try {
+                SupplierWikiService wiki = wikiProvider == null ? null : wikiProvider.getIfAvailable();
+                if (wiki == null || !"WIKI".equals(job.getKnowledgeMode())) return;
+                String status = String.valueOf(wiki.status(job).get("status"));
+                if ("READY".equals(status) || "BUILDING".equals(status)) return;
+                wiki.build(job);
+                log.info("[SupplierJob] 工件更新触发 Wiki 自动重编译: job={}, 原状态={}", job.getId(), status);
+            } catch (Exception e) { log.warn("[SupplierJob] Wiki 自动重编译未启动 job={}: {}", job.getId(), e.getMessage()); }
+        };
+        if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive())
+            org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                new org.springframework.transaction.support.TransactionSynchronization() {
+                    @Override public void afterCommit() { run.run(); }
+                });
+        else run.run();
     }
 
     static boolean isProbeNode(SupplierJobNode node) {
@@ -672,7 +703,11 @@ public class SupplierJobService {
 
     /** 门禁达成判定：会议文档链接非空 且 至少一组 key/value 都完整的配置 */
     static boolean prepComplete(String meetingDocUrl, String configJson) {
-        if (meetingDocUrl == null || meetingDocUrl.isBlank()) return false;
+        return meetingDocUrl != null && !meetingDocUrl.isBlank() && configsComplete(configJson);
+    }
+
+    /** KV 成对校验：至少一组 key/value 都完整的配置（门禁拆分与待办实时状态共用） */
+    static boolean configsComplete(String configJson) {
         try {
             JsonArray arr = JsonParser.parseString(configJson == null || configJson.isBlank() ? "[]" : configJson).getAsJsonArray();
             for (JsonElement el : arr) {
@@ -685,6 +720,37 @@ public class SupplierJobService {
             }
         } catch (Exception ignore) { }
         return false;
+    }
+
+    /** 自由文本里出现的飞书云文档链接；要求域名后即结束或接非域名字符，防止 sub.feishu.cn.evil.com 截断误判 */
+    private static final Pattern FEISHU_URL_IN_TEXT = Pattern.compile(
+            "https://[A-Za-z0-9.-]+\\.(?:feishu\\.cn|larksuite\\.com)(?:/[^\\s\"'<>【】（）\\[\\]]*)?");
+
+    /** 从待办答复等自由文本提取第一个合法飞书云文档链接；复用 isFeishuDocUrl 完整校验防伪装域；无则 null */
+    static String extractFeishuDocUrl(String text) {
+        if (text == null || text.isBlank()) return null;
+        Matcher m = FEISHU_URL_IN_TEXT.matcher(text);
+        while (m.find()) {
+            if (m.end() < text.length()) {
+                char next = text.charAt(m.end());
+                if (Character.isLetterOrDigit(next) || next == '.' || next == '-' || next == '_') continue;   // 主机名未结束=伪装域前缀
+            }
+            String url = m.group();
+            int cut = url.length();
+            for (int i = "https://".length(); i < url.length(); i++) if (url.charAt(i) > 127) { cut = i; break; }   // 链接后紧跟的中文标点/文字不入 URL
+            url = url.substring(0, cut);
+            if (isFeishuDocUrl(url)) return url;
+        }
+        return null;
+    }
+
+    /** 门禁失败话术：只列缺失项及各自提交通道，避免"文档+配置"混说导致用户误判 */
+    static String prepMissingMessage(boolean docDone, boolean kvDone) {
+        StringBuilder sb = new StringBuilder("【写代码准备】未完成：");
+        if (!docDone) sb.append("☐ 未收到三方会议文档：在待办答复框粘贴飞书云文档链接、或上传会议材料文件，或在节点卡「写代码准备」提交");
+        if (!docDone && !kvDone) sb.append("；");
+        if (!kvDone) sb.append("☐ 未填配置 key/value：在节点卡「写代码准备」保存至少一组完整的 key/value");
+        return sb.toString();
     }
 
     public boolean prepReady(SupplierJob job) {
@@ -936,6 +1002,23 @@ public class SupplierJobService {
         nodeRepo.save(n);
         SupplierJob job = jobRepo.findById(jobId).orElseThrow();
         kbService.archiveArtifact(job, nodeId, n.getTitle(), n.getArtifact() + (n.getToolEvidence().isBlank() ? "" : "\n\n" + n.getToolEvidence()));
+        scheduleWikiRecompile(job);
+    }
+
+    /**
+     * 工作流待办提交专用：只把答复文本落到节点工件，<b>不</b>写知识库。
+     * 知识库归档统一由随后 completeNode 尾部完成（门禁校验之后、同一事务内唯一一次，
+     * source "job:X/node:Y" 幂等）。若在门禁前先 archiveArtifact，答复文本会立即成为
+     * Wiki 来源（SupplierWikiSources.snapshot 收录非 archive 的 KB 条目），同事务内的
+     * codegen 新鲜度校验（SupplierWikiService.ready 的来源指纹比对）必败——用户会陷入
+     * "重建 Wiki → 提交待办 → 又提示 Wiki 已过期"的死循环，且事务回滚后重编译也不会发生。
+     */
+    @Transactional
+    public void setArtifactForCompletion(Long jobId, String nodeId, String artifact) {
+        SupplierJobNode n = nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
+                .orElseThrow(() -> new IllegalArgumentException("节点不存在"));
+        n.setArtifact(artifact != null ? artifact : "");
+        nodeRepo.save(n);
     }
 
     // ===== 对话区（玩家随时问执行实例"现在什么情况"） =====
