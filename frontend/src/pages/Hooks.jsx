@@ -69,8 +69,10 @@ export default function Hooks() {
   const instName = id => instances.find(i => String(i.id) === String(id))?.name || `#${id}`
 
   async function toggle(h) {
-    await fetch(`/api/hooks/${h.id}/toggle`, { method: 'POST' })
+    const res = await fetch(`/api/hooks/${h.id}/toggle`, { method: 'POST' })
     load()
+    // h.enabled 是翻转前状态，文案按翻转后展示；先确认 HTTP 成功再报完成（floating-ui.md §3）
+    showToast(res.ok ? `${h.enabled ? '⏸ 已停用' : '▶️ 已启用'}「${h.name}」` : '启停失败，请重试', res.ok ? 'success' : 'error')
   }
   async function runNow(h) {
     const res = await fetch(`/api/hooks/${h.id}/run`, { method: 'POST' })
