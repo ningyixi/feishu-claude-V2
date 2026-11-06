@@ -71,7 +71,7 @@ class SupplierWorkflowMysqlIT {
         var other=create(STEPS);flow.start(other.getId(),"",false);
         assertThrows(IllegalArgumentException.class,()->uploads.upload(other.getId(),manual,new MockMultipartFile("file","x.txt","text/plain","foreign".getBytes())));
         assertThrows(IllegalArgumentException.class,()->uploads.upload(job.getId(),manual,new MockMultipartFile("file","x.exe","application/octet-stream",new byte[]{1})));
-        var calls=new AtomicInteger();when(model.chatInLane(anyString(),eq(job.getInstanceId()),anyString(),anyString(),nullable(String.class),any(TurnListener.class))).thenAnswer(invocation->{
+        var calls=new AtomicInteger();when(model.chat(eq(job.getInstanceId()),anyString(),anyString(),anyString(),nullable(String.class),any(TurnListener.class))).thenAnswer(invocation->{
             int count=calls.incrementAndGet();if(count==1)return "【卡点】请确认环境是否为沙箱？";
             assertTrue(invocation.getArgument(2,String.class).contains(count==2?"沙箱":"补上取消说明"));return "分析完成：取消须携带供应商订单号。";
         });
@@ -109,7 +109,7 @@ class SupplierWorkflowMysqlIT {
     }
     @Test void anotherEngineReadsPersistedWaitingTaskAndFailedGateKeepsApprovalOpen() throws Exception {
         var job=create("[{\"id\":\"p\",\"type\":\"agent\",\"title\":\"实测\",\"contextStage\":\"probe\",\"prompt\":\"{docs}\"}]");
-        when(model.chatInLane(anyString(),eq(job.getInstanceId()),anyString(),anyString(),nullable(String.class),any(TurnListener.class))).thenReturn("仅有口头报告，没有真实工具执行证据");
+        when(model.chat(eq(job.getInstanceId()),anyString(),anyString(),anyString(),nullable(String.class),any(TurnListener.class))).thenReturn("仅有口头报告，没有真实工具执行证据");
         var run=flow.start(job.getId(),"",false);awaitTask(run.id,job.getId(),"review");String taskId=id(job.getId());
         var configuration=new org.flowable.spring.SpringProcessEngineConfiguration();configuration.setDataSource(dataSource);configuration.setTransactionManager(transactionManager);try(var connection=dataSource.getConnection()){configuration.setDatabaseCatalog(connection.getCatalog());}configuration.setDatabaseSchemaUpdate("false");configuration.setAsyncExecutorActivate(false);configuration.setHistory("audit");configuration.setDisableIdmEngine(true);configuration.setDisableEventRegistry(true);
         var reopened=configuration.buildProcessEngine();try {assertEquals(taskId,reopened.getTaskService().createTaskQuery().processInstanceId(run.processId).singleResult().getId());}finally{reopened.close();}
@@ -123,6 +123,10 @@ class SupplierWorkflowMysqlIT {
         when(model.chatInLane(anyString(),eq(job.getInstanceId()),anyString(),anyString(),nullable(String.class),any(TurnListener.class))).thenAnswer(invocation->{
             String lane=invocation.getArgument(0);if(lane.startsWith("wiki-source"))return new com.google.gson.Gson().toJson(Map.of("summary","约束","facts",List.of(Map.of("statement",SupplierWikiTest.QUOTE,"quote",SupplierWikiTest.QUOTE))));
             if(lane.startsWith("wiki-synthesis"))return SupplierWikiTest.publication().toString().replace("\"sourceId\":\"e1\"","\"sourceId\":\""+sourceId+"\"");
+            throw new IllegalStateException("lane 只应承载 Wiki 编译，出现: "+lane);
+        });
+        // 11-05：agent 节点执行走实例主会话（Wiki 编译仍走独立 lane）
+        when(model.chat(eq(job.getInstanceId()),anyString(),anyString(),anyString(),nullable(String.class),any(TurnListener.class))).thenAnswer(invocation->{
             assertTrue(invocation.getArgument(2,String.class).contains("供应商 LLM Wiki"));return "业务分析完成";
         });
         var run=flow.start(job.getId(),"",false);awaitTask(run.id,job.getId(),"review");assertEquals("READY",wiki.status(job).get("status"));assertEquals("SUCCEEDED",attempts.findByRunIdOrderByIdDesc(run.id).getFirst().status);

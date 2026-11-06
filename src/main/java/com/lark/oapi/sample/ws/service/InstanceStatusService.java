@@ -10,13 +10,16 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.stream.Collectors;
 
 /**
- * 实例状态判定服务 — 把三个真实状态源合成一个"好玩但诚实"的状态：
+ * 实例状态判定服务 — 把多个真实状态源合成一个"好玩但诚实"的状态：
  * <ul>
  *   <li>FeishuBotService：WS 连接是否在线、最后收到消息的时间</li>
  *   <li>ClaudeCodeService/TerminalSession：进程是否存活、轮次活动阶段（思考/工具/生成）、排队数、上轮结束时间</li>
+ *   <li>ClaudeCodeService lanes：归属本实例的独立 lane 会话（Wiki 编译/数字员工等后台任务；
+ *       11-05 起供应商工作台已并入实例主会话，其忙碌直接体现在主会话轮次上）
+ *       ——lane 轮次活跃显示"后台任务中"，lane 最近活动时间并入空闲分级</li>
  *   <li>BotInstance：enabled 开关</li>
  * </ul>
- * 判定优先级：停用 &gt; 断线 &gt; 干活中 &gt; 进程挂了 &gt; 刚完成 &gt; 空闲 &gt; 摸鱼 &gt; 睡大觉。
+ * 判定优先级：停用 &gt; 断线 &gt; 干活中（主会话或 lane） &gt; 进程挂了 &gt; 刚完成 &gt; 空闲 &gt; 摸鱼 &gt; 睡大觉。
  * 空闲类状态的文案随机取自文案池，每次轮询都可能有新花样。
  */
 @Service
@@ -95,8 +98,9 @@ public class InstanceStatusService {
         }
 
         TerminalSession session = claudeCodeService.getSession(id);
+        var laneActivity = claudeCodeService.busiestLaneActivity(id);
 
-        // 3. 干活中（轮次活跃）——优先级最高的"好玩"状态
+        // 3. 干活中（轮次活跃）——优先级最高的"好玩"状态；主会话活跃用现有文案
         if (session != null && session.isTurnActive()) {
             long elapsed = session.getTurnElapsedMs();
             int queued = session.getQueuedCount();
@@ -114,22 +118,43 @@ public class InstanceStatusService {
             };
         }
 
-        // 4. 进程挂了（有会话但进程死了，下一条消息会自动重启）
+        // 3b. lane 后台任务活跃（Wiki 编译/数字员工等）——主会话空闲也算"在干活"，文案前缀区分
+        if (laneActivity.isPresent()) {
+            TerminalSession lane = laneActivity.get().session();
+            long elapsed = lane.getTurnElapsedMs();
+            int queued = lane.getQueuedCount();
+            String queuedNote = queued > 0 ? "，身后还排着 " + queued + " 条消息" : "";
+            return switch (lane.getActivityPhase()) {
+                case TOOL_RUNNING -> {
+                    String tool = lane.getCurrentToolName();
+                    yield new InstanceStatusDTO(id, "WORKING", "🛠️", "后台任务中",
+                            "工作台/流程后台任务：正在执行 " + (tool != null ? tool : "工具") + "（已 " + fmt(elapsed) + "）" + queuedNote, true);
+                }
+                case GENERATING -> new InstanceStatusDTO(id, "GENERATING", "✍️", "后台任务中",
+                        "工作台/流程后台任务：正在生成回复（已 " + fmt(elapsed) + "）" + queuedNote, true);
+                case THINKING, IDLE -> new InstanceStatusDTO(id, "THINKING", "🤔", "后台任务中",
+                        "工作台/流程后台任务：思考中（已 " + fmt(elapsed) + "）" + queuedNote, true);
+            };
+        }
+
+        // 4. 进程挂了（有主会话但进程死了，下一条消息会自动重启；lane 是临时性的，lane 进程死亡不算 CRASHED）
         if (session != null && !session.isAlive()) {
             return new InstanceStatusDTO(id, "CRASHED", "🤕", "进程挂了",
                     "Claude 进程意外退出，发条消息就能满血复活", false);
         }
 
-        // 5. 空闲分级：刚完成 → 待命 → 摸鱼 → 睡大觉
+        // 5. 空闲分级：刚完成 → 待命 → 摸鱼 → 睡大觉（lane 活动一并计入"最近干过活"）
         long lastMsg = feishuBotService.getLastMessageTime(id);
         long lastEnd = session != null ? session.getLastTurnEndTime() : 0;
-        long lastActivity = Math.max(lastMsg, lastEnd);
+        long laneEnd = claudeCodeService.lastLaneActivityMs(id);
+        long lastFinish = Math.max(lastEnd, laneEnd);
+        long lastActivity = Math.max(lastMsg, lastFinish);
 
-        if (lastEnd > 0 && System.currentTimeMillis() - lastEnd < DONE_WINDOW_MS) {
+        if (lastFinish > 0 && System.currentTimeMillis() - lastFinish < DONE_WINDOW_MS) {
             return new InstanceStatusDTO(id, "DONE", "✅", "任务完成",
-                    "刚干完一票（" + fmt(System.currentTimeMillis() - lastEnd) + "前），歇口气", false);
+                    "刚干完一票（" + fmt(System.currentTimeMillis() - lastFinish) + "前），歇口气", false);
         }
-        if (session == null && lastMsg == 0) {
+        if (session == null && lastMsg == 0 && laneEnd == 0) {
             return new InstanceStatusDTO(id, "IDLE", "🟢", "空闲中",
                     "还没人找它聊过天，它很矜持地在待命", false);
         }

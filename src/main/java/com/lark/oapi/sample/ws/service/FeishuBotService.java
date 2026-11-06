@@ -44,6 +44,20 @@ public class FeishuBotService {
     @org.springframework.beans.factory.annotation.Autowired
     private org.springframework.beans.factory.ObjectProvider<SupplierWorkflowService> supplierWorkflows;
 
+    // ===== 供应商知识库指针注入（②a）：CHAT 模式消息附带"该实例绑定工作的知识底座在哪、怎么读" =====
+    // ObjectProvider 延迟取用：指针属于增强信息，取数/组装任何异常都不得影响对话主链路
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<com.lark.oapi.sample.ws.repository.SupplierJobRepository> supplierJobs;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<SupplierWikiService> supplierWiki;
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<SupplierKbService> supplierKb;
+
+    /** 指针块数上限（多工作按 updatedAt 新→旧取前 N 块） */
+    static final int POINTER_MAX_BLOCKS = 3;
+    /** 指针后缀总字符预算（超出截掉尾部块，用户消息永不被挤掉） */
+    static final int POINTER_BUDGET_CHARS = 2400;
+
     enum Mode { SHELL, CHAT }
 
     // 始终允许访问的 OpenID
@@ -479,12 +493,14 @@ public class FeishuBotService {
 
             log.info("[Chat][{}] 调用 Claude: openId={}, dir={}, model={}, 图片={}张",
                     instance.getName(), openId, dir, model, images.size());
+            // ②a 供应商知识库指针：拼在用户文本之后（图片消息则拼在说明文案之后），Shell/命令分支不经过这里
+            String finalText = composePointers(buildSupplierPointers(instanceId), text);
             try {
                 // 流式卡片控制器：CardKit 原地增量更新，完成判定由协议 result 事件驱动（零等待）
                 boolean isGroup = "group".equals(chatType);
                 StreamingCardController controller = new StreamingCardController(
                         conn.httpClient, isGroup ? "chat_id" : "open_id", isGroup ? chatId : openId);
-                String reply = claudeCodeService.chat(instanceId, openId, text, images, dir, model, controller);
+                String reply = claudeCodeService.chat(instanceId, openId, finalText, images, dir, model, controller);
                 log.info("[Chat][{}] Claude 轮次完成 ({}字, 卡片送达={})",
                         instance.getName(), reply != null ? reply.length() : 0, controller.isDelivered());
                 if (controller.isDelivered()) {
@@ -509,6 +525,58 @@ public class FeishuBotService {
             String output = shellService.execute(text);
             replyText(instanceId, openId, chatType, chatId, output);
         }
+    }
+
+    // ===== 供应商知识库指针（②a） =====
+
+    /**
+     * 取该实例绑定工作（ACTIVE+COMPLETED，updatedAt 新→旧）的知识底座指针文本，每工作一块：
+     * WIKI 模式取 {@link SupplierWikiService#feishuPointer}，TEXT 模式取 {@link SupplierKbService#feishuKbPointer}。
+     * 无绑定工作/服务不可用/任何异常 → 空列表（绝不注入、绝不影响对话主链路）。
+     */
+    private List<String> buildSupplierPointers(Long instanceId) {
+        try {
+            var jobs = supplierJobs.getObject()
+                    .findByInstanceIdAndStatusInOrderByUpdatedAtDesc(instanceId, List.of("ACTIVE", "COMPLETED"));
+            if (jobs.isEmpty()) return List.of();
+            List<String> pointers = new java.util.ArrayList<>();
+            for (var job : jobs) {
+                String p = "WIKI".equals(job.getKnowledgeMode())
+                        ? supplierWiki.getObject().feishuPointer(job)
+                        : supplierKb.getObject().feishuKbPointer(job);
+                if (p != null && !p.isBlank()) pointers.add(p);
+            }
+            return pointers;
+        } catch (Exception e) {
+            log.warn("[Chat][{}] 供应商指针组装失败（本轮不注入）: {}", instanceId, e.getMessage());
+            return List.of();
+        }
+    }
+
+    /**
+     * 纯组装函数（可单测）：把指针块拼到用户文本之后。
+     * <ul>
+     *   <li>无有效指针块 → 原文一字不动（绝不为空注入添加任何噪声）</li>
+     *   <li>最多 {@link #POINTER_MAX_BLOCKS} 块，块序 = 入参序（调用方已按 updatedAt 新→旧排好）</li>
+     *   <li>指针总长 ≤ {@link #POINTER_BUDGET_CHARS} 字符，超出的尾部块整块丢弃（不截半块）</li>
+     *   <li>整段以「（系统注入，非用户消息）」标记开头，防 agent 把指针当作用户话语</li>
+     * </ul>
+     */
+    static String composePointers(List<String> pointers, String userText) {
+        String base = userText == null ? "" : userText;
+        if (pointers == null || pointers.isEmpty()) return base;
+        StringBuilder suffix = new StringBuilder();
+        int blocks = 0;
+        for (String p : pointers) {
+            if (p == null || p.isBlank()) continue;
+            if (blocks >= POINTER_MAX_BLOCKS) break;
+            String block = (suffix.length() == 0 ? "" : "\n\n") + p.strip();
+            if (suffix.length() + block.length() > POINTER_BUDGET_CHARS) break;   // 超预算：截掉尾部块
+            suffix.append(block);
+            blocks++;
+        }
+        if (suffix.length() == 0) return base;
+        return base + "\n\n（系统注入，非用户消息）\n" + suffix;
     }
 
     // ===== 媒体下载与识别 =====

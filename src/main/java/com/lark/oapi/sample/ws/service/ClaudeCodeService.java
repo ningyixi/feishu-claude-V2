@@ -8,6 +8,7 @@ import jakarta.annotation.PreDestroy;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -86,9 +87,13 @@ public class ClaudeCodeService {
 
     /**
      * 重置会话 — 销毁旧终端，创建新的。
+     * <p>
+     * ②b：重建前先清空持久化 sessionID，防止用户手动 /new 重置掉的会话在服务重启后被 --resume 复活；
+     * 随后新建会话的 init 监听器会把新 id 落库。
      */
     public void newSession(Long instanceId, String workingDir, String model) {
         destroySession(instanceId);
+        clearPersistedSessionId(instanceId);
         try {
             getOrCreate(instanceId, workingDir, model);
             log.info("[ClaudeCode] 已重置 session (instanceId={})", instanceId);
@@ -103,7 +108,8 @@ public class ClaudeCodeService {
      */
     private TerminalSession getOrCreate(Long instanceId, String workingDir, String model) throws IOException {
         // 沙箱档位是进程旗标的一部分：从实例配置读取，变更时随 dir/model 一起触发会话重建
-        int sandboxLevel = instanceRepo.findById(instanceId)
+        Optional<com.lark.oapi.sample.ws.model.entity.BotInstance> instanceOpt = instanceRepo.findById(instanceId);
+        int sandboxLevel = instanceOpt
                 .map(com.lark.oapi.sample.ws.model.entity.BotInstance::getSandboxLevel)
                 .orElse(SandboxPolicy.LEVEL_FULL);
         TerminalSession session = sessions.get(instanceId);
@@ -132,11 +138,66 @@ public class ClaudeCodeService {
 
         String sessionKey = instanceId + ":" + (workingDir != null ? workingDir : "");
         session = new TerminalSession(sessionKey, workingDir, model, sandboxLevel);
+        // ②b 服务重启续接：内存会话没了（sessions map 随 JVM 重启清空），但实例行持久化了同目录的最新
+        // sessionID → --resume 接回上下文。内存 inherit（同 JVM 进程崩溃）优先，它总是最新或相等。
+        if (inherit == null) {
+            var saved = instanceOpt.orElse(null);
+            String resumeId = saved == null ? null
+                    : pickResumeId(saved.getLastClaudeSessionId(), saved.getLastClaudeSessionDir(), workingDir);
+            if (resumeId != null) {
+                inherit = resumeId;
+                log.info("[ClaudeCode] 重启续接主会话: instanceId={}, --resume {}（DB 持久化）", instanceId, resumeId);
+            }
+        }
         session.inheritSessionId(inherit);
+        // 每轮 init 事件把最新 sessionID 落库（--resume 会派生新 id）；写库失败只 warn，不影响对话
+        session.setSessionIdListener(id -> persistSessionId(instanceId, id, workingDir));
         session.start();
         sessions.put(instanceId, session);
         log.info("[ClaudeCode] 创建新终端: instanceId={}, dir={}, 沙箱={}", instanceId, workingDir, SandboxPolicy.label(sandboxLevel));
         return session;
+    }
+
+    /**
+     * ②b resume 决策（纯函数，可单测）：持久化 id 非空、且持久化目录与本次工作目录一致才接回。
+     * dir 不一致 = 配置变更，拒绝跨目录 resume（CLI 会话上下文与工作目录强相关）；null 目录按空串归一。
+     *
+     * @return 可 --resume 的 sessionID；不满足条件返回 null（起全新会话）
+     */
+    static String pickResumeId(String savedId, String savedDir, String currentDir) {
+        if (savedId == null || savedId.isBlank()) return null;
+        String a = savedDir == null ? "" : savedDir;
+        String b = currentDir == null ? "" : currentDir;
+        return a.equals(b) ? savedId : null;
+    }
+
+    /**
+     * ②b 持久化最新 sessionID（TerminalSession init 回调触发，每轮一次）。
+     * 实例行不存在则跳过；任何异常只 warn——写库失败绝不影响对话/协议解析线程。包级可见供单测。
+     */
+    void persistSessionId(Long instanceId, String id, String dir) {
+        try {
+            instanceRepo.findById(instanceId).ifPresent(inst -> {
+                inst.setLastClaudeSessionId(id == null ? "" : id);
+                inst.setLastClaudeSessionDir(dir == null ? "" : dir);
+                instanceRepo.save(inst);
+            });
+        } catch (Exception e) {
+            log.warn("[ClaudeCode] sessionID 持久化失败（不影响对话）: instanceId={}, {}", instanceId, e.getMessage());
+        }
+    }
+
+    /** ②b 清空持久化 sessionID（/new 手动重置用）：防服务重启后 --resume 复活用户已重置掉的会话 */
+    void clearPersistedSessionId(Long instanceId) {
+        try {
+            instanceRepo.findById(instanceId).ifPresent(inst -> {
+                inst.setLastClaudeSessionId("");
+                inst.setLastClaudeSessionDir("");
+                instanceRepo.save(inst);
+            });
+        } catch (Exception e) {
+            log.warn("[ClaudeCode] 清空持久化 sessionID 失败: instanceId={}, {}", instanceId, e.getMessage());
+        }
     }
 
     private static boolean nullSafeEquals(String a, String b) {
@@ -145,7 +206,7 @@ public class ClaudeCodeService {
         return a.equals(b);
     }
 
-    // ===== 独立通道（lane）：数字员工需求/聊天专用会话，不与实例主会话（飞书私聊/E2E/供应商）共用 =====
+    // ===== 独立通道（lane）：Wiki 编译/数字员工等目录或身份不同的场景专用会话，不与实例主会话（飞书私聊/供应商工作台/E2E）共用 =====
 
     /** 空闲 lane 保留时长：需求完成后仍可带上下文追问 */
     private static final long LANE_IDLE_TTL_MS = Long.getLong("claude.laneIdleTtlMinutes", 30L) * 60_000L;
@@ -154,10 +215,15 @@ public class ClaudeCodeService {
 
     private final Map<String, TerminalSession> lanes = new ConcurrentHashMap<>();
     private final Map<String, Long> laneLastUsed = new ConcurrentHashMap<>();
+    /** lane → 归属实例 ID（getOrCreateLane 登记，destroyLane 清除）——让实例状态合成能看见 lane 上的后台任务 */
+    private final Map<String, Long> laneOwner = new ConcurrentHashMap<>();
 
     /**
      * 在独立 lane 上对话：lane 首次使用时以实例的工作目录/模型/沙箱档位起一个新的 CLI 进程（全新上下文），
      * 后续同 lane 复用。与实例主会话互不排队、互不污染上下文。
+     * <p>
+     * 供应商工作台任务已改用实例主会话（{@link #chat}）（11-05 起，与飞书对话同 sessionID/同队列/同上下文）；
+     * lane 机制保留给 Wiki 编译、数字员工、E2E 等工作目录或身份不同的场景。
      */
     public String chatInLane(String lane, Long instanceId, String message, String workingDir, String model,
                              TurnListener listener) {
@@ -199,6 +265,7 @@ public class ClaudeCodeService {
         if (s != null && s.isAlive() && nullSafeEquals(s.getWorkingDir(), workingDir == null ? "" : workingDir)
                 && nullSafeEquals(s.getModel(), model == null ? "" : model)
                 && s.getSandboxLevel() == sandboxLevel && s.getExtraDirs().equals(extraDirs) && s.getExtraEnv().equals(env)) {
+            laneOwner.put(lane, instanceId);   // 复用路径同样登记归属（实例可能中途换绑）
             return s;
         }
         String inherit = null;
@@ -216,6 +283,7 @@ public class ClaudeCodeService {
         s.setExtraEnv(env);
         s.start();
         lanes.put(lane, s);
+        laneOwner.put(lane, instanceId);
         log.info("[ClaudeCode] 创建独立会话 lane={}, instance={}, dir={}", lane, instanceId, workingDir);
         return s;
     }
@@ -232,7 +300,47 @@ public class ClaudeCodeService {
     public void destroyLane(String lane) {
         TerminalSession s = lanes.remove(lane);
         laneLastUsed.remove(lane);
+        laneOwner.remove(lane);
         if (s != null) s.destroy();
+    }
+
+    /** 某实例名下 lane 会话的活跃快照（{@link #busiestLaneActivity} 返回值） */
+    public record LaneActivity(TerminalSession session, String lane) {}
+
+    /**
+     * 该实例名下所有 lane 会话中"正在跑轮次"的进度快照；无活跃 lane 时 empty。
+     * 多个 lane 同时活跃时取轮次已进行时间最长者（最忙的那个），供实例状态合成显示"后台任务中"。
+     */
+    public Optional<LaneActivity> busiestLaneActivity(Long instanceId) {
+        if (instanceId == null) return Optional.empty();
+        LaneActivity best = null;
+        long bestElapsed = -1;
+        for (var e : lanes.entrySet()) {
+            if (!instanceId.equals(laneOwner.get(e.getKey()))) continue;
+            TerminalSession s = e.getValue();
+            if (!s.isTurnActive()) continue;
+            long elapsed = s.getTurnElapsedMs();
+            if (elapsed > bestElapsed) {
+                bestElapsed = elapsed;
+                best = new LaneActivity(s, e.getKey());
+            }
+        }
+        return Optional.ofNullable(best);
+    }
+
+    /**
+     * 该实例所有 lane 的最近活动时间：max(轮次结束时间, lane 最后使用时间)；无 lane 返回 0。
+     * 供实例状态的空闲分级（刚完成/摸鱼/睡大觉）把后台任务算进"最近干过活"。
+     */
+    public long lastLaneActivityMs(Long instanceId) {
+        if (instanceId == null) return 0;
+        long best = 0;
+        for (var e : lanes.entrySet()) {
+            if (!instanceId.equals(laneOwner.get(e.getKey()))) continue;
+            best = Math.max(best, Math.max(e.getValue().getLastTurnEndTime(),
+                    laneLastUsed.getOrDefault(e.getKey(), 0L)));
+        }
+        return best;
     }
 
     /** 只保留 keep 个空闲 lane（进行中的轮次永不淘汰） */
@@ -277,7 +385,9 @@ public class ClaudeCodeService {
     }
 
     /**
-     * 销毁指定实例的终端
+     * 销毁指定实例的终端。
+     * ②b 注意：<b>不清</b>持久化 sessionID——销毁进程 ≠ 丢弃上下文，服务重启/下次消息按语义要 --resume 续接；
+     * 只有用户显式 /new（{@link #newSession}）才清库。
      */
     public void destroySession(Long instanceId) {
         TerminalSession session = sessions.remove(instanceId);
@@ -295,6 +405,8 @@ public class ClaudeCodeService {
         sessions.clear();
         lanes.values().forEach(TerminalSession::destroy);
         lanes.clear();
+        laneLastUsed.clear();
+        laneOwner.clear();
     }
 
     /**

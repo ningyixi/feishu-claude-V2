@@ -84,6 +84,40 @@ public class SupplierWikiService {
         }
         return state;
     }
+    /**
+     * 飞书对话模式的「供应商 LLM Wiki 指针」（②a）——WIKI 模式工作专用。
+     * <p>
+     * 只读一行 DB（{@code findFirstByKbCodeOrderByIdDesc}），<b>不做 sources.snapshot 指纹重算</b>：
+     * 本方法在每条飞书消息的关键路径上被调用，重算指纹会遍历/读取全部来源，性能不可接受。
+     * 指针只告诉 agent「Wiki 在哪、怎么读、要不要读」，是否 stale 交由 agent 读页时自行判断，
+     * 不影响这里的注入决策。
+     *
+     * @return READY→指针块；BUILDING/FAILED→对应话术；EMPTY/无行→空串（调用方据此决定是否注入）
+     */
+    public String feishuPointer(SupplierJob job) {
+        if (job == null || !"WIKI".equals(job.getKnowledgeMode())) return "";
+        var latest = revisions.findFirstByKbCodeOrderByIdDesc(kb.kbCode(job)).orElse(null);
+        if (latest == null) return "";
+        String dir = latest.getDirectory() == null ? "" : latest.getDirectory();
+        String name = job.getSupplierName() == null ? "" : job.getSupplierName();
+        String code = job.getSupplierCode() == null ? "" : job.getSupplierCode();
+        String status = latest.getStatus() == null ? "" : latest.getStatus();
+        switch (status) {
+            case "READY":
+                String block = "【供应商 LLM Wiki】" + name + "（" + code + "）知识底座版本 "
+                        + latest.getId() + "（" + latest.getSourceCount() + " 个来源）已就绪。\n"
+                        + "索引先读：" + dir + "/wiki/index.md；页面正文 wiki/<页面ID>.md；原文 raw/<来源ID>.md（均允许 Read）。\n"
+                        + "回答该供应商接口/业务问题前先读相关页面并引用页面 ID；Wiki 未覆盖明说，不得猜测。";
+                return block.length() > 400 ? block.substring(0, 400) : block;
+            case "BUILDING":
+                return "【供应商 LLM Wiki】" + name + "（" + code + "）正在编译中，完成后会通知；本轮可先按已知信息回答。";
+            case "FAILED":
+                return "【供应商 LLM Wiki】" + name + "（" + code + "）编译失败（" + dir + " 可用工作台重建），本轮暂勿引用。";
+            default:
+                return "";   // EMPTY 或未知状态：不注入
+        }
+    }
+
     private SupplierWikiRevision ready(SupplierJob job) {
         var row=revisions.findFirstByKbCodeOrderByIdDesc(kb.kbCode(job)).orElseThrow(()->new IllegalArgumentException("Wiki 尚未编译，请先生成"));
         if(!"READY".equals(row.getStatus())) {

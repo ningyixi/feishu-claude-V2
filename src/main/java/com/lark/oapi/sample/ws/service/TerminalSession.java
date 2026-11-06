@@ -57,6 +57,12 @@ public class TerminalSession {
     private volatile BufferedWriter writer;
     private volatile BufferedReader reader;
     private volatile String claudeSessionId;
+    /**
+     * sessionID 变化回调（②b）— 每当 init 事件给 claudeSessionId 赋新值时触发，让上层把"每轮最新"
+     * sessionID 持久化到实例行（--resume 会派生新 id，必须每轮更新而非存一次）。
+     * 回调在 reader 协议解析线程上执行，实现方不得阻塞、不得抛异常（本类会吞掉并打 warn）。
+     */
+    private volatile java.util.function.Consumer<String> sessionIdListener;
     /** 进程崩溃/看门狗重启时用 --resume 接回原会话上下文（-Dterminal.resumeOnRestart=false 关闭） */
     private static final boolean RESUME_ON_RESTART = Boolean.parseBoolean(System.getProperty("terminal.resumeOnRestart", "true"));
     /** 本次进程启动是否带了 --resume；若进程在收到 init 前就退出，视为恢复失败，下次改为全新会话 */
@@ -282,6 +288,20 @@ public class TerminalSession {
     }
 
     public String getClaudeSessionId() { return claudeSessionId; }
+
+    /**
+     * 注册 sessionID 变化监听（②b 持久化用）。init 事件每赋新 session_id 一次即回调一次。
+     * 传 null 可解除。回调异常由本类吞掉（见 {@link #fireSessionId}），不影响协议解析线程。
+     */
+    public void setSessionIdListener(java.util.function.Consumer<String> l) { this.sessionIdListener = l; }
+
+    /** 触发 sessionID 回调：null-safe（无监听器/空 id 直接返回），吞掉并 warn 回调异常，绝不影响协议解析。包级可见供单测 */
+    void fireSessionId(String id) {
+        java.util.function.Consumer<String> l = sessionIdListener;
+        if (l == null || id == null || id.isBlank()) return;
+        try { l.accept(id); }
+        catch (Exception e) { log.warn("[Terminal] sessionID 持久化回调失败（忽略）: key={}, {}", sessionKey, e.getMessage()); }
+    }
 
     /** 替换一个已死的旧会话对象时，把它的 session_id 交给新对象，start() 会用 --resume 接回上下文 */
     public void inheritSessionId(String id) {
@@ -632,7 +652,10 @@ public class TerminalSession {
         switch (subtype) {
             case "init" -> {
                 initSeen = true;
-                if (event.has("session_id")) claudeSessionId = event.get("session_id").getAsString();
+                if (event.has("session_id")) {
+                    claudeSessionId = event.get("session_id").getAsString();
+                    fireSessionId(claudeSessionId);   // ②b 每轮最新 sessionID → 上层持久化（--resume 会派生新 id）
+                }
                 if (event.has("model") && !event.get("model").isJsonNull()) detectedModel = event.get("model").getAsString();
                 log.info("[Terminal] [init] session_id={}, model={}", claudeSessionId, detectedModel);
             }

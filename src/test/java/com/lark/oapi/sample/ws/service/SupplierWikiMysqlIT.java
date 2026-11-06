@@ -39,6 +39,10 @@ class SupplierWikiMysqlIT {
         when(model.chatInLane(anyString(),eq(instance.getId()),anyString(),anyString(),nullable(String.class),any(TurnListener.class))).thenAnswer(call->{
             String lane=call.getArgument(0);if(lane.startsWith("wiki-source"))return new Gson().toJson(Map.of("summary","商务规则","facts",List.of(Map.of("statement",SupplierWikiTest.QUOTE,"quote",SupplierWikiTest.QUOTE))));
             if(lane.startsWith("wiki-synthesis"))return SupplierWikiTest.publication().toString().replace("\"sourceId\":\"e1\"","\"sourceId\":\""+sourceId+"\"");
+            throw new IllegalStateException("lane 只应承载 Wiki 编译，出现: "+lane);
+        });
+        // 11-05：runNode 走实例主会话（与飞书对话同 sessionID/队列/上下文），不再走独立 lane
+        when(model.chat(eq(instance.getId()),anyString(),anyString(),anyString(),nullable(String.class),any(TurnListener.class))).thenAnswer(call->{
             var result=new TurnResult("## Finish\n分析完成",false);result.inputTokens=21;result.outputTokens=11;result.cacheReadTokens=5;result.costUsd=0.001;
             call.getArgument(5,TurnListener.class).onResultAvailable(result);return result.text;
         });

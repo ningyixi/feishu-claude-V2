@@ -1106,6 +1106,16 @@ function PagesModal({ kbCode, entry, onClose, onView, showToast }) {
 
 // ===== 对话区：与执行实例随问随答（提问排队，当前执行段结束后被回答） =====
 
+// PENDING 行的"已运行"时长（本地时钟算，每次轮询重渲染自然刷新）
+function elapsedLabel(createdAt) {
+  if (!createdAt) return ''
+  const t = new Date(String(createdAt)).getTime()
+  if (Number.isNaN(t)) return ''
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000))
+  if (s < 60) return `已运行 ${s} 秒`
+  return `已运行 ${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, '0')} 秒`
+}
+
 function ChatPanel({ jobId, running, showToast }) {
   const [msgs, setMsgs] = useState([])
   const [q, setQ] = useState('')
@@ -1154,13 +1164,24 @@ function ChatPanel({ jobId, running, showToast }) {
         ) : (
           <div key={m.id} style={{ alignSelf: 'flex-start', maxWidth: '86%', background: 'rgba(107,114,128,.1)', border: '1px solid var(--border,#e5e7eb)', borderRadius: '10px 10px 10px 2px', padding: '7px 11px', fontSize: 12.5 }}>
             {m.status === 'PENDING' ? (
-              <span style={{ color: 'var(--text-dim)' }}><span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />排队/思考中…{running ? '（节点正在执行，结束后自动回答）' : ''}</span>
+              m.text ? (
+                // 后端回写的实时进度摘要 — 灰色小字 + spinner，不走 ReactMarkdown（防止误认成最终答案）
+                <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
+                  <span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />
+                  {m.text}{running ? '（节点正在执行，结束后自动回答）' : ''}
+                </span>
+              ) : (
+                <span style={{ color: 'var(--text-dim)' }}><span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />排队/思考中…{running ? '（节点正在执行，结束后自动回答）' : ''}</span>
+              )
             ) : (
               <div className="md-body" style={{ color: m.status === 'FAILED' ? 'var(--error)' : 'var(--text)' }}>
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
               </div>
             )}
-            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>{String(m.createdAt).substring(11, 16)}</div>
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>
+              {String(m.createdAt).substring(11, 16)}
+              {m.status === 'PENDING' && elapsedLabel(m.createdAt) ? ` · ${elapsedLabel(m.createdAt)}` : ''}
+            </div>
           </div>
         ))}
       </div>

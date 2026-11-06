@@ -25,12 +25,15 @@ class SupplierPromptGenerationTest {
         when(instances.findById(2L)).thenReturn(Optional.of(instance));
         var service = spy(new SupplierJobService(jobs, null, null, instances, agent, kb, null, null));
         doReturn("mandatory original supplier context").when(service).codegenPrompt(1L);
-        when(agent.chatInLane(startsWith("supplier-prompt-1-TEXT-"), eq(2L), contains("mandatory original supplier context"),
+        // 11-05：生成任务并入实例主会话（chat），openId=supplierLane 前缀；不再走一次性 prompt lane
+        when(agent.chat(eq(2L), startsWith("supplier-job-"), contains("mandatory original supplier context"),
                 anyString(), nullable(String.class), any(TurnListener.class))).thenReturn("generated development instructions");
         String prompt = service.generateCodegenPrompt(1L);
         assertTrue(prompt.contains("generated development instructions"));
         assertTrue(prompt.contains("mandatory original supplier context"));
         assertEquals(SupplierReferenceContext.digest("mandatory original supplier context"), job.getGeneratedPromptDigest());
         verify(kb).archiveArtifact(job, "generated-prompt", "公司 Skill 生成的对接提示词", prompt);
+        verify(agent, never()).chatInLane(anyString(), anyLong(), anyString(), anyString(), nullable(String.class), any(TurnListener.class));
+        verify(agent, never()).destroyLane(anyString());   // 主会话共享，旧 prompt lane 清理已移除
     }
 }

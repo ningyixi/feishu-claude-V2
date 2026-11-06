@@ -44,6 +44,18 @@ public class BotInstance {
     @Column(name = "sandbox_level")
     private Integer sandboxLevel = 0;
 
+    /**
+     * 主会话最新 sessionID 持久化（②b）— claude CLI --resume 会派生新 sessionID（init 事件），
+     * 所以每轮 init 都由监听器落库"最新"值；Java 应用重启后 getOrCreate 用它 --resume 接回上下文。
+     * getter 归一空串：ddl-auto=update 给存量行加列后为 NULL。
+     */
+    @Column(name = "last_claude_session_id", length = 64)
+    private String lastClaudeSessionId = "";
+
+    /** lastClaudeSessionId 对应的工作目录 — 重启续接仅当与本次 workingDir 一致（配置变更拒绝跨目录 resume） */
+    @Column(name = "last_claude_session_dir", length = 512)
+    private String lastClaudeSessionDir = "";
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 
@@ -87,6 +99,12 @@ public class BotInstance {
     /** 空值归一：存量行 sandbox_level 为 NULL 时按 0（全权限，与升级前行为一致） */
     public int getSandboxLevel() { return sandboxLevel != null ? sandboxLevel : 0; }
     public void setSandboxLevel(int sandboxLevel) { this.sandboxLevel = sandboxLevel; }
+
+    /** 空值归一：存量行 last_claude_session_id/dir 为 NULL 时按空串 */
+    public String getLastClaudeSessionId() { return lastClaudeSessionId != null ? lastClaudeSessionId : ""; }
+    public void setLastClaudeSessionId(String lastClaudeSessionId) { this.lastClaudeSessionId = lastClaudeSessionId; }
+    public String getLastClaudeSessionDir() { return lastClaudeSessionDir != null ? lastClaudeSessionDir : ""; }
+    public void setLastClaudeSessionDir(String lastClaudeSessionDir) { this.lastClaudeSessionDir = lastClaudeSessionDir; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }

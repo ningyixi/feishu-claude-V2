@@ -276,6 +276,24 @@ public class SupplierKbService {
     /** 注入 agent prompt 的知识库段：索引表 + 先查库规则（R4） */
     public String indexText(String kbCode) { return indexText(kbCode, "all"); }
 
+    /**
+     * 飞书对话模式的「供应商知识库指针」（②a）——TEXT 模式工作专用。
+     * <p>
+     * 直接复用 {@link #indexText(String)} 现成的材料索引（含条目状态与产物路径），
+     * 前面加一行说明，超长截断到 2000 字符——飞书每条消息都会带上，控制在轻量范围。
+     *
+     * @return 指针块；库为空（indexText 返回占位说明）时仍原样带上（agent 据此知道无材料可读）
+     */
+    public String feishuKbPointer(SupplierJob job) {
+        if (job == null) return "";
+        String name = job.getSupplierName() == null || job.getSupplierName().isBlank()
+                ? kbCode(job) : job.getSupplierName();
+        String index = indexText(kbCode(job));
+        String block = "【供应商知识库】" + name + "：材料索引如下，需要细节按路径 Read。\n" + index;
+        if (block.length() > 2000) block = block.substring(0, 2000) + "…（详见工作台知识库）";
+        return block;
+    }
+
     private List<SupplierKbEntry> forStage(String kbCode, String stage) {
         return list(kbCode).stream().filter(e -> !"archive".equals(e.getContextStage()))
                 .filter(e -> "all".equals(stage) || "all".equals(e.getContextStage()) || stage.equals(e.getContextStage())).toList();

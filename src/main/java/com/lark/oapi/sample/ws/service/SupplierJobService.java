@@ -36,6 +36,12 @@ import java.util.regex.Pattern;
  *       产物存 artifact 供浏览器展示/编辑/纠正重跑 → 玩家确认后点"完成"</li>
  * </ul>
  * currentNodeId 始终指向第一个未完成节点，前端据此做"游戏提醒"。
+ * <p>
+ * 会话路由（11-05）：工作台的一切对话入口——节点执行、卡点答复、对话区、DevChat、
+ * 生成提示词——与飞书对话共用绑定实例的<b>同一个主会话</b>（{@link ClaudeCodeService#chat}）：
+ * 同 sessionID、同串行队列、同上下文；长任务占用主会话期间，飞书/工作台消息排队属预期行为，
+ * 且主会话绝不因单个任务销毁。Wiki 编译、数字员工等<b>工作目录或身份不同</b>的场景
+ * 仍走独立 lane（{@link ClaudeCodeService#chatInLane}），不并入主会话。
  */
 @Service
 public class SupplierJobService {
@@ -516,7 +522,7 @@ public class SupplierJobService {
         deliverToInstance(job, n, "job-answer-" + jobId + "-" + nodeId, message);
     }
 
-    /** 发消息到实例会话（虚拟线程异步）并统一处理回复 */
+    /** 发消息到实例主会话（虚拟线程异步）并统一处理回复；与飞书对话同会话同队列（11-05） */
     private void deliverToInstance(SupplierJob job, SupplierJobNode n, String threadName, String message) {
         Long jobId = job.getId();
         String nodeId = n.getNodeId();
@@ -527,7 +533,8 @@ public class SupplierJobService {
         Thread.ofVirtual().name(threadName).start(() -> {
             try {
                 String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
-                String reply = claudeCodeService.chatInLane(supplierLane(job), inst.getId(),
+                // 主会话与飞书共用；supplierLane(job) 作为 openId 传入——保留日志标识与排队面板"工作台"标签
+                String reply = claudeCodeService.chat(inst.getId(), supplierLane(job),
                         message, dir, inst.getClaudeModel(), progressListener(n, usage));
                 if (knowledgeService != null) knowledgeService.finish(auditId, usage.get(), reply);
                 applyNodeReply(n, reply);
@@ -809,12 +816,10 @@ public class SupplierJobService {
         var pack = knowledgeService == null ? null : knowledge(job, "codegen");
         if (pack != null && !original.contains(pack.rendered())) throw new IllegalArgumentException("生成前材料发生变化，请重试");
         String context = original + SupplierTrellisContext.prepare(job, original);
-        String promptLane = "supplier-prompt-" + jobId + "-" + job.getKnowledgeMode() + "-" + java.util.UUID.randomUUID();
-        String result;
-        try { result = measuredChat(job, "prompt-generation", "codegen", pack, promptLane, inst,
+        // 11-05：生成任务同样并入实例主会话（旧一次性 prompt lane 废弃）；主会话与飞书共享，不做任何 lane 清理
+        String result = measuredChat(job, "prompt-generation", "codegen", pack, supplierLane(job), inst,
                 "按下方公司提示词生成 Skill 执行提示词生成任务。只输出用于下一步供应商开发的最终提示词，保留所有必需材料、来源与 Trellis 流程；本轮不要修改代码，不要调用供应商接口。\n\n" + context,
-                firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "")); }
-        finally { claudeCodeService.destroyLane(promptLane); }
+                firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), ""));
         if (result == null || result.isBlank() || result.startsWith("❌") || STANDBLOCK.matcher(result).find()) {
             throw new IllegalArgumentException("提示词 Skill 执行未完成：" + result);
         }
@@ -1024,7 +1029,7 @@ public class SupplierJobService {
     // ===== 对话区（玩家随时问执行实例"现在什么情况"） =====
 
     /**
-     * 玩家提问：落库 user 行 + 预占 agent PENDING 行，随后以独立轮次发到实例会话。
+     * 玩家提问：落库 user 行 + 预占 agent PENDING 行，随后以独立轮次发到实例主会话（与飞书对话共用，11-05）。
      * 会话串行：若节点执行中，TerminalSession 自动排队，当前执行段结束后被回答（不丢消息）。
      */
     public void ask(Long jobId, String question) {
@@ -1044,10 +1049,11 @@ public class SupplierJobService {
         Thread.ofVirtual().name("job-chat-" + jobId).start(() -> {
             try {
                 String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
-                String reply = measuredChat(job, "chat", "all", chatPack, supplierLane(job), inst,
+                String openId = supplierLane(job);
+                String reply = measuredChat(job, "chat", "all", chatPack, openId, inst,
                         "【玩家提问】关于本次供应商接入任务（" + job.getName() + "），请就你当前掌握的情况直接、简短回答；"
                                 + "不要因此重跑或中断任何任务，只回答：\n\n" + question.strip() + "\n\n" + chatContext,
-                        dir);
+                        dir, chatProgressListener(a, inst.getId()));
                 boolean bad = reply == null || reply.startsWith("❌");
                 a.setText(bad ? (reply == null ? "（无回复）" : reply) : reply);
                 a.setStatus(bad ? "FAILED" : "DONE");
@@ -1087,12 +1093,35 @@ public class SupplierJobService {
     String renderPrompt(String template, SupplierJob job, String extra) { return renderPrompt(template, job, extra, "all"); }
 
     private String measuredChat(SupplierJob job, String nodeId, String stage, SupplierKnowledgeService.Pack pack,
-                                String lane, BotInstance instance, String prompt, String directory) {
+                                String openId, BotInstance instance, String prompt, String directory) {
+        return measuredChat(job, nodeId, stage, pack, openId, instance, prompt, directory, null);
+    }
+
+    /**
+     * 在<b>实例主会话</b>上发一轮对话并采集知识审计（11-05：工作台所有对话入口与飞书共用同一主会话——
+     * 同 sessionID、同串行队列、同上下文）。
+     * @param openId 仅用于日志与排队面板"工作台"来源标签（supplier-job- 前缀），不再是 lane 名
+     * @param progress 进度监听（可为 null）：对话区实时回写用；事件原样转发，
+     *                 usage 采集（onResultAvailable）与知识审计行为对所有调用点保持不变
+     */
+    private String measuredChat(SupplierJob job, String nodeId, String stage, SupplierKnowledgeService.Pack pack,
+                                String openId, BotInstance instance, String prompt, String directory,
+                                TurnListener progress) {
         Long audit = knowledgeService == null ? null : knowledgeService.record(job, nodeId, stage, pack, prompt);
         var usage = new java.util.concurrent.atomic.AtomicReference<TurnResult>();
         try {
-            String reply = claudeCodeService.chatInLane(lane, instance.getId(), prompt, directory, instance.getClaudeModel(),
-                    new NoopListener() { @Override public void onResultAvailable(TurnResult result) { usage.set(result); } });
+            String reply = claudeCodeService.chat(instance.getId(), openId, prompt, directory, instance.getClaudeModel(),
+                    new NoopListener() {
+                        @Override public void onResultAvailable(TurnResult result) { usage.set(result); }
+                        @Override public void onTurnStart() { if (progress != null) progress.onTurnStart(); }
+                        @Override public void onQueued() { if (progress != null) progress.onQueued(); }
+                        @Override public void onThinkingDelta(String d) { if (progress != null) progress.onThinkingDelta(d); }
+                        @Override public void onTextDelta(String d) { if (progress != null) progress.onTextDelta(d); }
+                        @Override public void onToolStart(ToolStep s) { if (progress != null) progress.onToolStart(s); }
+                        @Override public void onToolEnd(ToolStep s) { if (progress != null) progress.onToolEnd(s); }
+                        @Override public void onTurnComplete(TurnResult r) { if (progress != null) progress.onTurnComplete(r); }
+                        @Override public void onTurnError(String m, boolean ab) { if (progress != null) progress.onTurnError(m, ab); }
+                    });
             if (knowledgeService != null) knowledgeService.finish(audit, usage.get(), reply);
             return reply;
         } catch (RuntimeException ex) {
@@ -1101,6 +1130,99 @@ public class SupplierJobService {
         }
     }
 
+    /**
+     * 对话轮次进度文案（纯函数，可单测）：阶段 + 工具 + 已耗时 + 排队数 → "⏳ …" 文本。
+     * @param phase QUEUE（排队等待执行）/ THINKING / GENERATING / TOOL，其它值按 THINKING 兜底
+     * @param queuedAhead 前面排着的消息数；&lt;=0 表示拿不到队列位置，用合并文案
+     */
+    static String chatProgressText(String phase, String toolName, String toolDetail, long elapsedMs, int queuedAhead) {
+        String elapsed = InstanceStatusService.fmt(elapsedMs);
+        if ("QUEUE".equals(phase)) {
+            return queuedAhead > 0 ? "⏳ 排队中（前面还有 " + queuedAhead + " 条）" : "⏳ 排队/执行中…";
+        }
+        if ("TOOL".equals(phase)) {
+            String tool = toolName != null && !toolName.isBlank() ? toolName.strip() : "工具";
+            String d = toolDetail == null ? "" : toolDetail.strip();
+            String detail = d.isEmpty() ? "" : " · " + (d.length() > 60 ? d.substring(0, 60) + "…" : d);
+            return "⏳ 正在执行 🔧 " + tool + detail + "（已 " + elapsed + "）";
+        }
+        if ("GENERATING".equals(phase)) return "⏳ 正在生成回复（已 " + elapsed + "）";
+        return "⏳ 思考中（已 " + elapsed + "）";
+    }
+
+    /**
+     * 对话区实时进度回写：把轮次阶段摘要节流（≥2 秒一次 save）写进 agent PENDING 行的 text 字段，
+     * 前端 2.5s 轮询即可见"在做什么"；轮次结束后由 {@link #ask} 用最终回复覆盖（靠 status 区分进度/答案）。
+     * 回调发生在 TerminalSession reader 线程上，写库失败静默——绝不影响对话主链。
+     * 排队位置取实例<b>主会话</b>快照（11-05：对话区已并入主会话，与飞书消息同队列）。
+     */
+    private TurnListener chatProgressListener(com.lark.oapi.sample.ws.model.entity.SupplierJobChat a, Long instanceId) {
+        return new TurnListener() {
+            private final long sentAt = System.currentTimeMillis();
+            private volatile long startAt = -1;      // <0 = 尚未开始执行（还在排队）
+            private volatile String phase = "QUEUE";
+            private volatile String toolName;
+            private volatile String toolDetail;
+            private volatile int queuedAhead = -1;
+            private volatile long lastWrite;
+
+            private void write(boolean force) {
+                if (!"PENDING".equals(a.getStatus())) return;   // 已落终态（DONE/FAILED），进度不再覆盖
+                long now = System.currentTimeMillis();
+                if (!force && now - lastWrite < 2000) return;
+                lastWrite = now;
+                long elapsed = startAt >= 0 ? now - startAt : now - sentAt;
+                String text = chatProgressText(phase, toolName, toolDetail, elapsed, queuedAhead);
+                try {
+                    if (!text.equals(a.getText())) { a.setText(text); chatRepo.save(a); }
+                } catch (Exception ignore) { }
+            }
+
+            @Override public void onQueued() {
+                TerminalSession ts = claudeCodeService.getSession(instanceId);
+                // onQueued 时本条已登记 pendingQueue：快照条数 = 自己 + 前面排队的，加上正在执行的那轮 ≈ 前面还有 N 条
+                if (ts != null) queuedAhead = ts.queuedSnapshot().size();
+                Thread.ofVirtual().name("job-chat-queue-hint").start(() -> {
+                    try { Thread.sleep(5000); } catch (InterruptedException e) { return; }
+                    if (startAt < 0) write(true);   // 从发送到开始执行等待超过 5 秒才显示排队提示
+                });
+            }
+            @Override public void onTurnStart() {
+                startAt = System.currentTimeMillis();
+                phase = "THINKING";
+                write(true);
+            }
+            @Override public void onThinkingDelta(String delta) {
+                if (startAt < 0) return;
+                phase = "THINKING";
+                write(false);
+            }
+            @Override public void onTextDelta(String delta) {
+                if (startAt < 0) return;
+                phase = "GENERATING";
+                write(false);
+            }
+            @Override public void onToolStart(ToolStep step) {
+                phase = "TOOL";
+                toolName = step.name;
+                toolDetail = step.detail;
+                write(true);   // 工具切换是关键节点，跳过节流立即刷新
+            }
+            @Override public void onToolEnd(ToolStep step) {
+                phase = "THINKING";
+                toolName = null;
+                toolDetail = null;
+                write(false);
+            }
+            @Override public void onTurnComplete(TurnResult result) { }
+            @Override public void onTurnError(String message, boolean aborted) { }
+        };
+    }
+
+    /**
+     * 工作台来源标识（11-05 起不再作为 lane 名）：作为实例主会话的 openId 传入——
+     * 排队面板按 supplier-job- 前缀显示"工作台"标签，日志按 存档/知识模式/实例 区分来源。
+     */
     static String supplierLane(SupplierJob job) {
         return "supplier-job-" + job.getId() + "-" + job.getKnowledgeMode() + "-" + job.getInstanceId();
     }
