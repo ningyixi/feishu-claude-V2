@@ -144,7 +144,7 @@ class SupplierSharedSessionTest {
         assertEquals("DONE", last.getStatus());
         assertEquals("一切正常。", last.getText());
         verify(agent).chat(eq(INSTANCE_ID), argThat(o -> o.startsWith("supplier-job-")),
-                contains("【玩家提问】"), anyString(), nullable(String.class), any(TurnListener.class));
+                contains("【用户提问】"), anyString(), nullable(String.class), any(TurnListener.class));
         verifyNoLaneEver();
     }
 

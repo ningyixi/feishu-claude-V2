@@ -122,6 +122,51 @@ public class SupplierJobService {
         }
     }
 
+    // ===== 话术归位（2026-11-07 独立需求：提示词/UI 文案"玩家"→"用户"，幂等） =====
+
+    /**
+     * 纯函数：文案中"玩家"统一替换为"用户"。不含"玩家"时原样返回（幂等，可重复跑）；
+     * 仅做字面替换，不触碰 JSON 结构/转义，替换后 JSON 仍合法。
+     */
+    static String normalizePlayerWording(String text) {
+        return text == null || !text.contains("玩家") ? text : text.replace("玩家", "用户");
+    }
+
+    /**
+     * 存量数据一次性归位（幂等）：内置/自定义模板 nodesJson 与存档节点快照 prompt/description 三列
+     * 里旧种子写入的"玩家"字样替换为"用户"。seedTemplates 仅在模板行不存在时种入，归位结果不会被旧 seed 覆盖。
+     * <b>严禁扩大</b>：知识库 md 正文、.deliveries 历史交付快照、toolEvidence/artifact/对话历史行一律不动
+     * （历史记录不做全局替换是项目迁移铁律，见 docs/Windows无Docker迁移交接.md）。
+     */
+    @PostConstruct
+    public void normalizePlayerWordingInDb() {
+        try {
+            int templates = 0;
+            for (WorkflowTemplate t : templateRepo.findAll()) {
+                String fixed = normalizePlayerWording(t.getNodesJson());
+                if (!java.util.Objects.equals(fixed, t.getNodesJson())) {
+                    t.setNodesJson(fixed);
+                    templateRepo.save(t);
+                    templates++;
+                }
+            }
+            int nodes = 0;
+            for (SupplierJobNode n : nodeRepo.findAll()) {
+                String prompt = normalizePlayerWording(n.getPrompt());
+                String desc = normalizePlayerWording(n.getDescription());
+                if (!java.util.Objects.equals(prompt, n.getPrompt()) || !java.util.Objects.equals(desc, n.getDescription())) {
+                    n.setPrompt(prompt);
+                    n.setDescription(desc);
+                    nodeRepo.save(n);
+                    nodes++;
+                }
+            }
+            log.info("[SupplierJob] 提示词话术归位: WorkflowTemplate 更新 {} 行, SupplierJobNode 更新 {} 行", templates, nodes);
+        } catch (Exception e) {
+            log.warn("[SupplierJob] 话术归位失败（不影响启动）: {}", e.getMessage());
+        }
+    }
+
     /** 旧数据回填（10-29-codegen-prep）：标题含"写代码"的节点补上门禁标记（模板+存档快照） */
     @PostConstruct
     public void backfillCodegenPrep() {
@@ -177,7 +222,7 @@ public class SupplierJobService {
     static final String N9_TITLE = "Review 供应商代码";
     static final String N9_DESC = "填入公司的 review skill（目录路径或名称）作为补充指示执行：实例将用该 skill 对本供应商代码做一轮 review，指出问题与改进项（产物可编辑纠正）。";
     static final String N9_PROMPT = "【供应商接入 · 代码 Review】\n供应商: {supplierName}，类库路径: {libraryPath}\n\n"
-            + "请使用玩家在补充指示中提供的 review skill（若未提供，先以【卡点】询问用哪个 skill），"
+            + "请使用用户在补充指示中提供的 review skill（若未提供，先以【卡点】询问用哪个 skill），"
             + "按该 skill 的检查项逐条 review 本供应商对接代码，输出问题清单：\n"
             + "| 严重度 | 文件:行 | 问题 | 依据(skill 条目) | 建议改法 |\n"
             + "只报真问题不凑数；无问题的检查项汇总说明\"已检查通过\"。\n{extra}";
@@ -308,7 +353,7 @@ public class SupplierJobService {
                         + "供应商: {supplierName}（ID: {supplierId}）\n"
                         + "上一步的接口映射报告:\n{artifact:n1}\n\n"
                         + "请对映射报告中的每个接口：\n"
-                        + "1. 生成合理的查询条件（小数据量、真实可执行；需要凭证时先从文档/配置中找，找不到就列出\"需要玩家提供\"清单并跳过该接口）\n"
+                        + "1. 生成合理的查询条件（小数据量、真实可执行；需要凭证时先从文档/配置中找，找不到就列出\"需要用户提供\"清单并跳过该接口）\n"
                         + "2. 用本机 Postman CLI 真实调用（`postman collection run`；工具清单里有 Postman MCP 时可替代；两者均不可用输出【卡点】），记录：请求(方法+URL+关键头+body) 与 响应(状态码+body 截断到 2000 字)\n"
                         + "3. 对比响应与文档描述的差异，重点标注文档滞后之处（字段名/类型/枚举值不一致等）\n"
                         + "输出 markdown 实测报告，按接口分节。无法调用的接口明确标注原因。\n"
@@ -347,7 +392,7 @@ public class SupplierJobService {
                 "填入公司的 review skill（目录路径或名称）作为补充指示执行：实例将用该 skill 对本供应商代码做一轮 review，指出问题与改进项（产物可编辑纠正）。",
                 "【供应商接入 · 代码 Review】\n"
                         + "供应商: {supplierName}，类库路径: {libraryPath}\n\n"
-                        + "请使用玩家在补充指示中提供的 review skill（若未提供，先以【卡点】询问用哪个 skill），"
+                        + "请使用用户在补充指示中提供的 review skill（若未提供，先以【卡点】询问用哪个 skill），"
                         + "按该 skill 的检查项逐条 review 本供应商对接代码，输出问题清单：\n"
                         + "| 严重度 | 文件:行 | 问题 | 依据(skill 条目) | 建议改法 |\n"
                         + "只报真问题不凑数；无问题的检查项汇总说明\"已检查通过\"。\n"
@@ -624,7 +669,7 @@ public class SupplierJobService {
             n.setPendingQuestion("");
             n.setLastRunAt(LocalDateTime.now());
             n.setStatus("PENDING");
-            log.info("[SupplierJob] 节点执行完成: job={}, node={}, 产物{}字（等待玩家确认）",
+            log.info("[SupplierJob] 节点执行完成: job={}, node={}, 产物{}字（等待用户确认）",
                     n.getJobId(), n.getNodeId(), n.getArtifact().length());
         }
         if (!"RUNNING".equals(n.getStatus())) { n.setProgress(""); n.setThinking(""); }   // 只有卡点挂起态保留最后进度
@@ -924,7 +969,7 @@ public class SupplierJobService {
         List<com.lark.oapi.sample.ws.model.entity.SupplierNodeChat> all = nodeChatRepo.findByJobIdAndNodeIdOrderByIdAsc(jobId, nodeId);
         for (var m : all.subList(Math.max(0, all.size() - 31), all.size())) {
             if (m.getId().equals(a.getId())) continue;
-            hist.append("user".equals(m.getRole()) ? "玩家: " : "重写结果: ")
+            hist.append("user".equals(m.getRole()) ? "用户: " : "重写结果: ")
                 .append(m.getText().strip().replaceAll("\\s+", " ")).append('\n');
         }
         String skills = formatSkills(job.getSkillsJson());
@@ -934,8 +979,8 @@ public class SupplierJobService {
                         + "供应商: " + job.getSupplierName() + "（ID: " + job.getSupplierCode() + "），类库: " + job.getLibraryPath() + "\n\n"
                         + kbIndex + "\n\n【可用 Skill】\n" + (skills.isBlank() ? "（无）" : skills) + "\n\n"
                         + "== 本节点历史沟通（旧→新，含本轮） ==\n" + hist + "\n\n"
-                        + "请把玩家本轮原始诉求重写成一条可直接交给开发实例执行的完整提示词："
-                        + "保留玩家本意，补齐必要上下文（该读哪些知识库文件、遵循哪个 skill、对照哪份会议文档/实测档案）；"
+                        + "请把用户本轮原始诉求重写成一条可直接交给开发实例执行的完整提示词："
+                        + "保留用户本意，补齐必要上下文（该读哪些知识库文件、遵循哪个 skill、对照哪份会议文档/实测档案）；"
                         + "信息不足以重写时不要瞎猜，单独一行【卡点】+问题。\n"
                         + "只输出最终提示词正文，用 ```prompt 代码块包裹，不要任何解释。";
                 String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
@@ -1051,7 +1096,7 @@ public class SupplierJobService {
                 String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
                 String openId = supplierLane(job);
                 String reply = measuredChat(job, "chat", "all", chatPack, openId, inst,
-                        "【玩家提问】关于本次供应商接入任务（" + job.getName() + "），请就你当前掌握的情况直接、简短回答；"
+                        "【用户提问】关于本次供应商接入任务（" + job.getName() + "），请就你当前掌握的情况直接、简短回答；"
                                 + "不要因此重跑或中断任何任务，只回答：\n\n" + question.strip() + "\n\n" + chatContext,
                         dir, chatProgressListener(a, inst.getId()));
                 boolean bad = reply == null || reply.startsWith("❌");
@@ -1254,7 +1299,7 @@ public class SupplierJobService {
                 .replace("{docs}", docs)
                 .replace("{skills}", skills)
                 .replace("{extra}", extra != null && !extra.isBlank()
-                        ? "\n\n== 玩家的补充/纠正指示（优先遵循） ==\n" + extra : "");
+                        ? "\n\n== 用户的补充/纠正指示（优先遵循） ==\n" + extra : "");
         if (!template.contains("{extra}") && extra != null && !extra.isBlank()) out += "\n\n【本轮补充 / 驳回修改意见】\n" + extra;
         if (!template.contains("{skills}") && !skills.isBlank()) {
             out = out + "\n\n【本工作可用的 Skill】\n开工前先阅读下列 skill 目录中的 SKILL.md（及其引用的文件），任务范围内严格遵循 skill 的指导：\n" + skills;
@@ -1288,9 +1333,9 @@ public class SupplierJobService {
             4. Finish：最终产物放「## Finish」段，工作台将把它存为节点工件。
             5. 卡点协议（最高优先级）：只要因缺少关键信息（接口凭证/账号、环境地址、互相矛盾的选项）导致无法真实执行，
                必须提问等待，禁止默默「列清单并跳过」草草收尾——即使上文或前文任务要求这么说过，也以本节为准。
-               做法：在输出中另起一行、以【卡点】开头写清需要玩家提供的材料和具体问法（可给 A/B/C 选项），然后结束本轮；
-               问题会转给玩家，答复将以「【卡点答复】」消息送达本会话，收到后继续未完成的工作。
-               注意：【卡点】必须是此刻真正在向玩家提出的问题；转述规则、举例说明时不要使用该标记行。
+               做法：在输出中另起一行、以【卡点】开头写清需要用户提供的材料和具体问法（可给 A/B/C 选项），然后结束本轮；
+               问题会转给用户，答复将以「【卡点答复】」消息送达本会话，收到后继续未完成的工作。
+               注意：【卡点】必须是此刻真正在向用户提出的问题；转述规则、举例说明时不要使用该标记行。
             6. 接口实测协议（凡真实调用供应商 HTTP 接口）：走 Postman 合规通道——**首选本机 Postman CLI**
                （postman collection run <collection.json> -e <env.json>，已装已登录，勿加 --silent）；仅当你的工具清单中真实存在 Postman MCP 工具时可用 MCP 替代，**不要为寻找 MCP 浪费步骤，自由 curl 不算合规实测**。
                a) 先把待测接口整理成 Postman Collection（v2.1 JSON，命名 <供应商代码>-<yyyyMMdd>，含环境变量/鉴权配置）；

@@ -497,7 +497,7 @@ export default function E2ETest() {
             </div>
           )}
 
-          {/* 流水线暂停：成员在等玩家回答 */}
+          {/* 流水线暂停：成员在等用户回答 */}
           {taskInfo?.pendingQuestion && (
             <div className="ask-banner">
               ⏸ {taskInfo.pendingQuestion.roleEmoji} <b>{taskInfo.pendingQuestion.roleLabel}{taskInfo.pendingQuestion.memberName ? `·${taskInfo.pendingQuestion.memberName}` : ''}</b> 在等你回答：

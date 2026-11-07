@@ -430,7 +430,7 @@ public class E2EOrchestrator {
             if (ask == null) return out;
 
             String question = ask.has("question") && !ask.get("question").isJsonNull()
-                    ? ask.get("question").getAsString() : "需要玩家补充信息才能继续";
+                    ? ask.get("question").getAsString() : "需要用户补充信息才能继续";
             String why = ask.has("why") && !ask.get("why").isJsonNull() ? ask.get("why").getAsString() : "";
 
             E2ETaskService.PendingQuestion pq = new E2ETaskService.PendingQuestion(m.role, question, why);
@@ -441,7 +441,7 @@ public class E2EOrchestrator {
             taskService.postSystem(task, String.format(
                     "⏸ 流水线暂停 — %s%s「%s」向你提问：%s%s\n👉 在输入框保持「🎯 自动编排」直接回复答案，流水线将自动继续。",
                     m.roleEmoji(), m.roleLabel(), m.name, question, why.isBlank() ? "" : "（" + why + "）"));
-            log.info("[E2E] 流水线暂停等玩家回答: task={}, 提问方={}, question={}", task.id, m.role, question);
+            log.info("[E2E] 流水线暂停等用户回答: task={}, 提问方={}, question={}", task.id, m.role, question);
 
             String answer;
             try {
@@ -457,9 +457,9 @@ public class E2EOrchestrator {
             broadcastAskResolved(task);
 
             out = runMemberTurn(task, m,
-                    "【E2E 测试群聊 · 玩家回答】\n你刚才提问：「" + question + "」\n玩家的回答：\n" + answer
+                    "【E2E 测试群聊 · 用户回答】\n你刚才提问：「" + question + "」\n用户的回答：\n" + answer
                             + "\n\n请根据回答继续完成之前的任务，并按原要求输出内容（包括原定的 JSON 契约）。仍然缺关键信息才可以再次提问。",
-                    "收到玩家回答，继续执行");
+                    "收到用户回答，继续执行");
             rounds++;
         }
         if (extractAsk(out) != null) {
@@ -505,10 +505,10 @@ public class E2EOrchestrator {
 
     /** 提问契约 — 拼进所有成员的 prompt：缺关键信息时暂停问玩家，不许猜 */
     private static final String ASK_CONTRACT =
-            "\n\n【提问规则】如果继续任务需要玩家提供关键信息（接口凭证/token/测试账号/环境地址/业务决策等），"
+            "\n\n【提问规则】如果继续任务需要用户提供关键信息（接口凭证/token/测试账号/环境地址/业务决策等），"
             + "**不要猜测、不要编造、不要跳过**，在你发言的最后输出一个提问块然后停止：\n"
-            + "```ask\n{\"question\":\"要问玩家的问题（一句话，具体）\",\"why\":\"缺了它会影响什么\"}\n```\n"
-            + "系统会暂停流水线把问题转给玩家，拿到回答后会让你继续。一次只问最关键的一个问题。";
+            + "```ask\n{\"question\":\"要问用户的问题（一句话，具体）\",\"why\":\"缺了它会影响什么\"}\n```\n"
+            + "系统会暂停流水线把问题转给用户，拿到回答后会让你继续。一次只问最关键的一个问题。";
 
     /** 通信方式说明（拼进所有成员 prompt）：a2a / filesystem 同目录 / filesystem 跨目录 三分支 */
     private String commNote(E2ETaskService.E2ETask task) {

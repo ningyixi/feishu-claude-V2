@@ -1399,14 +1399,14 @@ function WorkflowEditor({ onBack, showToast }) {
                     <option value="auto">兼容旧模板（按标题识别）</option><option value="all">全部材料</option><option value="analysis">文档分析</option><option value="probe">接口实测（需要工具证据）</option><option value="codegen">代码开发（完整前置门禁）</option>
                   </select>
                 </div>
-                <div className="form-group"><label className="form-label">节点说明（给玩家看的"这一步做什么"）</label>
+                <div className="form-group"><label className="form-label">节点说明（给用户看的"这一步做什么"）</label>
                   <textarea className="form-input" rows={3} value={nodeDraft.node.description || ''}
                     onChange={e => setNodeDraft(d => ({ ...d, node: { ...d.node, description: e.target.value } }))} /></div>
                 <div className="form-group">
                   <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, cursor: 'pointer' }}>
                     <input type="checkbox" checked={!!nodeDraft.node.codegenPrep}
                       onChange={e => setNodeDraft(d => ({ ...d, node: { ...d.node, codegenPrep: e.target.checked } }))} />
-                    🧾 写代码准备门禁（玩家须先提交三方会议文档+配置KV才能点完成；节点页提供提示词生成）
+                    🧾 写代码准备门禁（用户须先提交三方会议文档+配置KV才能点完成；节点页提供提示词生成）
                   </label>
                 </div>
                 {(nodeDraft.node.type === 'agent' || nodeDraft.node.type === 'agent_check') && (

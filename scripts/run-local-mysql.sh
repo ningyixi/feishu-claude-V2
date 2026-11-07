@@ -16,4 +16,9 @@ export FEISHU_KB_PATH="${FEISHU_KB_PATH:-D:/feishu-claude-data/supplier-kb}"
 
 MVN="${MVN:-/c/Program Files/JetBrains/IntelliJ IDEA 2026.1.3/plugins/maven/lib/maven3/bin/mvn.cmd}"
 echo "profile=mysql url=$FEISHU_MYSQL_URL kb=$FEISHU_KB_PATH"
-"$MVN" spring-boot:run -q
+# 先打包成 fat jar 再以 java -jar 运行：运行时类路径（jar）与构建输出（target/classes）物理隔离。
+# 教训：spring-boot:run 直接跑 target/classes，并发 mvn test 重编译会让 JVM 延迟加载撞进类文件
+# 增删窗口，解析失败被 HotSpot 永久缓存（NoClassDefFoundError 即使文件完好也持续报，只能重启）。
+JAR=target/feishu-claude-v2-1.0-SNAPSHOT.jar
+"$MVN" -q -DskipTests package || { echo "打包失败，未启动"; exit 1; }
+"${JAVA_HOME}/bin/java" -jar "$JAR"
