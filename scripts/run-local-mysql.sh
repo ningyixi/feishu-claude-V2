@@ -16,9 +16,14 @@ export FEISHU_KB_PATH="${FEISHU_KB_PATH:-D:/feishu-claude-data/supplier-kb}"
 
 MVN="${MVN:-/c/Program Files/JetBrains/IntelliJ IDEA 2026.1.3/plugins/maven/lib/maven3/bin/mvn.cmd}"
 echo "profile=mysql url=$FEISHU_MYSQL_URL kb=$FEISHU_KB_PATH"
-# 先打包成 fat jar 再以 java -jar 运行：运行时类路径（jar）与构建输出（target/classes）物理隔离。
-# 教训：spring-boot:run 直接跑 target/classes，并发 mvn test 重编译会让 JVM 延迟加载撞进类文件
-# 增删窗口，解析失败被 HotSpot 永久缓存（NoClassDefFoundError 即使文件完好也持续报，只能重启）。
+# 打包后把 jar 复制到本地磁盘稳定路径再运行，双重隔离两类事故：
+# 1) 运行时类路径与构建输出（target/classes）隔离——并发 mvn 不会再毒化延迟类加载（HotSpot 解析失败永久缓存）。
+# 2) 与仓库所在的网络盘（Z: NAS）隔离——SMB 会话掉线会使 JVM 持有的 jar 句柄作废，
+#    运行数天后随机 ClassNotFoundException（2026-11-08 周末实证）。
 JAR=target/feishu-claude-v2-1.0-SNAPSHOT.jar
+RUN_JAR="${RUN_JAR:-D:/feishu-claude-data/run/app.jar}"
 "$MVN" -q -DskipTests package || { echo "打包失败，未启动"; exit 1; }
-"${JAVA_HOME}/bin/java" -jar "$JAR"
+mkdir -p "$(dirname "$RUN_JAR")"
+cp -f "$JAR" "$RUN_JAR"
+echo "运行 jar: $RUN_JAR（本地盘，构建与网络盘均不可达）"
+"${JAVA_HOME}/bin/java" -jar "$RUN_JAR"
