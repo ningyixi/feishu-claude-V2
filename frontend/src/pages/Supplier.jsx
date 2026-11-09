@@ -66,7 +66,7 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
 
   async function remove(j, e) {
     e.stopPropagation()
-    if (!await confirmAction({ kind: 'popconfirm', title: '删除工作？', body: `删除工作「${j.name}」？存档和节点记录将清除，删除后无法恢复。`, confirmLabel: '删除工作' })) return
+    if (!await confirmAction({ kind: 'popconfirm', title: '删除工作？', body: `删除工作「${j.name}」？工作和节点记录将清除，删除后无法恢复。`, confirmLabel: '删除工作' })) return
     const response = await fetch(`/api/supplier-jobs/${j.id}`, { method: 'DELETE' }); if (!response.ok) { const body = await response.json(); return showToast(body.error || '删除失败', 'error') }
     showToast('已删除', 'success')
     load()
@@ -78,7 +78,7 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
         <div>
           <h1 className="page-title" style={{ margin: 0 }}>供应商接入工作台</h1>
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
-            每个工作 = 一局接入供应商的"游戏"：沿工作流节点推进，实例帮你干活，点完成变绿，全绿通关
+            每个工作 = 一条供应商接入流水线：沿工作流节点推进，实例帮你干活，点完成变绿，全部完成即结项
           </div>
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
@@ -89,7 +89,7 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
 
       {jobs.length === 0 && (
         <div className="card" style={{ textAlign: 'center', color: 'var(--text-dim)', padding: '3rem' }}>
-          还没有进行中的接入工作。点「+ 新建工作」开一局。
+          还没有进行中的接入工作。点「+ 新建工作」开始。
         </div>
       )}
 
@@ -99,13 +99,13 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
           return (
             <div key={j.id} className="card job-card" onClick={() => onOpen(j.id)} style={{ cursor: 'pointer', padding: '16px 18px', marginBottom: 0 }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                <span style={{ fontSize: 15, fontWeight: 700, flex: 1 }}>{done ? '🏆' : '🎮'} {j.name}</span>
+                <span style={{ fontSize: 15, fontWeight: 700, flex: 1 }}>{done ? '🏆' : '🚀'} {j.name}</span>
                 <span className="hook-badge">{j.mode === 'API' ? 'API 供应商' : 'CM 供应商'}</span>
                 <CreatorBadge id={j.createdByEmployeeId} name={j.createdByEmployeeName} dim />
               </div>
               <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 8, lineHeight: 1.9 }}>
                 <div>供应商: {j.supplierName || '—'}{j.supplierCode ? ` (ID: ${j.supplierCode})` : ''}</div>
-                <div>知识表示: {j.knowledgeMode || 'TEXT'} · 执行实例: {instName(j.instanceId)} · 当前节点: {j.currentNodeId || (done ? '已通关' : '—')}</div>
+                <div>知识表示: {j.knowledgeMode || 'TEXT'} · 执行实例: {instName(j.instanceId)} · 当前节点: {j.currentNodeId || (done ? '已完成' : '—')}</div>
                 <div>更新: {String(j.updatedAt || '').replace('T', ' ').substring(5, 16)}</div>
               </div>
               <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 8 }}>
@@ -119,7 +119,7 @@ function JobList({ onOpen, onCreate, onWorkflows, showToast }) {
   )
 }
 
-// ===== 新建工作（选模式 → 填"角色卡"） =====
+// ===== 新建工作（选模式 → 填基础信息） =====
 
 function CreateJob({ onBack, onCreated, showToast }) {
   const pageFormRef = useRef(null)
@@ -158,7 +158,7 @@ function CreateJob({ onBack, onCreated, showToast }) {
       })
       const data = await res.json()
       if (!res.ok) throw new Error(data.error || '创建失败')
-      showToast('存档创建成功，游戏开始 🎮', 'success')
+      showToast('工作已创建，开始执行 🚀', 'success')
       pageFormRef.current?.commit(); onCreated(data.id)
     } catch (e) {
       showToast(e.message, 'error')
@@ -167,7 +167,7 @@ function CreateJob({ onBack, onCreated, showToast }) {
 
   return (
     <DraftPage ref={pageFormRef}><div style={{ maxWidth: 760, margin: '0 auto' }}>
-      <h1 className="page-title">🎮 新建接入工作 {step === 1 ? '· 选择体验模式' : '· 录入基础信息'}</h1>
+      <h1 className="page-title">➕ 新建接入工作 {step === 1 ? '· 选择接入模式' : '· 录入基础信息'}</h1>
 
       {step === 1 && (
         <div className="card">
@@ -292,7 +292,7 @@ function CreateJob({ onBack, onCreated, showToast }) {
           </div>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
             <button className="btn" onClick={() => setStep(1)}>← 上一步</button>
-            <button className="btn btn-primary" onClick={submit} disabled={saving}>{saving ? '创建中…' : '🎮 创建存档并开始'}</button>
+            <button className="btn btn-primary" onClick={submit} disabled={saving}>{saving ? '创建中…' : '🚀 创建工作并开始'}</button>
           </div>
         </div>
       )}
@@ -304,7 +304,7 @@ function safeParseNodes(json) {
   try { const a = JSON.parse(json || '[]'); return Array.isArray(a) ? a : [] } catch { return [] }
 }
 
-// ===== 游戏视图 =====
+// ===== 执行视图 =====
 
 function GameView({ jobId, onBack, showToast }) {
   const [managed, setManaged] = useState(false)
@@ -419,10 +419,10 @@ function GameView({ jobId, onBack, showToast }) {
       <div className="card" style={{ padding: '12px 18px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <button className="btn" style={{ fontSize: 12, padding: '4px 12px' }} onClick={onBack}>← 工作台</button>
-          <span style={{ fontSize: 16, fontWeight: 700 }}>{job.status === 'COMPLETED' ? '🏆' : '🎮'} {job.name}</span>
+          <span style={{ fontSize: 16, fontWeight: 700 }}>{job.status === 'COMPLETED' ? '🏆' : '🚀'} {job.name}</span>
           {job.createdByEmployeeId && <CreatorBadge id={job.createdByEmployeeId} name={job.createdByEmployeeName} />}
           <span className="hook-badge">{job.mode === 'API' ? 'API 供应商' : 'CM 供应商'}</span>
-          {job.status === 'COMPLETED' && <span className="hook-badge" style={{ background: 'rgba(22,163,74,.1)', color: '#16a34a', borderColor: 'rgba(22,163,74,.3)' }}>已通关 🎉</span>}
+          {job.status === 'COMPLETED' && <span className="hook-badge" style={{ background: 'rgba(22,163,74,.1)', color: '#16a34a', borderColor: 'rgba(22,163,74,.3)' }}>已完成 🎉</span>}
           <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={openDetail} data-tooltip="查看/修改任务详细信息" aria-label="查看/修改任务详细信息">📋 详情</button>
           <div style={{ flex: 1 }} />
           <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>进度 {doneCount}/{nodes.length}</span>
@@ -450,11 +450,11 @@ function GameView({ jobId, onBack, showToast }) {
             </select>
           </label>
         </div>
-        {/* 存档信息行 */}
+        {/* 工作信息行 */}
         <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 8, fontFamily: 'var(--font-mono)' }}>
           供应商: {job.supplierName}{job.supplierCode ? ` (${job.supplierCode})` : ''} · 类库: {job.libraryPath || '未填'} · 文档 {safeParseNodes(job.docsJson).length} 份 · 🧠 Skill {safeParseNodes(job.skillsJson).length} 个
         </div>
-        {/* 游戏提醒 */}
+        {/* 执行提醒 */}
         {job.currentNodeId && (
           <div className="game-hint">
             💡 <b>当前目标</b>：{nodes.find(n => n.nodeId === job.currentNodeId)?.title} —— {nodes.find(n => n.nodeId === job.currentNodeId)?.description?.split('。')[0]}。
@@ -574,12 +574,12 @@ function GameView({ jobId, onBack, showToast }) {
                 </div>
               )}
             </>
-          ) : <div style={{ color: 'var(--text-dim)' }}>该存档还没有节点（模板为空？）</div>}
+          ) : <div style={{ color: 'var(--text-dim)' }}>该工作还没有节点（模板为空？）</div>}
         </div>
 
         {/* 右：工作流竖排节点线 */}
         <div className="card workflow-rail">
-          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-dim)', marginBottom: 10 }}>🗺 游戏路径</div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-dim)', marginBottom: 10 }}>🗺 执行路径</div>
           {nodes.map((n, i) => {
             const st = NODE_STATUS[n.status] || NODE_STATUS.PENDING
             const isCur = n.nodeId === job.currentNodeId
@@ -1310,7 +1310,7 @@ function WorkflowEditor({ onBack, showToast }) {
     load()
   }
   async function removeTemplate(t) {
-    if (!await confirmAction({ kind: 'popconfirm', title: '删除模板？', body: `删除模板「${t.name}」？（已创建的工作存档不受影响）删除后无法恢复。`, confirmLabel: '删除模板' })) return
+    if (!await confirmAction({ kind: 'popconfirm', title: '删除模板？', body: `删除模板「${t.name}」？（已创建的工作不受影响）删除后无法恢复。`, confirmLabel: '删除模板' })) return
     const res = await fetch(`/api/workflows/${t.id}`, { method: 'DELETE' })
     const d = await res.json().catch(() => ({}))
     if (!res.ok) return showToast(d.error || '删除失败', 'error')
@@ -1354,7 +1354,7 @@ function WorkflowEditor({ onBack, showToast }) {
               <input className="form-input" value={editing.description} onChange={e => setEditing(x => ({ ...x, description: e.target.value }))} /></div>
           </div>
 
-          <div style={{ fontSize: 13, fontWeight: 700, margin: '8px 0' }}>节点路径（顺序即游戏路径）</div>
+          <div style={{ fontSize: 13, fontWeight: 700, margin: '8px 0' }}>节点路径（顺序即执行顺序）</div>
           {editing.nodes.map((n, i) => (
             <div key={i} className="wf-editor-row">
               <span style={{ color: 'var(--text-dim)', fontSize: 12, width: 24 }}>{i + 1}</span>
@@ -1375,7 +1375,7 @@ function WorkflowEditor({ onBack, showToast }) {
           <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 10, lineHeight: 1.8 }}>
             节点 prompt 支持占位符：{'{supplierName} {supplierId} {libraryPath} {docs} {skills} {extra}'}（{'{docs}'} 现为<b>所选阶段的知识库正文</b>：来源、指纹和实际文本，创建时录入的文档已自动并入）、{'{artifact:n1}'}（引用某节点工件）。
             所有 agent 节点末尾会自动追加「执行动作规范」（Trellis 四段 / 卡点协议 / Postman 实测协议），无需写进模板。
-            存档配置了 Skill 时，即使 prompt 不写 {'{skills}'} 也会自动在末尾追加"可用技能"段。
+            工作配置了 Skill 时，即使 prompt 不写 {'{skills}'} 也会自动在末尾追加"可用技能"段。
           </div>
         </div>
 
