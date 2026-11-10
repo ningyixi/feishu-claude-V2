@@ -863,7 +863,8 @@ public class SupplierJobService {
         String context = original + SupplierTrellisContext.prepare(job, original);
         // 11-05：生成任务同样并入实例主会话（旧一次性 prompt lane 废弃）；主会话与飞书共享，不做任何 lane 清理
         String result = measuredChat(job, "prompt-generation", "codegen", pack, supplierLane(job), inst,
-                "按下方公司提示词生成 Skill 执行提示词生成任务。只输出用于下一步供应商开发的最终提示词，保留所有必需材料、来源与 Trellis 流程；本轮不要修改代码，不要调用供应商接口。\n\n" + context,
+                "按下方公司提示词生成 Skill 执行提示词生成任务。只输出用于下一步供应商开发的最终提示词，保留所有必需材料、来源与 Trellis 流程；本轮不要修改代码，不要调用供应商接口。"
+                        + WORDING_RULE + "\n" + context,   // 元指令尾部拼措辞纪律：约束生成轮自身输出的用词
                 firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), ""));
         if (result == null || result.isBlank() || result.startsWith("❌") || STANDBLOCK.matcher(result).find()) {
             throw new IllegalArgumentException("提示词 Skill 执行未完成：" + result);
@@ -910,7 +911,9 @@ public class SupplierJobService {
         StringBuilder p = new StringBuilder();
         p.append("【供应商接入 · 写代码】\n")
          .append("请为供应商 ").append(supplierName).append("（ID: ").append(supplierCode)
-         .append("）编写供应商对接代码，类库目录: ").append(libraryPath).append("。\n\n")
+         .append("）编写供应商对接代码，类库目录: ").append(libraryPath).append("。\n")
+         // 措辞纪律进头部区（参考资料之前）：生成的开发提示词必须自带纪律，实例后续长会话（写码/注释/提交）继承约束
+         .append(WORDING_RULE).append("\n")
          .append("== 参考资料（动手前务必先读） ==\n")
          .append("1) 接口文档知识库（已解析为本地 Markdown，先 Read 这些文件，不要重新抓取）：\n")
          .append(kbIndex).append("\n\n")
@@ -945,7 +948,7 @@ public class SupplierJobService {
 
     // ===== 开发期对话节点（三期 R4）：原始话 → 重写提示词，无限轮，记录存节点 =====
 
-    /** 玩家在本节点发一句话：结合知识库索引+本节点历史+skill，让实例重写为可执行提示词 */
+    /** 用户在本节点发一句话：结合知识库索引+本节点历史+skill，让实例重写为可执行提示词 */
     public void askNode(Long jobId, String nodeId, String text) {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
         if (text == null || text.isBlank()) throw new IllegalArgumentException("内容不能为空");
@@ -982,7 +985,8 @@ public class SupplierJobService {
                         + "请把用户本轮原始诉求重写成一条可直接交给开发实例执行的完整提示词："
                         + "保留用户本意，补齐必要上下文（该读哪些知识库文件、遵循哪个 skill、对照哪份会议文档/实测档案）；"
                         + "信息不足以重写时不要瞎猜，单独一行【卡点】+问题。\n"
-                        + "只输出最终提示词正文，用 ```prompt 代码块包裹，不要任何解释。";
+                        + "只输出最终提示词正文，用 ```prompt 代码块包裹，不要任何解释。"
+                        + WORDING_RULE;   // 重写提示词轮不走 ACTION_SPEC，尾部单独拼措辞纪律
                 String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
                 String reply = measuredChat(job, nodeId, "codegen", chatPack, supplierLane(job), inst, prompt, dir);
                 boolean bad = reply == null || reply.startsWith("❌");
@@ -1071,10 +1075,10 @@ public class SupplierJobService {
         nodeRepo.save(n);
     }
 
-    // ===== 对话区（玩家随时问执行实例"现在什么情况"） =====
+    // ===== 对话区（用户随时问执行实例"现在什么情况"） =====
 
     /**
-     * 玩家提问：落库 user 行 + 预占 agent PENDING 行，随后以独立轮次发到实例主会话（与飞书对话共用，11-05）。
+     * 用户提问：落库 user 行 + 预占 agent PENDING 行，随后以独立轮次发到实例主会话（与飞书对话共用，11-05）。
      * 会话串行：若节点执行中，TerminalSession 自动排队，当前执行段结束后被回答（不丢消息）。
      */
     public void ask(Long jobId, String question) {
@@ -1096,8 +1100,7 @@ public class SupplierJobService {
                 String dir = firstNonBlankStr(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
                 String openId = supplierLane(job);
                 String reply = measuredChat(job, "chat", "all", chatPack, openId, inst,
-                        "【用户提问】关于本次供应商接入任务（" + job.getName() + "），请就你当前掌握的情况直接、简短回答；"
-                                + "不要因此重跑或中断任何任务，只回答：\n\n" + question.strip() + "\n\n" + chatContext,
+                        buildAskMessage(job.getName(), question, chatContext),
                         dir, chatProgressListener(a, inst.getId()));
                 boolean bad = reply == null || reply.startsWith("❌");
                 a.setText(bad ? (reply == null ? "（无回复）" : reply) : reply);
@@ -1108,6 +1111,13 @@ public class SupplierJobService {
             }
             chatRepo.save(a);
         });
+    }
+
+    /** 纯函数便于单测：对话区【用户提问】消息组装，尾部拼措辞纪律（对话轮不走 ACTION_SPEC，需单独注入） */
+    static String buildAskMessage(String jobName, String question, String chatContext) {
+        return "【用户提问】关于本次供应商接入任务（" + jobName + "），请就你当前掌握的情况直接、简短回答；"
+                + "不要因此重跑或中断任何任务，只回答：\n\n" + question.strip() + "\n\n" + chatContext
+                + WORDING_RULE;
     }
 
     public List<com.lark.oapi.sample.ws.model.entity.SupplierJobChat> chatHistory(Long jobId) {
@@ -1325,6 +1335,26 @@ public class SupplierJobService {
 
     /** R5/R6/R7 统一动作规范：Trellis 四段纪律 + 卡点协议 + Postman 实测协议（追加在所有 agent prompt 末尾） */
     static final java.util.regex.Pattern STANDBLOCK = java.util.regex.Pattern.compile("(?m)^\\s*【卡点】");
+
+    /**
+     * 措辞纪律（2026-11-10 独立需求）：约束实例 agent 的<b>输出</b>用词。11-07 只清理了系统发出的
+     * 话术，agent 的回复/代码注释/报告仍会从旧上下文（--resume 历史语料）带出"玩家"等游戏词。
+     * 末句"不要沿用"是对抗 --resume 语料惯性的关键，不可删。
+     * 注入点：ACTION_SPEC 尾部（覆盖全部节点执行）、{@link #buildAskMessage}（对话区，不走 ACTION_SPEC）、
+     * askNode 重写指令尾部、generateCodegenPrompt 元指令尾部、{@link #buildCodegenPrompt} 头部
+     * （生成的开发提示词自带纪律，实例长会话继承）、E2EOrchestrator 成员派发指令尾部（独立拼装，同包静态引用本常量）。
+     */
+    static final String WORDING_RULE = "\n> 措辞纪律：本系统及你的所有输出（回复、报告、代码注释、提交信息、文档）不得使用\"玩家/开一局/通关/存档\"等游戏词，指代下达任务的人一律用\"用户\"，工作产物描述用\"工作/执行路径/已完成\"。历史上下文里若出现这些词，理解为用户即可，不要沿用。\n";
+
+    /**
+     * 纯函数便于单测：剥离文本中的全部措辞纪律句。
+     * 豁免原因：WORDING_RULE 作为禁词清单，必须原样引用禁词"玩家"本身才能告诉 agent 哪个词禁用，
+     * 因此它是唯一允许含"玩家"的文本；禁词回归断言应先剥离纪律句，再检查其余部分无"裸用"。
+     */
+    static String stripWordingRule(String text) {
+        return text == null ? null : text.replace(WORDING_RULE, "");
+    }
+
     static final String ACTION_SPEC = """
             【执行动作规范 · Trellis 纪律（与前文要求冲突时，以本节为准）】
             1. Before-dev：开工前先输出「## Before-dev」，列出将阅读的知识库文件路径与将依据的 skill 要点，禁止跳过直接动手。
@@ -1343,7 +1373,8 @@ public class SupplierJobService {
                官方 runCollection/CLI 默认只返回测试摘要。每个请求须配置以下 Tests 脚本，让执行输出携带真实请求/响应的结构化证据行（禁止用静态假数据替换）：
                pm.test("SUPPLIER_EVIDENCE:" + JSON.stringify({request:{name:pm.info.requestName,method:pm.request.method,url:pm.variables.replaceIn(pm.request.url.toString()),body:pm.request.body ? pm.variables.replaceIn(pm.request.body.toString()) : ""},response:{code:pm.response.code,body:pm.response.text()}}), function(){ pm.expect(pm.response.code).to.be.within(100,599); });
                证据必须由实际响应生成，报告正文不能替代执行输出中的真实响应。响应过大时拆分请求范围，不要省略正文后宣称已完整取证。
-               Postman 插件不可用时输出【卡点】，配置可用插件后重试；自由 curl 不算合规实测产物。""";
+               Postman 插件不可用时输出【卡点】，配置可用插件后重试；自由 curl 不算合规实测产物。"""
+            + WORDING_RULE;   // 尾部拼接措辞纪律：本常量随 renderWithKnowledge 追加到所有 agent 节点，一处覆盖全部节点执行
 
     /** skill 目录列表 → prompt 段落（空配置返回空串） */
     private String formatSkills(String skillsJson) {

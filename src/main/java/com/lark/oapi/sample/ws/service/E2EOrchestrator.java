@@ -503,12 +503,19 @@ public class E2EOrchestrator {
 
     // ===== Prompt 模板（角色设定照搬 AgentCoder 三 agent 分工） =====
 
-    /** 提问契约 — 拼进所有成员的 prompt：缺关键信息时暂停问玩家，不许猜 */
+    /** 提问契约 — 拼进所有成员的 prompt：缺关键信息时暂停问用户，不许猜 */
     private static final String ASK_CONTRACT =
             "\n\n【提问规则】如果继续任务需要用户提供关键信息（接口凭证/token/测试账号/环境地址/业务决策等），"
             + "**不要猜测、不要编造、不要跳过**，在你发言的最后输出一个提问块然后停止：\n"
             + "```ask\n{\"question\":\"要问用户的问题（一句话，具体）\",\"why\":\"缺了它会影响什么\"}\n```\n"
             + "系统会暂停流水线把问题转给用户，拿到回答后会让你继续。一次只问最关键的一个问题。";
+
+    /**
+     * 成员冷启动派发指令统一尾部：提问契约 + 措辞纪律（2026-11-10）。
+     * E2E 成员提示词独立拼装、不走 SupplierJobService 的 ACTION_SPEC，故在此单独拼接措辞纪律；
+     * 直接静态引用同包常量（编译期内联，不新增服务间 DI 依赖），避免复制常量导致文案漂移。
+     */
+    private static final String MEMBER_PROMPT_TAIL = ASK_CONTRACT + SupplierJobService.WORDING_RULE;
 
     /** 通信方式说明（拼进所有成员 prompt）：a2a / filesystem 同目录 / filesystem 跨目录 三分支 */
     private String commNote(E2ETaskService.E2ETask task) {
@@ -554,7 +561,7 @@ public class E2EOrchestrator {
                     ? "4. 你的发言全文将作为 A2A 任务结果直接传递给测试设计师——请把详细改动说明完整写进发言（摘要在前、细节在后，不受字数限制）\n" : "")
                 + (isA2A(task) ? "" : "群聊汇报请精炼，500 字以内。")
                 + "如果你没有做过相关改动，如实说明现状即可。"
-                + ASK_CONTRACT;
+                + MEMBER_PROMPT_TAIL;
     }
 
     private String buildDesignerPrompt(E2ETaskService.E2ETask task, String changesSummary) {
@@ -580,7 +587,7 @@ public class E2EOrchestrator {
                 + "- 群聊汇报：用例总数 + 每条一行标题，300 字以内\n"
                 + "- 发言最后必须输出一个 ```json 代码块，格式：\n"
                 + "[{\"id\":\"TC-1\",\"title\":\"...\",\"steps\":\"...\",\"expected\":\"...\",\"priority\":\"high|medium|low\"}]"
-                + ASK_CONTRACT;
+                + MEMBER_PROMPT_TAIL;
     }
 
     private String buildExecutorPrompt(E2ETaskService.E2ETask task, List<E2ETaskService.TestCase> toRun, int round) {
@@ -607,7 +614,7 @@ public class E2EOrchestrator {
                 + "- 群聊汇报：通过/失败/受阻数量 + 每条失败的原因与关键证据，400 字以内\n"
                 + "- 发言最后必须输出一个 ```json 代码块，格式：\n"
                 + "[{\"id\":\"TC-1\",\"status\":\"pass|fail|blocked\",\"evidence\":\"关键证据（输出摘录/响应码）\",\"failReason\":\"若失败：具体现象与定位线索\"}]"
-                + ASK_CONTRACT;
+                + MEMBER_PROMPT_TAIL;
     }
 
     private String buildFixPrompt(E2ETaskService.E2ETask task, int round) {
@@ -624,7 +631,7 @@ public class E2EOrchestrator {
                 + failed + "\n"
                 + (useFiles(task) ? "完整报告: " + task.exchangeDirName() + "/report-r" + round + ".md\n" : "")
                 + "请逐一修复，修复后必须自验（运行相关命令/测试确认生效），然后在群里汇报：改了什么、怎么验证的，500 字以内。"
-                + ASK_CONTRACT;
+                + MEMBER_PROMPT_TAIL;
     }
 
     // ===== 判定解析（容错：fence 优先，其次括号扫描） =====
