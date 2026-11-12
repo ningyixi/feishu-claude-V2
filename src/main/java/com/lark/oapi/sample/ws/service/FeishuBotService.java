@@ -144,17 +144,29 @@ public class FeishuBotService {
                 .onP2MessageReceiveV1(new ImService.P2MessageReceiveV1Handler() {
                     @Override
                     public void handle(P2MessageReceiveV1 event) throws Exception {
+                        // SDK 对 listener 异常只在自己的 logger(com.lark.oapi.ws.Client)里打一行
+                        // "handle message failed" 就吞掉（SSE 日志面板还丢栈）：整体 try/catch 把任何
+                        // 夭折变成带实例上下文的可见错误（2026-11 "157 行后零痕迹"事故的治本插桩）。
+                        // 字段提取本身也可能抛，openId/msgId 在 try 外同步记录，供 catch 块打日志。
+                        String dbgOpenId = null, dbgMsgId = null, dbgChatType = null, dbgChatId = null;
+                        try {
                         var eventData = event.getEvent();
+                        var sender = eventData.getSender();
+                        var message = eventData.getMessage();
                         // 机器人发送方的 sender_id 可能为空：判空防 NPE（否则整个事件处理抛异常）
-                        var sid = eventData.getSender() != null ? eventData.getSender().getSenderId() : null;
-                        String openId = sid != null ? sid.getOpenId() : null;
-                        String messageId = eventData.getMessage().getMessageId();
-                        String msgType = eventData.getMessage().getMessageType();
-                        String rawContent = eventData.getMessage().getContent();
-                        String chatType = eventData.getMessage().getChatType();
-                        String chatId = eventData.getMessage().getChatId();
+                        var sid = sender != null ? sender.getSenderId() : null;
+                        final String openId = sid != null ? sid.getOpenId() : null;
+                        final String messageId = message.getMessageId();
+                        final String msgType = message.getMessageType();
+                        final String rawContent = message.getContent();
+                        final String chatType = message.getChatType();
+                        final String chatId = message.getChatId();
+                        // senderType 同样必须判空：sender 可空（见上），旧代码在此裸 deref = 会被 SDK 静默吞掉的潜伏 NPE
+                        final String senderType = sender != null ? sender.getSenderType() : null;
+                        dbgOpenId = openId; dbgMsgId = messageId; dbgChatType = chatType; dbgChatId = chatId;
 
-                        log.info("[Feishu][{}] 收到消息: openId={}, chatType={}, msgType={}", instance.getName(), openId, chatType, msgType);
+                        log.info("[Feishu][{}] 收到消息: openId={}, chatType={}, msgType={}, msgId={}, senderType={}",
+                                instance.getName(), openId, chatType, msgType, messageId, senderType);
 
                         // 幂等：飞书长连接在重连/未及时 ack 时会重投同一条消息 → 同一需求被 Claude 执行两遍
                         if (!firstDelivery(instanceId, messageId)) {
@@ -163,8 +175,8 @@ public class FeishuBotService {
                         }
                         // 机器人互 @ 防死循环：发送方是机器人（sender_type=app，或配置的已知机器人 open_id）则计数，
                         // 连续超过上限就不再回复，直到真人发言
-                        String senderType = eventData.getSender().getSenderType();
-                        String loopKey = BotLoopGuard.key(instanceId, chatId, eventData.getMessage().getThreadId());
+                        // BotLoopGuard.key 内部已判空（chatId/threadId 为 null 时拼空串），此处无需额外加固
+                        String loopKey = BotLoopGuard.key(instanceId, chatId, message.getThreadId());
                         if (isBotSender(senderType, openId)) {
                             BotLoopGuard.Verdict v = botLoopGuard.noteBotTurn(loopKey, System.currentTimeMillis());
                             if (!v.allowed()) {
@@ -182,12 +194,18 @@ public class FeishuBotService {
                         }
 
                         // 长时间断线后重连会补投积压的旧消息：超过 30 分钟的不再执行（避免半夜醒来跑一堆过期指令）
-                        String createTime = eventData.getMessage().getCreateTime();
-                        if (isExpired(createTime)) {
+                        String createTime = message.getCreateTime();
+                        boolean expired = isExpired(createTime);
+                        // 过期判定的入参与结果常态留痕（一消息一行）：现场排"为什么没反应"时不用再猜
+                        log.info("[Feishu][{}] 过期判定: msgId={}, createTime={}, now={}, expired={}",
+                                instance.getName(), messageId, createTime, System.currentTimeMillis(), expired);
+                        if (expired) {
                             log.warn("[Feishu][{}] 消息已过期（{}），忽略: messageId={}", instance.getName(), createTime, messageId);
                             return;
                         }
 
+                        // 与 handleMessage 入口日志配对：区分"线程没启动" vs "启动了但死在里面"
+                        log.info("[Feishu][{}] 派发处理线程: msgId={}", instance.getName(), messageId);
                         Thread.ofVirtual().name("msg-" + messageId).start(() -> {
                             try {
                                 handleMessage(instanceId, openId, chatType, chatId, messageId, msgType, rawContent);
@@ -196,34 +214,52 @@ public class FeishuBotService {
                                 replyText(instanceId, openId, chatType, chatId, "处理消息时出错了: " + e.getMessage());
                             }
                         });
+                        } catch (Exception e) {
+                            log.error("[Feishu][{}] 事件处理异常（SDK 原本会静默吞掉）: openId={}, msgId={}",
+                                    instance.getName(), dbgOpenId, dbgMsgId, e);
+                            try {
+                                replyText(instanceId, dbgOpenId, dbgChatType, dbgChatId, "⚠️ 消息处理出错，请重试");
+                            } catch (Exception replyEx) {
+                                log.error("[Feishu][{}] 失败提示回复也异常: openId={}, msgId={}",
+                                        instance.getName(), dbgOpenId, dbgMsgId, replyEx);
+                            }
+                        }
                     }
                 })
                 .onP2CardActionTrigger(new P2CardActionTriggerHandler() {
                     @Override
                     public P2CardActionTriggerResponse handle(P2CardActionTrigger event) throws Exception {
-                        var data = event.getEvent();
-                        String openId = data.getOperator().getOpenId();
-                        var actionValue = data.getAction().getValue();
-                        String choice = actionValue != null && actionValue.containsKey("choice")
-                                ? String.valueOf(actionValue.get("choice")) : "";
+                        try {
+                            var data = event.getEvent();
+                            String openId = data.getOperator().getOpenId();
+                            var actionValue = data.getAction().getValue();
+                            String choice = actionValue != null && actionValue.containsKey("choice")
+                                    ? String.valueOf(actionValue.get("choice")) : "";
 
-                        log.info("[Card][{}] 按钮点击: openId={}, choice={}", instance.getName(), openId, choice);
+                            log.info("[Card][{}] 按钮点击: openId={}, choice={}", instance.getName(), openId, choice);
 
-                        // 先回复一条消息显示用户选了什么
-                        Thread.ofVirtual().name("card-" + openId).start(() -> {
-                            try {
-                                // 发送选择反馈
-                                replyText(instanceId, openId, "p2p", "",
-                                        "✅ 你选择了: **" + choice + "**");
-                                // 将按钮选择作为消息处理
-                                handleMessage(instanceId, openId, "p2p", "", "", "text",
-                                        "{\"text\":\"" + choice + "\"}");
-                            } catch (Exception e) {
-                                log.error("[Card] 处理按钮点击异常", e);
-                            }
-                        });
+                            // 先回复一条消息显示用户选了什么
+                            Thread.ofVirtual().name("card-" + openId).start(() -> {
+                                try {
+                                    // 发送选择反馈
+                                    replyText(instanceId, openId, "p2p", "",
+                                            "✅ 你选择了: **" + choice + "**");
+                                    // 将按钮选择作为消息处理
+                                    // 已知风险（本次不修，防扩大）：choice 未做 JSON 转义直接拼串，
+                                    // 按钮值含引号/反斜杠时会拼出非法 JSON（extractText 兜底返回原文，不致崩）
+                                    handleMessage(instanceId, openId, "p2p", "", "", "text",
+                                            "{\"text\":\"" + choice + "\"}");
+                                } catch (Exception e) {
+                                    log.error("[Card] 处理按钮点击异常", e);
+                                }
+                            });
 
-                        return new P2CardActionTriggerResponse();
+                            return new P2CardActionTriggerResponse();
+                        } catch (Exception e) {
+                            // 与消息事件同理：SDK 对回调异常静默处理，这里兜底可见化
+                            log.error("[Card][{}] 按钮事件处理异常（SDK 原本会静默吞掉）", instance.getName(), e);
+                            return new P2CardActionTriggerResponse();
+                        }
                     }
                 })
                 .build();
@@ -384,9 +420,22 @@ public class FeishuBotService {
         }
     }
 
+    /** 日志预览用：截前 max 字符，超长补省略号（null 安全，纯函数可单测） */
+    static String preview(String s, int max) {
+        if (s == null) return null;
+        return s.length() <= max ? s : s.substring(0, max) + "…";
+    }
+
     private void handleMessage(Long instanceId, String openId, String chatType, String chatId, String messageId, String msgType, String rawContent) {
+        // 入口日志与 handler 的"派发处理线程"配对：区分"线程没启动" vs "启动了但死在里面"
+        // （text 要到下面才解析，入口先打 msgType + rawContent 前 60 字）
+        log.info("[Chat][{}] 开始处理: openId={}, chatType={}, msgType={}, msgId={}, raw前60字={}",
+                instanceId, openId, chatType, msgType, messageId, preview(rawContent, 60));
         InstanceConnection conn = connections.get(instanceId);
-        if (conn == null) return;
+        if (conn == null) {
+            log.warn("[Chat] 实例连接不存在（僵尸事件?），丢弃: instanceId={}, msgId={}", instanceId, messageId);
+            return;
+        }
 
         lastMessageTime.put(instanceId, System.currentTimeMillis());   // 活跃时间（状态分级用）
 
@@ -409,7 +458,11 @@ public class FeishuBotService {
                 return;
             }
             text = text.replaceAll("@_user_\\d+\\s*", "").trim();
-            if (text.isEmpty()) return;
+            if (text.isEmpty()) {
+                // 旧代码在此静默 return = "收到消息后再无痕迹"的候选真凶之一（群里只 @机器人 不带正文即触发）
+                log.info("[Chat] 去@提及后无正文，忽略: msgId={}, openId={}", messageId, openId);
+                return;
+            }
         }
 
         // Workflow commands are deterministic application actions, never routed through Claude or shell.
@@ -419,9 +472,14 @@ public class FeishuBotService {
             return;
         }
 
-        // 保存用户消息到对话历史
-        saveChatMessage(instanceId, openId, "user",
-                isText ? text : (isImage ? "[图片]" : "[表情包]"), chatType);
+        // 保存用户消息到对话历史。saveChatMessage 内部已捕获 DB 异常（log.warn），
+        // 此处再兜一层：历史丢一两条可接受，DB 故障静默杀死整条回复链路不可接受
+        try {
+            saveChatMessage(instanceId, openId, "user",
+                    isText ? text : (isImage ? "[图片]" : "[表情包]"), chatType);
+        } catch (Exception e) {
+            log.error("[Chat] 保存对话历史失败（不影响本轮回复，继续处理）: instanceId={}, openId={}", instanceId, openId, e);
+        }
 
         // 权限检查：允许的 openId 或实例配置的 openId
         boolean allowed = ALLOWED_OPEN_IDS.contains(openId)
