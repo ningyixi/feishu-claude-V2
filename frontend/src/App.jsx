@@ -4,6 +4,7 @@ import Instances from './pages/Instances'
 import E2ETest from './pages/E2ETest'
 import Hooks from './pages/Hooks'
 import Supplier from './pages/Supplier'
+import QuickProbe from './pages/QuickProbe'
 import Employees from './pages/Employees'
 import Icon from './components/ui/Icon'
 import Appearance from './components/ui/Appearance'
@@ -13,6 +14,7 @@ const NAV = [
   { to: '/', icon: 'instances', title: '实例管理', subtitle: '连接与运行状态' },
   { to: '/e2e', icon: 'e2e', title: '协同测试', subtitle: '多角色验证与反馈' },
   { to: '/supplier', icon: 'supplier', title: '供应商工作台', subtitle: '从知识到持续交付' },
+  { to: '/quick-probe', icon: 'probe', title: '接口建档', subtitle: '文档直测直编 · 产出 Wiki' },
   { to: '/employees', icon: 'employees', title: '数字员工', subtitle: '分派需求，协作推进' },
   { to: '/hooks', icon: 'hooks', title: 'Skill 维护', subtitle: '沉淀每一次工作经验' },
 ]
@@ -40,7 +42,7 @@ function Panel() {
     </aside>
     <div className="workspace-content">
       <header className="workspace-header"><div className="workspace-breadcrumb">工作空间<span>/</span><strong>{current.title}</strong></div><div className="workspace-header-note">{current.subtitle}</div><Appearance /></header>
-      <main className="main"><Routes><Route path="/" element={<Instances/>}/><Route path="/e2e" element={<E2ETest/>}/><Route path="/hooks" element={<Hooks/>}/><Route path="/supplier" element={<Supplier/>}/><Route path="/employees" element={<Employees/>}/></Routes></main>
+      <main className="main"><Routes><Route path="/" element={<Instances/>}/><Route path="/e2e" element={<E2ETest/>}/><Route path="/hooks" element={<Hooks/>}/><Route path="/supplier" element={<Supplier/>}/><Route path="/quick-probe" element={<QuickProbe/>}/><Route path="/employees" element={<Employees/>}/></Routes></main>
     </div>
   </div>
 }

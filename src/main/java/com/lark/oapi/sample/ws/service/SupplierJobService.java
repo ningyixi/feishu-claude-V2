@@ -240,6 +240,7 @@ public class SupplierJobService {
             }
             for (SupplierJob job : jobRepo.findAll()) {
                 if (!"ACTIVE".equals(job.getStatus())) continue;
+                if (job.isQuick()) continue;   // 快速建档任务只有 n1/n2 两个节点，不参与工作台节点迁移（11-13）
                 migrateJobNodes(job);
             }
         } catch (Exception e) {
@@ -494,8 +495,9 @@ public class SupplierJobService {
         jobRepo.deleteById(id);
     }
 
+    /** 工作台工作列表：过滤快速建档任务（quick=true 走 /api/quick-probes 工具入口，避免与正式工作混淆） */
     public List<SupplierJob> listJobs() {
-        return jobRepo.findAllByOrderByUpdatedAtDesc();
+        return jobRepo.findAllByQuickFalseOrderByUpdatedAtDesc();
     }
 
     public Optional<SupplierJob> getJob(Long id) {

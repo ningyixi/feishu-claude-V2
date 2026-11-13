@@ -11,6 +11,12 @@ public interface SupplierJobRepository extends JpaRepository<SupplierJob, Long> 
     java.util.Optional<SupplierJob> lockById(@org.springframework.data.repository.query.Param("id") Long id);
     List<SupplierJob> findAllByOrderByUpdatedAtDesc();
 
+    /** 工作台工作列表（11-13）：不含快速建档任务——quick 任务走 /api/quick-probes 专用入口 */
+    List<SupplierJob> findAllByQuickFalseOrderByUpdatedAtDesc();
+
+    /** 快速建档任务清单（工具页列表 + 启动恢复扫描共用） */
+    List<SupplierJob> findAllByQuickTrueOrderByUpdatedAtDesc();
+
     /**
      * 飞书指针注入（②a）：实例绑定的、仍值得指向知识底座的工作。
      * status 取值见 {@link SupplierJob#getStatus()}（ACTIVE | COMPLETED）——通关存档的 Wiki/知识库

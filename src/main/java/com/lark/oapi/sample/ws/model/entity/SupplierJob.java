@@ -85,6 +85,34 @@ public class SupplierJob {
     /** ACTIVE | COMPLETED */
     private String status = "ACTIVE";
 
+    /**
+     * 快速建档任务标记（11-13-standalone-doc-probe）：true = 「接口建档」工具创建的轻量任务，
+     * 由 QuickProbeService 四段流水线驱动，不进工作台工作列表（listJobs 过滤），
+     * 不启动 Flowable 流程；/supplier?job=&lt;id&gt; 详情页照常可开。
+     */
+    @Column(nullable = false)
+    private boolean quick = false;
+
+    /**
+     * 快速建档编排段（仅 quick=true 有意义）：KB → ANALYSIS → PROBE → WIKI → DONE。
+     * 空串 = 尚未启动；配合 {@link #quickError} 表达段状态：
+     * 当前段 error 为空 = RUNNING，非空 = FAILED（可从该段重试），DONE = 全部完成。
+     */
+    @Column(name = "quick_phase", length = 16)
+    private String quickPhase;
+
+    /** 快速建档当前段失败/中断原因（非空 = 该段 FAILED；重试时清空） */
+    @Lob
+    @Column(length = 2147483647, name = "quick_error")
+    private String quickError;
+
+    public boolean isQuick() { return quick; }
+    public void setQuick(boolean value) { quick = value; }
+    public String getQuickPhase() { return quickPhase == null ? "" : quickPhase; }
+    public void setQuickPhase(String value) { quickPhase = value; }
+    public String getQuickError() { return quickError == null ? "" : quickError; }
+    public void setQuickError(String value) { quickError = value; }
+
     /** 创建者：数字员工 id（null = 管理员用户在面板创建） */
     @Column(name = "created_by_employee_id")
     private Long createdByEmployeeId;

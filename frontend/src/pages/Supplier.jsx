@@ -837,10 +837,11 @@ const KB_STATUS = {
   FAILED: { label: '解析失败', color: '#dc2626' },
 }
 
-function KbPanel({ kbCode, showToast }) {
+/** 供应商知识库面板；readOnly=true 时只读查看（快速建档结果卡复用：隐藏补充表单与全部写操作） */
+export function KbPanel({ kbCode, showToast, readOnly = false }) {
   const confirmAction = useConfirm()
   const [shared, setShared] = useState(true)
-  useEffect(() => { let alive = true; fetch('/api/supplier-jobs').then(r => r.ok ? r.json() : []).then(rows => { if (alive && Array.isArray(rows)) setShared(rows.filter(job => job.supplierCode === kbCode || job.kbCode === kbCode).length > 1) }).catch(() => {}); return () => { alive = false } }, [kbCode])
+  useEffect(() => { if (readOnly) return; let alive = true; fetch('/api/supplier-jobs').then(r => r.ok ? r.json() : []).then(rows => { if (alive && Array.isArray(rows)) setShared(rows.filter(job => job.supplierCode === kbCode || job.kbCode === kbCode).length > 1) }).catch(() => {}); return () => { alive = false } }, [kbCode, readOnly])
   const [entries, setEntries] = useState([])
   const [type, setType] = useState('chat')
   const [value, setValue] = useState('')
@@ -912,7 +913,7 @@ function KbPanel({ kbCode, showToast }) {
     <div className="card" style={{ marginTop: 14, padding: '14px 20px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 14, fontWeight: 700 }}>📚 供应商知识库</span>
-        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>统一补充入口：文档随时进，解析一次永久复用；节点执行自动引用（先查库勿重抓）</span>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{readOnly ? '本次建档任务的知识库材料（只读；补充/管理请到工作台知识库面板）' : '统一补充入口：文档随时进，解析一次永久复用；节点执行自动引用（先查库勿重抓）'}</span>
         <div style={{ flex: 1 }} />
         {entries.length > 0 && (
           <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => setListOpen(o => !o)}>
@@ -922,7 +923,8 @@ function KbPanel({ kbCode, showToast }) {
         <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>{kbCode}</span>
       </div>
 
-      {/* 补充表单 */}
+      {/* 补充表单（只读查看时隐藏） */}
+      {!readOnly && (
       <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
         <select className="form-input" style={{ width: 120, fontSize: 12 }} value={type} onChange={e => setType(e.target.value)}>
           {Object.entries(KB_TYPES).map(([k, v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
@@ -939,6 +941,7 @@ function KbPanel({ kbCode, showToast }) {
         <button className="btn btn-primary" style={{ fontSize: 12.5, padding: '6px 16px', alignSelf: 'flex-start' }}
           onClick={add}>＋ 补充入库</button>
       </div>
+      )}
 
       {/* 条目列表：默认展开但限高内滚动(侧边滚动条)，可一键收起，文档多时页面不再无限长 */}
       {!listOpen && entries.length > 0 && (
@@ -969,26 +972,30 @@ function KbPanel({ kbCode, showToast }) {
               )}
               {isSite && m.partial && <span className="hook-badge" style={{ color: '#b45309', background: 'rgba(245,158,11,.12)', borderColor: 'rgba(245,158,11,.4)' }}>⚠️ 部分导入</span>}
               {e.status === 'FAILED' && <span style={{ fontSize: 11, color: 'var(--error)' }} data-tooltip={e.error} tabIndex={0}>{String(e.error || '').slice(0, 40)}</span>}
+              {!readOnly && (
               <select aria-label="材料使用阶段" className="form-input" style={{ width: 130, fontSize: 11 }} value={e.contextStage || 'all'} onChange={ev => changeStage(e.id, ev.target.value)}>
                 <option value="all">通用 · 每次交付</option><option value="analysis">文档分析</option><option value="probe">接口实测</option><option value="codegen">代码开发</option><option value="archive">仅留档</option>
               </select>
+              )}
               <div style={{ flex: 1 }} />
-              {e.status === 'DONE' && <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => openMd(e)}>👁 产物/校正</button>}
+              {e.status === 'DONE' && <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => openMd(e)}>{readOnly ? '👁 查看' : '👁 产物/校正'}</button>}
               {isSite && e.status !== 'RAW' && (
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => setPagesModal(e)}>📑 页面</button>
               )}
-              {isSite && e.status === 'PARSING' && (
+              {!readOnly && isSite && e.status === 'PARSING' && (
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px', color: 'var(--error)' }}
                   onClick={async () => { await fetch(`/api/supplier-kb/entries/${e.id}/cancel`, { method: 'POST' }); showToast('已请求取消，当前页完成后停止', 'success') }}>✋ 取消</button>
               )}
-              {(e.type === 'url' || e.type === 'pdf') && e.status === 'RAW' && (
+              {!readOnly && (e.type === 'url' || e.type === 'pdf') && e.status === 'RAW' && (
                 <button className="btn btn-primary" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔨 解析</button>
               )}
-              {(e.type === 'url' || e.type === 'pdf') && (e.status === 'DONE' || e.status === 'FAILED') && (
+              {!readOnly && (e.type === 'url' || e.type === 'pdf') && (e.status === 'DONE' || e.status === 'FAILED') && (
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔄 重解析</button>
               )}
+              {!readOnly && (
               <button className="btn" style={{ fontSize: 11, padding: '2px 8px', color: 'var(--error)', borderColor: 'rgba(220,38,38,.35)' }}
                 data-tooltip="删除该条目" onClick={() => removeEntry(e)} aria-label="删除该条目">✕</button>
+              )}
             </div>
           )
         })}
@@ -1017,7 +1024,7 @@ function KbPanel({ kbCode, showToast }) {
                   <button className="btn btn-primary" onClick={saveMd}>💾 保存校正</button>
                 </>
               ) : (
-                <button className="btn" onClick={() => setView(v => ({ ...v, editing: true }))}>✏️ 编辑校正</button>
+                !readOnly && <button className="btn" onClick={() => setView(v => ({ ...v, editing: true }))}>✏️ 编辑校正</button>
               )}
             </div>
           </div>
@@ -1477,8 +1484,8 @@ function CreatorBadge({ id, name, dim = false }) {
     : <span className="hook-badge dim" data-tooltip="由管理员在面板创建" tabIndex={0}>👑 admin</span>
 }
 
-/** 实例独占绑定映射：String(instId) → {empId, label}（被数字员工绑定的实例不可再分配给他人） */
-function useOccupied() {
+/** 实例独占绑定映射：String(instId) → {empId, label}（被数字员工绑定的实例不可再分配给他人；QuickProbe 页复用） */
+export function useOccupied() {
   const [occupied, setOccupied] = useState({})
   useEffect(() => {
     fetch('/api/employees').then(r => r.json()).then(emps => {
