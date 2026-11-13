@@ -29,6 +29,12 @@ class SupplierWikiContractTest {
         assertTrue(cleaned.contains("真实业务约定：取消必须传订单号"), "真实正文应保留");
         // 站点 index 清单里的 "载入 N 页）" 外壳不应再作为可引用内容
         assertFalse(SupplierWikiSources.stripInjected("> 来源入口: https://x （同站点抓取：载入 1 页）\n").contains("载入 1 页"));
+        // 本地 HTML 解析产物的来源头同样属于注入样板（含空格/括号的文件名整行剥离）
+        String htmlSrc = "> 来源HTML文件: D:\\supplier-docs\\DIRS\\OTA Default Interface (1).html\n\n# 酒店接口\n\n真实字段表：hotelId。\n";
+        String cleanedHtml = SupplierWikiSources.stripInjected(htmlSrc);
+        assertFalse(cleanedHtml.contains("来源HTML文件"), "HTML 来源头应被剥离");
+        assertFalse(cleanedHtml.contains("OTA Default Interface"), "注入头里的路径不应作为可引用内容");
+        assertTrue(cleanedHtml.contains("真实字段表：hotelId"), "真实正文应保留");
     }
 
     @Test void quoteAcceptsDroppedEscapeViaSubsequenceButRejectsFabrication() {

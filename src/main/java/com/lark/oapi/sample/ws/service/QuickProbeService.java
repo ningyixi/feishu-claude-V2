@@ -148,7 +148,7 @@ public class QuickProbeService {
      *
      * @param identifier 供应商标识（kbCode 命名空间；留空自动生成 quick-&lt;时间戳&gt; 兜底）
      * @param taskName   任务名（选填，默认 = 标识）
-     * @param sources    文档来源行（≥1；http(s) 链接 / .pdf / .md/.markdown/.txt 本地路径）
+     * @param sources    文档来源行（≥1；http(s) 链接 / .pdf/.html/.htm/.md/.markdown/.txt 本地路径）
      * @param siteCrawl  URL 来源是否按同站点目录递归抓取
      */
     public SupplierJob create(String identifier, String taskName, Long instanceId,
@@ -233,14 +233,15 @@ public class QuickProbeService {
         return job;
     }
 
-    /** 来源行类型识别（与 syncFromJob 的映射一致）：http(s) → url；扩展名 → pdf / md；其余拒绝 */
+    /** 来源行类型识别（与 syncFromJob 的映射一致）：http(s) → url；扩展名 → pdf / html / md；其余拒绝 */
     static String detectType(String line) {
         String v = line == null ? "" : line.strip();
         String low = v.toLowerCase();
         if (low.startsWith("http://") || low.startsWith("https://")) return "url";
         if (low.endsWith(".pdf")) return "pdf";
+        if (low.endsWith(".html") || low.endsWith(".htm")) return "html";
         if (low.endsWith(".md") || low.endsWith(".markdown") || low.endsWith(".txt")) return "md";
-        throw new IllegalArgumentException("无法识别的文档来源（支持 http(s) 链接 / .pdf / .md/.markdown/.txt 本地路径）: " + v);
+        throw new IllegalArgumentException("无法识别的文档来源（支持 http(s) 链接 / .pdf/.html/.htm/.md/.markdown/.txt 本地路径）: " + v);
     }
 
     /** 从内置 API 模板取节点定义（照抄 n1/n2 的 prompt/description，模板被编辑过则跟随最新） */
@@ -356,11 +357,11 @@ public class QuickProbeService {
             kbService.add(kbCode, r.type, r.value, null, r.site);
         }
 
-        // 2) 触发本任务条目的解析（RAW=刚入库原文引用 / FAILED=上次解析失败；url/pdf 走异步解析或站点抓取，md 入库即 DONE）
+        // 2) 触发本任务条目的解析（RAW=刚入库原文引用 / FAILED=上次解析失败；url/pdf/html 走异步解析或站点抓取，md 入库即 DONE）
         for (SupplierKbEntry e : kbService.list(kbCode)) {
             boolean mine = refs.stream().anyMatch(r -> r.type.equals(e.getType()) && r.value.equals(e.getSource()));
             if (mine && ("RAW".equals(e.getStatus()) || "FAILED".equals(e.getStatus()))
-                    && List.of("url", "pdf", "md").contains(e.getType())) {
+                    && List.of("url", "pdf", "html", "md").contains(e.getType())) {
                 kbService.reparse(e.getId());
             }
         }

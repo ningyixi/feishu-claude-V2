@@ -1,0 +1,75 @@
+{
+  "info": {
+    "name": "smoke-20261113-20261113",
+    "description": "供应商 smoke-20261113（游由 YOYO）接口实测集合。依据 Wiki v20：constraints/yoyo-api-signature.md（签名规则）+ api/yoyo-signature-example.md（唯一已知端点示例）。注意：知识库仅含《接口签名》文档，本集合仅覆盖文档算例中出现的 POST /v2/booking/hotels/search；其余业务接口待文档补充。环境变量 base_url/ak/sk 当前为空——等待用户提供（卡点）。pre-request 脚本实现 6 行 signingString + HMAC-SHA256 + Base64，已离线核验可复现官方算例。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "hotel-search（文档算例端点）",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// 游由(YOYO) API 签名 —— 依据 Wiki v20 constraints/yoyo-api-signature.md（证据 raw/e306）",
+              "const CryptoJS = require('crypto-js');",
+              "const ak = pm.environment.get('ak');",
+              "const sk = pm.environment.get('sk');",
+              "if (!ak || !sk) { throw new Error('环境变量 ak/sk 未配置——等待用户提供凭证（卡点）'); }",
+              "// raw_query_string：URL 中 ? 后的原始字符串（不含 ?，保持原始顺序）",
+              "const fullUrl = pm.variables.replaceIn(pm.request.url.toString());",
+              "const qIndex = fullUrl.indexOf('?');",
+              "const rawQueryString = qIndex >= 0 ? fullUrl.substring(qIndex + 1) : '';",
+              "// bodyHash = SHA256_HEX(raw_body)；无 body 时为空字节 → e3b0c442...b855",
+              "const bodyStr = (pm.request.body && pm.request.body.raw) ? pm.variables.replaceIn(pm.request.body.raw) : '';",
+              "const bodyHash = CryptoJS.SHA256(CryptoJS.enc.Utf8.parse(bodyStr)).toString(CryptoJS.enc.Hex);",
+              "// 时间戳：文档未定义单位，按示例 13 位推断为毫秒（见 question 页未决项）；nonce：规则未说明，本地随机",
+              "const timestamp = pm.environment.get('timestamp_override') || Date.now().toString();",
+              "const nonce = pm.environment.get('nonce_override') || (Date.now().toString(36) + Math.random().toString(36).slice(2));",
+              "const signingString = ['YOYO-HMAC-SHA256', ak, timestamp, nonce, rawQueryString, bodyHash].join('\\n');",
+              "const signature = CryptoJS.HmacSHA256(signingString, sk).toString(CryptoJS.enc.Base64);",
+              "pm.request.headers.upsert({ key: 'X-Access-Key', value: ak });",
+              "pm.request.headers.upsert({ key: 'X-Timestamp', value: timestamp });",
+              "pm.request.headers.upsert({ key: 'X-Nonce', value: nonce });",
+              "pm.request.headers.upsert({ key: 'X-Signature', value: signature });",
+              "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+              "console.log('signingString=' + JSON.stringify(signingString));",
+              "console.log('X-Signature=' + signature);"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"SUPPLIER_EVIDENCE:\" + JSON.stringify({request:{name:pm.info.requestName,method:pm.request.method,url:pm.variables.replaceIn(pm.request.url.toString()),body:pm.request.body ? pm.variables.replaceIn(pm.request.body.toString()) : \"\"},response:{code:pm.response.code,body:pm.response.text()}}), function(){ pm.expect(pm.response.code).to.be.within(100,599); });"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"regionId\":\"123\",\"keyword\":\"tokyo\"}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{base_url}}/v2/booking/hotels/search?pageSize=20&pageNum=1",
+          "host": ["{{base_url}}"],
+          "path": ["v2", "booking", "hotels", "search"],
+          "query": [
+            { "key": "pageSize", "value": "20" },
+            { "key": "pageNum", "value": "1" }
+          ]
+        },
+        "description": "唯一在文档中出现的端点（仅作为签名算例）。请求参数字段（regionId/keyword/pageSize/pageNum）取自算例，无字段枚举与响应结构定义——文档缺失。"
+      },
+      "response": []
+    }
+  ]
+}

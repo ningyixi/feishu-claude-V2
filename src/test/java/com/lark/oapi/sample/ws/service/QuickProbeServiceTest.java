@@ -468,6 +468,12 @@ class QuickProbeServiceTest {
         assertEquals("pdf", QuickProbeService.detectType("D:\\docs\\api.PDF"));
         assertEquals("md", QuickProbeService.detectType("/tmp/api.md"));
         assertEquals("md", QuickProbeService.detectType("/tmp/api.txt"));
+        assertEquals("html", QuickProbeService.detectType("D:\\docs\\api.html"));
+        assertEquals("html", QuickProbeService.detectType("/tmp/api.HTM"));
+        assertEquals("html", QuickProbeService.detectType("D:\\docs\\page.HTML"));
+        // 空格/括号是正常路径字符：整行识别为单一 html 来源，不被按空格拆坏
+        assertEquals("html", QuickProbeService.detectType("D:\\supplier-docs\\DIRS\\OTA Default Interface (1).html"));
+        assertEquals("html", QuickProbeService.detectType("  D:\\supplier-docs\\OTA Default Interface (1).htm  "));
         assertThrows(IllegalArgumentException.class, () -> QuickProbeService.detectType("D:\\docs\\api.docx"));
         assertThrows(IllegalArgumentException.class, () -> QuickProbeService.detectType("ftp://x"));
     }
@@ -518,5 +524,34 @@ class QuickProbeServiceTest {
         Path md = dir.resolve("api.md");
         Files.writeString(md, "# API", StandardCharsets.UTF_8);
         assertDoesNotThrow(() -> h.service.create("acme", null, 5L, List.of(md.toString()), false, null, null));
+        // html 来源：文件名含空格/括号，整串作为单一路径通过预检（split 陷阱回归）。
+        // no-op starter 不会释放 jobId=1 的编排占位（防双跑守卫），每次成功 create 各用新 Harness。
+        Path html = dir.resolve("OTA Default Interface (1).html");
+        Files.writeString(html, "<html><body><h1>接口文档</h1></body></html>", StandardCharsets.UTF_8);
+        var h2 = new Harness();
+        h2.service.starter = r -> { };
+        SupplierJob j2 = assertDoesNotThrow(() -> h2.service.create("acme", null, 5L, List.of(html.toString()), false, null, null));
+        assertTrue(j2.getDocsJson().contains("OTA Default Interface (1).html"), "docsJson 应原样保留含空格/括号的路径: " + j2.getDocsJson());
+        Path htm = dir.resolve("legacy page.HTM");
+        Files.writeString(htm, "<html><body><h1>旧版</h1></body></html>", StandardCharsets.UTF_8);
+        var h3 = new Harness();
+        h3.service.starter = r -> { };
+        assertDoesNotThrow(() -> h3.service.create("acme", null, 5L, List.of(htm.toString()), false, null, null));
+    }
+
+    // ===== html 来源进 KB 段流水线：入库为 html 类型（非 pdf）且触发解析 =====
+
+    @Test void htmlSourceEntersKbPipelineAndTriggersReparse() {
+        var h = new Harness();
+        // JSON 里的 Windows 路径：反斜杠转义 + 空格/括号原样保留
+        h.givenQuickJob("[{\"type\":\"path\",\"value\":\"D:\\\\supplier-docs\\\\DIRS\\\\OTA Default Interface (1).html\"}]");
+
+        h.service.runPipeline(1L, "KB");
+
+        InOrder order = inOrder(h.kb);
+        order.verify(h.kb).add("acme", "html", "D:\\supplier-docs\\DIRS\\OTA Default Interface (1).html", null, false);
+        order.verify(h.kb).reparse(1L);   // html 入库为 RAW → 触发清单含 html → 自动解析
+        assertEquals("DONE", h.job.getQuickPhase(), h.job.getQuickError());
+        assertEquals("DONE", h.kbEntries.get(0).getStatus());
     }
 }

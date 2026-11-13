@@ -26,7 +26,7 @@ import java.util.List;
 /**
  * 供应商知识库服务（R1/R3/R4 基座）：
  * <ul>
- *   <li>条目 CRUD 与解析状态机（PENDING→PARSING→DONE/FAILED），URL/PDF 异步解析为落盘 Markdown</li>
+ *   <li>条目 CRUD 与解析状态机（PENDING→PARSING→DONE/FAILED），URL/PDF/本地 HTML 异步解析为落盘 Markdown</li>
  *   <li>{@link #syncFromJob} 把存档旧 docs_json 引用清单并入知识库（幂等，按 type+source 去重）</li>
  *   <li>{@link #indexText} 生成注入 agent prompt 的「知识库索引表 + 先查库勿重抓」规则段</li>
  *   <li>重启续跑：启动时把遗留 PENDING/PARSING 条目重新排队</li>
@@ -110,6 +110,20 @@ public class SupplierKbService {
                 e.setStatus("RAW");                      // 点"解析"后才提取
                 repo.save(e);
             }
+            case "html" -> {
+                // 供应商导出文档常见形态（文件名含空格/括号是正常路径字符，整串直取，不做任何切分）
+                Path p = Paths.get(value.trim());
+                String fn = p.getFileName() == null ? "" : p.getFileName().toString().toLowerCase();
+                if (!p.isAbsolute() || !Files.isRegularFile(p))
+                    throw new IllegalArgumentException("HTML 文件不存在（须为绝对路径）: " + value);
+                if (!(fn.endsWith(".html") || fn.endsWith(".htm"))) throw new IllegalArgumentException("仅接受 .html/.htm 文件");
+                try {
+                    if (Files.size(p) > DocParser.MAX_FETCH_BYTES) throw new IllegalArgumentException("HTML 超过 5MB 上限");
+                } catch (IOException ex) { throw new IllegalArgumentException("HTML 不可读: " + ex.getMessage()); }
+                e.setSource(value.trim());
+                e.setStatus("RAW");                      // 同 pdf：点"解析"后提取转 MD（快速建档流水线自动触发）
+                repo.save(e);
+            }
             case "md" -> {
                 Path p = Paths.get(value.trim());
                 String fn = p.getFileName().toString().toLowerCase();
@@ -156,8 +170,8 @@ public class SupplierKbService {
     /** 解析入口（面板"解析/重解析"按钮）：url+site → 站点爬虫；其余单页解析 */
     public void reparse(Long id) {
         SupplierKbEntry e = require(id);
-        if (!"url".equals(e.getType()) && !"pdf".equals(e.getType()) && !"md".equals(e.getType())) {
-            throw new IllegalArgumentException("仅 url/pdf/md 支持解析");
+        if (!List.of("url", "pdf", "html", "md").contains(e.getType())) {
+            throw new IllegalArgumentException("仅 url/pdf/html/md 支持解析");
         }
         e.setStatus("PENDING");
         e.setError("");
@@ -257,8 +271,11 @@ public class SupplierKbService {
                 if ("url".equals(type)) {
                     mapped = "url";
                 } else {
-                    String low = value.trim().toLowerCase();   // 本地路径按扩展名分流（bug 修复：.md 曾被误当 pdf 拒收）
-                    mapped = (low.endsWith(".md") || low.endsWith(".markdown") || low.endsWith(".txt")) ? "md" : "pdf";
+                    // 本地路径按扩展名分流（bug 修复：.md 曾被误当 pdf 拒收；.html/.htm 曾被误归 pdf）
+                    String low = value.trim().toLowerCase();
+                    if (low.endsWith(".md") || low.endsWith(".markdown") || low.endsWith(".txt")) mapped = "md";
+                    else if (low.endsWith(".html") || low.endsWith(".htm")) mapped = "html";
+                    else mapped = "pdf";
                 }
                 if (repo.existsByKbCodeAndTypeAndSource(kbCode, mapped, value.trim())) continue;
                 if (removedRepo.existsByKbCodeAndTypeAndSource(kbCode, mapped, value.trim())) continue;   // 已删除过的不再带回
@@ -305,7 +322,7 @@ public class SupplierKbService {
         StringBuilder sb = new StringBuilder();
         sb.append("【供应商知识库 · ").append(kbCode).append("】本库条目如下（解析产物为本地 Markdown，含 PDF 页码/原文行号定位）。\n");
         sb.append("规则：① 状态=已解析 的条目优先直接 Read 其 .md 文件，禁止再 WebFetch/重复抓取其来源；"
-                + "② 状态=未解析 的条目需要内容时：url 用 WebFetch 抓 来源、pdf/md 本地路径直接 Read 来源文件，用完建议在产物末尾列出「建议解析入库」；"
+                + "② 状态=未解析 的条目需要内容时：url 用 WebFetch 抓 来源、pdf/html/md 本地路径直接 Read 来源文件，用完建议在产物末尾列出「建议解析入库」；"
                 + "③ 状态=解析失败 的条目在报告中如实标注；④ 发现知识库缺失的新文档/沟通结论，在产物末尾列出「建议入库」清单。\n\n");
         int i = 1;
         for (SupplierKbEntry e : entries) {
@@ -407,6 +424,9 @@ public class SupplierKbService {
             } else if ("pdf".equals(e.getType())) {
                 md = DocParser.pdfToMarkdown(Paths.get(e.getSource()));
                 meta.addProperty("localPdf", true);
+            } else if ("html".equals(e.getType())) {
+                md = htmlFileToMarkdown(Paths.get(e.getSource()));
+                meta.addProperty("localHtml", true);
             } else {
                 return;   // chat/note 不走机析
             }
@@ -423,6 +443,35 @@ public class SupplierKbService {
             log.warn("[SupplierKb] 解析失败: id={}, {}: {}", id, e.getType(), msg);
         }
         repo.save(e);
+    }
+
+    /**
+     * 本地 HTML 文件 → 落库 Markdown：读字节（严格 UTF-8，遇非法字节回退 GBK——导出文档常见 GBK 编码）
+     * → {@link DocParser#htmlToMarkdown} 清洗转换 → 带来源头分块。
+     * 提取正文不足 50 字符按失败处理：JS 壳页面宁可 FAILED 给出指引，不冒充"已解析"。
+     */
+    private static String htmlFileToMarkdown(Path file) throws IOException {
+        long size = Files.size(file);
+        if (size > DocParser.MAX_FETCH_BYTES)
+            throw new IOException("HTML 超过上限 " + (DocParser.MAX_FETCH_BYTES / 1024 / 1024) + "MB: " + size);
+        String md = DocParser.htmlToMarkdown(readHtmlText(file));
+        if (md.strip().length() < 50) {
+            throw new IOException("该 HTML 可能是 JS 动态页（正文为空），建议改用在线文档 URL/站点抓取");
+        }
+        return "> 来源HTML文件: " + file + "\n\n" + DocParser.chunk(md.strip() + "\n");
+    }
+
+    /** 严格 UTF-8 解码（非法字节 REPORT 而非替换为 U+FFFD），失败回退 GBK */
+    private static String readHtmlText(Path file) throws IOException {
+        byte[] bytes = Files.readAllBytes(file);
+        try {
+            return StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(bytes)).toString();
+        } catch (java.nio.charset.CharacterCodingException ex) {
+            return new String(bytes, java.nio.charset.Charset.forName("GBK"));
+        }
     }
 
     /** 产物落盘：{kbRoot}/<kbCode>/<id>-<slug>.md */
@@ -615,9 +664,9 @@ public class SupplierKbService {
     private static String deriveTitle(String type, String value) {
         return switch (type) {
             case "url" -> value.length() > 80 ? value.substring(0, 80) + "…" : value;
-            case "pdf", "md" -> {
+            case "pdf", "md", "html" -> {
                 String name = Paths.get(value).getFileName().toString();
-                yield name.replaceAll("\\.(pdf|md|markdown|txt)$", "");
+                yield name.replaceAll("(?i)\\.(pdf|md|markdown|txt|html|htm)$", "");
             }
             default -> {
                 String first = value.strip().lines().findFirst().orElse("记录");
@@ -630,6 +679,7 @@ public class SupplierKbService {
         return switch (type) {
             case "url" -> "🔗";
             case "pdf" -> "📕";
+            case "html" -> "🌐";
             case "md" -> "📃";
             case "chat" -> "💬";
             default -> "📝";

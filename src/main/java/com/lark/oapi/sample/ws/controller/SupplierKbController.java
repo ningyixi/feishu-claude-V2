@@ -13,7 +13,7 @@ import java.util.List;
 
 /**
  * 供应商知识库 REST API（R3 统一补充入口的后端）：
- * 条目列表 / 新增（url|pdf|chat|note 随时补充）/ 重解析 / 产物 MD 读与人工校正。
+ * 条目列表 / 新增（url|pdf|html|md|chat|note 随时补充）/ 重解析 / 产物 MD 读与人工校正。
  */
 @RestController
 @RequestMapping("/api/supplier-kb")
@@ -36,7 +36,7 @@ public class SupplierKbController {
         return kbService.list(kbCode);
     }
 
-    /** 新增条目：{"type":"url|pdf|md|chat|note","value":"链接/路径/文本","title":"可选","site":false} */
+    /** 新增条目：{"type":"url|pdf|html|md|chat|note","value":"链接/路径/文本","title":"可选","site":false} */
     @PostMapping(value = "/{kbCode}/entries", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> add(@PathVariable String kbCode, @RequestBody String rawBody) {
         try {

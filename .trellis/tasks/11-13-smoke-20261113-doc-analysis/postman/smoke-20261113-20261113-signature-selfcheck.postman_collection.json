@@ -1,0 +1,79 @@
+{
+  "info": {
+    "name": "smoke-20261113-20261113-signature-selfcheck",
+    "description": "签名通道自检（非供应商实测）：用游由文档公开算例值（ak_test_123/sk_test_456/固定 timestamp/nonce）向 postman-echo.com 发送请求，验证 Postman 沙箱 pre-request 签名脚本可逐字节复现文档期望签名 5CDmXPEfEny5efYqpLCTphHC1npnhTcC38qFtji4K9E=（客户端断言 + 服务端回显双确认）。不携带任何真实凭证，不调用供应商接口。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "signature-selfcheck（echo 回显验签）",
+      "event": [
+        {
+          "listen": "prerequest",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "// 与正式集合完全相同的签名实现；timestamp/nonce 用环境变量固定为文档算例值",
+              "const CryptoJS = require('crypto-js');",
+              "const ak = pm.environment.get('ak');",
+              "const sk = pm.environment.get('sk');",
+              "if (!ak || !sk) { throw new Error('环境变量 ak/sk 未配置'); }",
+              "const fullUrl = pm.variables.replaceIn(pm.request.url.toString());",
+              "const qIndex = fullUrl.indexOf('?');",
+              "const rawQueryString = qIndex >= 0 ? fullUrl.substring(qIndex + 1) : '';",
+              "const bodyStr = (pm.request.body && pm.request.body.raw) ? pm.variables.replaceIn(pm.request.body.raw) : '';",
+              "const bodyHash = CryptoJS.SHA256(CryptoJS.enc.Utf8.parse(bodyStr)).toString(CryptoJS.enc.Hex);",
+              "const timestamp = pm.environment.get('timestamp_override') || Date.now().toString();",
+              "const nonce = pm.environment.get('nonce_override') || (Date.now().toString(36) + Math.random().toString(36).slice(2));",
+              "const signingString = ['YOYO-HMAC-SHA256', ak, timestamp, nonce, rawQueryString, bodyHash].join('\\n');",
+              "const signature = CryptoJS.HmacSHA256(signingString, sk).toString(CryptoJS.enc.Base64);",
+              "pm.request.headers.upsert({ key: 'X-Access-Key', value: ak });",
+              "pm.request.headers.upsert({ key: 'X-Timestamp', value: timestamp });",
+              "pm.request.headers.upsert({ key: 'X-Nonce', value: nonce });",
+              "pm.request.headers.upsert({ key: 'X-Signature', value: signature });",
+              "pm.request.headers.upsert({ key: 'Content-Type', value: 'application/json' });",
+              "console.log('signingString=' + JSON.stringify(signingString));",
+              "console.log('X-Signature=' + signature);"
+            ]
+          }
+        },
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"SUPPLIER_EVIDENCE:\" + JSON.stringify({request:{name:pm.info.requestName,method:pm.request.method,url:pm.variables.replaceIn(pm.request.url.toString()),body:pm.request.body ? pm.variables.replaceIn(pm.request.body.toString()) : \"\"},response:{code:pm.response.code,body:pm.response.text()}}), function(){ pm.expect(pm.response.code).to.be.within(100,599); });",
+              "pm.test('SIGNATURE_SELFCHECK: 复现文档算例期望签名 5CDmXPEfEny5efYqpLCTphHC1npnhTcC38qFtji4K9E=', function () {",
+              "    const expected = '5CDmXPEfEny5efYqpLCTphHC1npnhTcC38qFtji4K9E=';",
+              "    const clientSide = pm.request.headers.get('X-Signature');",
+              "    pm.expect(clientSide, 'Postman 沙箱计算的 X-Signature 应等于文档期望值').to.eql(expected);",
+              "    const echoed = JSON.parse(pm.response.text()).headers['x-signature'];",
+              "    pm.expect(echoed, 'postman-echo 服务端回显的 x-signature 应等于文档期望值').to.eql(expected);",
+              "});"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "raw",
+          "raw": "{\"regionId\":\"123\",\"keyword\":\"tokyo\"}",
+          "options": { "raw": { "language": "json" } }
+        },
+        "url": {
+          "raw": "{{base_url}}/post?pageSize=20&pageNum=1",
+          "host": ["{{base_url}}"],
+          "path": ["post"],
+          "query": [
+            { "key": "pageSize", "value": "20" },
+            { "key": "pageNum", "value": "1" }
+          ]
+        },
+        "description": "签名原文不含 host/path，仅含 query 与 body——因此打到 echo 的 /post 与打到供应商端点计算出的签名一致，可安全自检。"
+      },
+      "response": []
+    }
+  ]
+}

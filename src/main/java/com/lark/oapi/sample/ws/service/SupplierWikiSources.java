@@ -59,7 +59,7 @@ public class SupplierWikiSources {
         for(String line:text.split("\n",-1)) {
             String t=line.strip();
             if(t.startsWith("> 来源URL:") || t.startsWith("> 来源MD文件:") || t.startsWith("> 来源入口:")
-                    || t.startsWith("> 来源PDF:") || t.startsWith("> 聊天记录补充") || t.startsWith("> 笔记（")
+                    || t.startsWith("> 来源PDF:") || t.startsWith("> 来源HTML文件:") || t.startsWith("> 聊天记录补充") || t.startsWith("> 笔记（")
                     || (t.startsWith("> 来源:") && t.contains("正文文件"))) continue;
             out.append(line).append('\n');
         }

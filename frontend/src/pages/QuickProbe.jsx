@@ -174,9 +174,9 @@ function CreateTask({ onBack, onCreated, showToast }) {
             onChange={e => setForm(f => ({ ...f, identifier: e.target.value }))} />
         </div>
         <div className="form-group">
-          <label className="form-label">文档来源 *（每行一条：http(s) 链接 / .pdf / .md/.txt 本地路径）</label>
+          <label className="form-label">文档来源 *（每行一条：http(s) 链接 / .pdf / .html / .md/.txt 本地路径）</label>
           <textarea className="form-input" rows={5} style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, resize: 'vertical' }}
-            placeholder={'https://docs.supplier.com/api\nD:\\docs\\supplier-api.pdf'}
+            placeholder={'https://docs.supplier.com/api\nD:\\docs\\supplier-api.pdf\nD:\\supplier-docs\\DIRS\\OTA Default Interface (1).html'}
             value={form.sourcesText} onChange={e => setForm(f => ({ ...f, sourcesText: e.target.value }))} />
           <label style={{ display: 'flex', alignItems: 'center', gap: 5, fontSize: 11.5, color: 'var(--text-dim)', marginTop: 6, cursor: 'pointer' }}
             data-tooltip="对 http(s) 来源启用同站点目录递归抓取：严格同源 + 入口第一级路径，最多 200 页" tabIndex={0}>

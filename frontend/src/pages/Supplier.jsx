@@ -232,7 +232,7 @@ function CreateJob({ onBack, onCreated, showToast }) {
                   <option value="url">🔗 链接</option>
                   <option value="path">📁 本地路径</option>
                 </select>
-                <input className="form-input" style={{ flex: 1 }} placeholder={d.type === 'url' ? 'https://docs.supplier.com/api' : 'D:\\docs\\supplier-api.pdf 或 .md 本地文档'}
+                <input className="form-input" style={{ flex: 1 }} placeholder={d.type === 'url' ? 'https://docs.supplier.com/api' : 'D:\\docs\\supplier-api.pdf、.html 或 .md 本地文档'}
                   value={d.value}
                   onChange={e => setForm(f => ({ ...f, docs: f.docs.map((x, xi) => xi === i ? { ...x, value: e.target.value } : x) }))} />
                 <button className="btn" style={{ flexShrink: 0, padding: '4px 10px' }}
@@ -825,6 +825,7 @@ function CodegenPrepCard({ job, reload, showToast }) {
 const KB_TYPES = {
   url: { icon: '🔗', label: '文档链接', ph: 'https://docs.supplier.com/api（入库后点「解析」抓取转 MD）' },
   pdf: { icon: '📕', label: '本地 PDF', ph: 'D:\\docs\\supplier-api.pdf（入库后点「解析」提取转 MD）' },
+  html: { icon: '🌐', label: '本地 HTML', ph: 'D:\\supplier-docs\\DIRS\\OTA Default Interface (1).html（入库后点「解析」转 MD；路径可含空格/括号）' },
   md: { icon: '📃', label: '本地 MD', ph: 'D:\\docs\\api.md（已是 Markdown，入库即产物，无需解析）' },
   chat: { icon: '💬', label: '聊天记录', ph: '粘贴与供应商对接人的沟通内容，可分多次补充…' },
   note: { icon: '📝', label: '笔记', ph: '随手记的要点、口头约定、会议结论…' },
@@ -902,7 +903,7 @@ export function KbPanel({ kbCode, showToast, readOnly = false }) {
     showToast('已重新排队解析', 'success'); load()
   }
   async function removeEntry(e) {
-    if (!await confirmAction({ kind: shared || /"site"\s*:\s*true/.test(e.metaJson || '') ? 'dialog' : 'popconfirm', title: '删除知识库条目？', body: `删除「${e.title || '该条目'}」？${(e.type === 'url' || e.type === 'pdf') && e.source ? '（来源仍在创建时的文档清单里，但不会再被自动同步回来）' : ''}删除后无法恢复，关联的站点页面也会删除，使用这些材料的 Wiki 将过期。`, confirmLabel: '删除条目' })) return
+    if (!await confirmAction({ kind: shared || /"site"\s*:\s*true/.test(e.metaJson || '') ? 'dialog' : 'popconfirm', title: '删除知识库条目？', body: `删除「${e.title || '该条目'}」？${(e.type === 'url' || e.type === 'pdf' || e.type === 'html') && e.source ? '（来源仍在创建时的文档清单里，但不会再被自动同步回来）' : ''}删除后无法恢复，关联的站点页面也会删除，使用这些材料的 Wiki 将过期。`, confirmLabel: '删除条目' })) return
     const res = await fetch(`/api/supplier-kb/entries/${e.id}`, { method: 'DELETE' })
     const d = await res.json().catch(() => ({}))
     if (!res.ok) return showToast(d.error || '删除失败', 'error')
@@ -986,10 +987,10 @@ export function KbPanel({ kbCode, showToast, readOnly = false }) {
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px', color: 'var(--error)' }}
                   onClick={async () => { await fetch(`/api/supplier-kb/entries/${e.id}/cancel`, { method: 'POST' }); showToast('已请求取消，当前页完成后停止', 'success') }}>✋ 取消</button>
               )}
-              {!readOnly && (e.type === 'url' || e.type === 'pdf') && e.status === 'RAW' && (
+              {!readOnly && (e.type === 'url' || e.type === 'pdf' || e.type === 'html') && e.status === 'RAW' && (
                 <button className="btn btn-primary" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔨 解析</button>
               )}
-              {!readOnly && (e.type === 'url' || e.type === 'pdf') && (e.status === 'DONE' || e.status === 'FAILED') && (
+              {!readOnly && (e.type === 'url' || e.type === 'pdf' || e.type === 'html') && (e.status === 'DONE' || e.status === 'FAILED') && (
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔄 重解析</button>
               )}
               {!readOnly && (

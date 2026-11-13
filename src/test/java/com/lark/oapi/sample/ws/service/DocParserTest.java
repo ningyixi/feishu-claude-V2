@@ -66,6 +66,23 @@ class DocParserTest {
     }
 
     @Test
+    void htmlToMarkdownConvertsHeadingsTablesAndStripsNoise() {
+        String html = """
+                <html><head><title>OTA 接口文档</title><style>body{margin:0}</style></head>
+                <body>
+                <script>window.tracker="GARBAGE_JS";</script>
+                <h1>酒店搜索接口</h1>
+                <p>POST /v2/booking/hotels/search?pageSize=20&amp;pageNum=1，请求体为 JSON。</p>
+                <table><tr><th>字段</th><th>类型</th><th>必填</th></tr><tr><td>regionId</td><td>string</td><td>是</td></tr></table>
+                </body></html>""";
+        String md = DocParser.htmlToMarkdown(html);
+        assertTrue(md.contains("# 酒店搜索接口"), "h1 应转成 ATX 标题: " + md);
+        assertTrue(md.contains("regionId"), "表格内容应保留: " + md);
+        assertFalse(md.contains("GARBAGE_JS"), "script 噪音必须被剥离");
+        assertFalse(md.contains("margin:0"), "style 噪音必须被剥离");
+    }
+
+    @Test
     void setextUnderlinesBecomeAtx() {
         assertEquals("# Title\n\nBody\n", DocParser.setextToAtx("Title\n=====\n\nBody\n"));
         assertEquals("## Sub\n", DocParser.setextToAtx("Sub\n-----\n"));

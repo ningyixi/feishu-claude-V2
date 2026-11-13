@@ -126,6 +126,15 @@ public final class DocParser {
         return new Fetched(header("来源URL", resp.finalUrl()) + chunk(md), title, resp.finalUrl());
     }
 
+    /**
+     * HTML 字符串 → Markdown（无网络、无 baseUrl 的纯函数，供本地 HTML 文件入库解析与单测使用）。
+     * 复用 {@link #cleanHtmlToMarkdown} 同一条清洗管线：Jsoup 剥 script/style/noscript/nav/隐藏元素
+     * 等噪音 → flexmark 转 Markdown → setext 标题归一为 ATX(#)。相对链接无基址可解析时保持原样。
+     */
+    public static String htmlToMarkdown(String html) {
+        return cleanHtmlToMarkdown(html, null);
+    }
+
     /** HTML → 清洗 → Markdown（无网络，纯函数，供单测）。标题最终为 ATX(#)风格，保证分块边界可识别 */
     public static String cleanHtmlToMarkdown(String html, String baseUrl) {
         Document doc = Jsoup.parse(html, baseUrl == null ? "" : baseUrl);
