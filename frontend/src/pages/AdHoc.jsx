@@ -1,0 +1,462 @@
+import Toast from '../components/ui/Toast'
+import { useConfirm, DraftPage } from '../components/ui/FloatingUI'
+import { useState, useEffect, useRef } from 'react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import { useSearchParams } from 'react-router-dom'
+import { useOccupied, KbPanel } from './Supplier'
+
+// ===== 常量 =====
+
+const STEPS = [
+  { key: 'INGEST', label: '入库解析', icon: '📥' },
+  { key: 'WIKI', label: '编译 Wiki', icon: '🕸️' },
+]
+const STEP_STYLE = {
+  DONE: { color: '#16a34a', label: '已完成' },
+  RUNNING: { color: '#3b82f6', label: '进行中' },
+  FAILED: { color: '#dc2626', label: '失败' },
+  PENDING: { color: '#9ca3af', label: '待开始' },
+}
+const WIKI_LABEL = { EMPTY: '尚未编译', BUILDING: '正在编译', READY: '已就绪', FAILED: '编译失败' }
+const TASK_STATUS_LABEL = { INGEST: '入库解析中', WIKI: '编译 Wiki 中', READY: '对话待命' }
+const KB_STATUS = {
+  RAW: { label: '待解析', color: '#6b7280' },
+  PENDING: { label: '排队解析', color: '#6b7280' },
+  PARSING: { label: '解析中', color: '#3b82f6' },
+  DONE: { label: '已解析', color: '#16a34a' },
+  FAILED: { label: '解析失败', color: '#dc2626' },
+}
+const stepOf = (detail, key) => (detail?.steps || []).find(s => s.key === key) || { key, status: 'PENDING' }
+
+// PENDING 行的"已运行"时长（本地时钟算，每次轮询重渲染自然刷新）
+function elapsedLabel(createdAt) {
+  if (!createdAt) return ''
+  const t = new Date(String(createdAt)).getTime()
+  if (Number.isNaN(t)) return ''
+  const s = Math.max(0, Math.floor((Date.now() - t) / 1000))
+  if (s < 60) return `已运行 ${s} 秒`
+  return `已运行 ${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, '0')} 秒`
+}
+
+// ===== 主页面（左侧任务列表 + 右侧表单/详情） =====
+
+export default function AdHoc() {
+  const [route, setRoute] = useSearchParams()
+  const taskId = /^\d+$/.test(route.get('task') || '') ? Number(route.get('task')) : null
+  const creating = route.get('view') === 'create'
+  const [toast, setToast] = useState(null)
+
+  function showToast(msg, type) {
+    setToast({ msg, type })
+    setTimeout(() => setToast(null), 3500)
+  }
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: '1rem', flexWrap: 'wrap' }}>
+        <div style={{ flex: 1, minWidth: 240 }}>
+          <h1 className="page-title" style={{ margin: 0 }}>临时需求</h1>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
+            建任务传关联文档，自动 入库解析 → 编译 LLM Wiki；对话框全程可用（Wiki 就绪后每轮自动带上 Wiki 入口）。与飞书私聊绑定实例是同一个会话。
+          </div>
+        </div>
+        {!creating && <button className="btn btn-primary" onClick={() => setRoute({ view: 'create' })}>+ 新建任务</button>}
+      </div>
+
+      <div style={{ display: 'flex', gap: 14, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <div style={{ flex: '0 0 250px', minWidth: 220 }}>
+          <TaskListPane selectedId={creating ? null : taskId}
+            onSelect={id => setRoute({ task: String(id) })}
+            onCreate={() => setRoute({ view: 'create' })}
+            showToast={showToast} />
+        </div>
+        <div style={{ flex: '1 1 480px', minWidth: 0 }}>
+          {creating && <CreateTask onDone={id => setRoute(id ? { task: String(id) } : {})} showToast={showToast} />}
+          {!creating && taskId && <TaskDetail key={taskId} taskId={taskId} onDeleted={() => setRoute({})} showToast={showToast} />}
+          {!creating && !taskId && (
+            <div className="card" style={{ textAlign: 'center', color: 'var(--text-dim)', padding: '3rem' }}>
+              从左侧选择一个任务，或点「+ 新建任务」：贴上关联文档，流水线自动推进；任何时候都能在对话框说话，Wiki 就绪后每轮自动带上 Wiki 入口。
+            </div>
+          )}
+        </div>
+      </div>
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
+    </div>
+  )
+}
+
+// ===== 左侧任务列表 =====
+
+function TaskListPane({ selectedId, onSelect, onCreate, showToast }) {
+  const confirmAction = useConfirm()
+  const [tasks, setTasks] = useState([])
+
+  const load = () => fetch('/api/ad-hoc-tasks').then(r => r.ok ? r.json() : []).then(rows => { if (Array.isArray(rows)) setTasks(rows) }).catch(() => {})
+  useEffect(() => {
+    load()
+    const t = setInterval(load, 5000)
+    return () => clearInterval(t)
+  }, [])
+
+  async function remove(task, e) {
+    e.stopPropagation()
+    if (!await confirmAction({ kind: 'popconfirm', title: '删除临时需求任务？', body: `删除任务「${task.name}」？任务记录、对话流水与专属知识库条目将清除，删除后无法恢复。`, confirmLabel: '删除任务' })) return
+    const res = await fetch(`/api/ad-hoc-tasks/${task.id}`, { method: 'DELETE' })
+    if (!res.ok) { const d = await res.json().catch(() => ({})); return showToast(d.error || '删除失败', 'error') }
+    showToast('已删除', 'success')
+    load()
+  }
+
+  return (
+    <div className="card" style={{ padding: 10 }}>
+      <div style={{ fontSize: 12.5, fontWeight: 700, padding: '4px 6px 8px' }}>任务（{tasks.length}）</div>
+      {tasks.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '8px 6px' }}>还没有任务，点右上「+ 新建任务」。</div>}
+      {tasks.map(t => {
+        const ready = t.status === 'READY'
+        const failed = !!t.error
+        return (
+          <div key={t.id} onClick={() => onSelect(t.id)}
+            style={{ cursor: 'pointer', padding: '8px 10px', borderRadius: 8, marginBottom: 4, background: selectedId === t.id ? 'rgba(37,99,235,.08)' : undefined, border: selectedId === t.id ? '1px solid rgba(37,99,235,.3)' : '1px solid transparent' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontSize: 13, fontWeight: 600, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {ready ? '✅' : failed ? '⚠️' : '🛰️'} {t.name}
+              </span>
+              <button className="btn" style={{ fontSize: 11, padding: '1px 8px', color: 'var(--error)', flexShrink: 0 }} onClick={e => remove(t, e)}>删除</button>
+            </div>
+            <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 3 }}>
+              {failed ? <span style={{ color: 'var(--error)' }}>失败，可重试本段</span> : (TASK_STATUS_LABEL[t.status] || t.status)}
+              {!ready && !failed && t.running && <span className="spinner" style={{ width: 8, height: 8, marginLeft: 6 }} />}
+              <span style={{ marginLeft: 6 }}>{String(t.updatedAt || '').replace('T', ' ').substring(5, 16)}</span>
+            </div>
+          </div>
+        )
+      })}
+      <button className="btn" style={{ width: '100%', marginTop: 6, fontSize: 12 }} onClick={onCreate}>+ 新建任务</button>
+    </div>
+  )
+}
+
+// ===== 新建任务表单（任务名 / 关联文档多行 / 绑定实例） =====
+
+function CreateTask({ onDone, showToast }) {
+  const pageFormRef = useRef(null)
+  const occupied = useOccupied()
+  const [instances, setInstances] = useState([])
+  const [form, setForm] = useState({ name: '', instanceId: '', docSources: '' })
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    fetch('/api/instances').then(r => r.json()).then(setInstances).catch(() => {})
+  }, [])
+
+  async function submit() {
+    if (!form.instanceId) return showToast('请绑定执行实例', 'error')
+    const sources = form.docSources.split('\n').map(s => s.trim()).filter(Boolean)
+    if (sources.length === 0) return showToast('请至少填写 1 条关联文档', 'error')
+    setSaving(true)
+    try {
+      const res = await fetch('/api/ad-hoc-tasks', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: form.name.trim() || null, instanceId: Number(form.instanceId), docSources: form.docSources }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || '创建失败')
+      showToast('任务已创建，流水线开始推进', 'success')
+      pageFormRef.current?.commit(); onDone(data.id)
+    } catch (e) {
+      showToast(e.message, 'error')
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <DraftPage ref={pageFormRef}><div className="card">
+      <h2 style={{ fontSize: 15, fontWeight: 700, margin: '0 0 12px' }}>🛰️ 新建临时需求任务</h2>
+      <div className="form-group">
+        <label className="form-label">任务名（选填，留空自动生成）</label>
+        <input className="form-input" placeholder="如：某供应商历史接口字段变更" value={form.name}
+          onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
+      </div>
+      <div className="form-group">
+        <label className="form-label">关联文档 *（每行一条：http(s) 链接 / .pdf / .html / .md/.txt 本地路径）</label>
+        <textarea className="form-input" rows={6} style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, resize: 'vertical' }}
+          placeholder={'https://docs.supplier.com/api\nD:\\docs\\supplier-api.pdf'}
+          value={form.docSources} onChange={e => setForm(f => ({ ...f, docSources: e.target.value }))} />
+      </div>
+      <div className="form-group">
+        <label className="form-label">绑定实例 *（Wiki 编译与后续对话都在这台实例的主会话上，与飞书私聊同会话）</label>
+        <select className="form-input" value={form.instanceId} onChange={e => setForm(f => ({ ...f, instanceId: e.target.value }))}>
+          <option value="">（请选择）</option>
+          {instances.filter(i => i.enabled).map(i => {
+            const occ = occupied[String(i.id)]
+            return (
+              <option key={i.id} value={i.id} disabled={!!occ}>
+                {occ
+                  ? `🔒 ${i.name || `#${i.id}`}（已被员工 ${occ.label} 独占绑定）`
+                  : `${i.name || `#${i.id}`}${i.claudeModel ? ` (${i.claudeModel})` : ''}`}
+              </option>
+            )
+          })}
+        </select>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 8 }}>
+        <button className="btn" onClick={() => onDone(null)}>取消</button>
+        <button className="btn btn-primary" onClick={submit} disabled={saving}>{saving ? '创建中…' : '🚀 创建并启动'}</button>
+      </div>
+    </div></DraftPage>
+  )
+}
+
+// ===== 任务详情（两段步骤条 + Wiki 状态卡 + 对话框 + 只读知识库） =====
+
+function TaskDetail({ taskId, onDeleted, showToast }) {
+  const confirmAction = useConfirm()
+  const [detail, setDetail] = useState(null)
+  const [notFound, setNotFound] = useState(false)
+  const pollRef = useRef(null)
+
+  const load = () => fetch(`/api/ad-hoc-tasks/${taskId}`)
+    .then(async r => ({ ok: r.ok, data: await r.json().catch(() => ({})) }))
+    .then(({ ok, data }) => { if (ok) setDetail(data); else setNotFound(true) })
+    .catch(() => {})
+
+  useEffect(() => {
+    // 任务已删除/不存在：停表，不再对着 404 无限轮询（父级按 taskId remount，切换任务会重新起表）
+    if (notFound) return
+    setDetail(null)
+    load()
+    // 推进中 3s 轮询进度；就绪后放缓（对话进度由 ChatPanel 自己轮询）
+    pollRef.current = setInterval(load, detail && detail.status === 'READY' ? 10000 : 3000)
+    return () => clearInterval(pollRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId, notFound, detail && detail.status === 'READY'])
+
+  async function retryStage() {
+    const res = await fetch(`/api/ad-hoc-tasks/${taskId}/retry-stage`, { method: 'POST' })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) return showToast(d.error || '重试失败', 'error')
+    showToast('已从本段续跑', 'success')
+    setDetail(d)
+  }
+  async function remove() {
+    if (!await confirmAction({ kind: 'popconfirm', title: '删除临时需求任务？', body: `删除任务「${detail.name}」？任务记录、对话流水与专属知识库条目将清除，删除后无法恢复。`, confirmLabel: '删除任务' })) return
+    const res = await fetch(`/api/ad-hoc-tasks/${taskId}`, { method: 'DELETE' })
+    if (!res.ok) { const d = await res.json().catch(() => ({})); return showToast(d.error || '删除失败', 'error') }
+    showToast('已删除', 'success')
+    onDeleted()
+  }
+
+  if (notFound) return <div className="card">任务不存在或已删除</div>
+  if (!detail) return <div className="card">加载中…</div>
+
+  const ready = detail.status === 'READY'
+  const failedStep = detail.error ? (detail.steps || []).find(s => s.status === 'FAILED') : null
+  const wiki = detail.wiki || {}
+
+  return (
+    <div>
+      {/* 头部 */}
+      <div className="card" style={{ padding: '12px 18px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 16, fontWeight: 700 }}>{ready ? '✅' : '🛰️'} {detail.name}</span>
+          <span className="hook-badge">{detail.kbCode}</span>
+          {detail.instanceName && <span className="hook-badge dim">实例：{detail.instanceName}</span>}
+          {detail.running && !ready && <span className="hook-badge" style={{ color: '#3b82f6' }}><span className="spinner" style={{ width: 9, height: 9, marginRight: 5 }} />流水线推进中</span>}
+          {ready && <span className="hook-badge" style={{ color: '#16a34a', background: 'rgba(22,163,74,.1)', borderColor: 'rgba(22,163,74,.3)' }}>💬 对话待命</span>}
+          <div style={{ flex: 1 }} />
+          <button className="btn" style={{ fontSize: 11, padding: '2px 10px', color: 'var(--error)' }} onClick={remove}>删除任务</button>
+        </div>
+      </div>
+
+      {/* 两段步骤条 */}
+      <div className="card" style={{ marginTop: 14, padding: '16px 20px' }}>
+        <div style={{ display: 'flex', alignItems: 'flex-start' }}>
+          {STEPS.map((s, i) => {
+            const st = stepOf(detail, s.key)
+            const style = STEP_STYLE[st.status] || STEP_STYLE.PENDING
+            return (
+              <div key={s.key} style={{ display: 'flex', alignItems: 'flex-start', flex: i < STEPS.length - 1 ? 1 : 'none' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', width: 92 }}>
+                  <span className="wf-dot" style={{ background: st.status === 'DONE' ? '#16a34a' : st.status === 'FAILED' ? '#dc2626' : st.status === 'RUNNING' ? '#3b82f6' : '#d1d5db', color: '#fff', boxShadow: st.status === 'RUNNING' ? '0 0 0 3px rgba(59,130,246,.22)' : undefined }}>
+                    {st.status === 'DONE' ? '✓' : st.status === 'FAILED' ? '✕' : st.status === 'RUNNING' ? '' : s.icon}
+                    {st.status === 'RUNNING' && <span className="spinner" style={{ width: 9, height: 9, borderWidth: 1.5 }} />}
+                  </span>
+                  <div style={{ fontSize: 12, fontWeight: st.status === 'RUNNING' || st.status === 'FAILED' ? 700 : 500, marginTop: 6, color: st.status === 'PENDING' ? 'var(--text-dim)' : 'var(--text)' }}>{s.label}</div>
+                  <div style={{ fontSize: 11, color: style.color }}>{style.label}</div>
+                </div>
+                {i < STEPS.length - 1 && <span style={{ flex: 1, height: 2, background: 'var(--border, #e5e7eb)', marginTop: 11, minWidth: 24 }} />}
+              </div>
+            )
+          })}
+        </div>
+
+        {/* 失败原因 + 重试本段（A5） */}
+        {failedStep && (
+          <div style={{ marginTop: 14, padding: '10px 12px', border: '1px solid rgba(220,38,38,.4)', background: 'rgba(220,38,38,.06)', borderRadius: 8 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: '#dc2626' }}>
+              ⚠️ 「{STEPS.find(s => s.key === failedStep.key)?.label}」段失败
+            </div>
+            <div style={{ fontSize: 12.5, color: 'var(--text)', marginTop: 6, whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{detail.error}</div>
+            <button className="btn btn-primary" style={{ fontSize: 12, padding: '4px 14px', marginTop: 8 }} onClick={retryStage}>
+              🔄 重试本段
+            </button>
+          </div>
+        )}
+
+        {/* 当前段实时进度 */}
+        {!ready && !failedStep && <RunningPanel detail={detail} />}
+      </div>
+
+      {/* Wiki 状态卡（版本/来源数/页数） */}
+      <div className="card" style={{ marginTop: 14, padding: '14px 20px' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 14, fontWeight: 700 }}>🕸️ LLM Wiki</span>
+          <span className="hook-badge" style={wiki.status === 'READY' ? { color: '#16a34a', background: 'rgba(22,163,74,.1)', borderColor: 'rgba(22,163,74,.3)' } : undefined}>
+            {WIKI_LABEL[wiki.status] || wiki.status || '—'}
+          </span>
+          {wiki.revision != null && <span className="hook-badge dim">版本 #{wiki.revision}</span>}
+          {wiki.sourceCount != null && <span className="hook-badge dim">来源 {wiki.sourceCount} 个</span>}
+          {wiki.pageCount != null && wiki.status === 'READY' && <span className="hook-badge dim">页面 {wiki.pageCount} 页</span>}
+          {wiki.status === 'BUILDING' && wiki.phase && <span style={{ fontSize: 12, color: '#3b82f6' }}>{wiki.phase}</span>}
+          {wiki.status === 'FAILED' && wiki.error && <span style={{ fontSize: 12, color: 'var(--error)', wordBreak: 'break-all' }}>{wiki.error}</span>}
+        </div>
+      </div>
+
+      {/* 对话框：任何阶段都可说话——Wiki 未就绪时本轮不带 Wiki 入口，只带一行阶段说明 */}
+      <ChatPanel taskId={taskId} showToast={showToast} wikiReady={ready} taskStatus={detail.status} />
+
+      {/* 知识库条目（只读） */}
+      <KbPanel kbCode={detail.kbCode} showToast={showToast} readOnly />
+    </div>
+  )
+}
+
+// ===== 当前段实时进度 =====
+
+function RunningPanel({ detail }) {
+  const running = (detail.steps || []).find(s => s.status === 'RUNNING')
+  if (!running) return null
+
+  if (running.key === 'INGEST') {
+    const entries = detail.kbEntries || []
+    const parsing = entries.filter(e => ['RAW', 'PENDING', 'PARSING'].includes(e.status))
+    return (
+      <div style={{ marginTop: 14 }}>
+        <div style={{ fontSize: 12.5, color: '#3b82f6' }}>
+          <span className="spinner" style={{ width: 9, height: 9, marginRight: 6 }} />
+          {parsing.length > 0
+            ? `正在入库解析关联文档（${entries.length - parsing.length}/${entries.length} 就绪）…`
+            : '材料已就绪，即将开始编译 Wiki…'}
+        </div>
+        <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 8 }}>
+          {entries.map(e => {
+            const st = KB_STATUS[e.status] || { label: e.status, color: '#6b7280' }
+            return (
+              <span key={e.id} className="hook-badge" style={{ color: st.color, background: st.color + '14', borderColor: st.color + '40' }}
+                data-tooltip={e.source || e.title} tabIndex={0}>
+                {(['PARSING', 'PENDING'].includes(e.status)) && <span className="spinner" style={{ width: 8, height: 8, marginRight: 4, borderWidth: 1.5 }} />}
+                {(e.title || `条目#${e.id}`).slice(0, 24)} · {st.label}
+              </span>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
+
+  // WIKI 段
+  const wiki = detail.wiki || {}
+  return (
+    <div style={{ marginTop: 14, fontSize: 12.5, color: '#3b82f6' }}>
+      <span className="spinner" style={{ width: 9, height: 9, marginRight: 6 }} />
+      正在编译 LLM Wiki…
+      {wiki.phase ? `（${wiki.phase}）` : wiki.status ? `（${WIKI_LABEL[wiki.status] || wiki.status}）` : ''}
+    </div>
+  )
+}
+
+// ===== 对话框（与绑定实例主会话随问随答：实例空闲立即回答；真有一轮在跑才排队，忙完即答） =====
+
+function ChatPanel({ taskId, showToast, wikiReady = true, taskStatus = '' }) {
+  const [msgs, setMsgs] = useState([])
+  const [q, setQ] = useState('')
+  const [sending, setSending] = useState(false)
+  const bodyRef = useRef(null)
+
+  const load = () => fetch(`/api/ad-hoc-tasks/${taskId}/chat`).then(r => r.ok ? r.json() : []).then(setMsgs).catch(() => {})
+  useEffect(() => {
+    load()
+    const hasPending = msgs.some(m => m.status === 'PENDING')
+    const t = setInterval(load, hasPending ? 2500 : 8000)
+    return () => clearInterval(t)
+  }, [taskId, msgs.some(m => m.status === 'PENDING')])
+  useEffect(() => {
+    if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
+  }, [msgs.length, msgs[msgs.length - 1]?.text?.length])
+
+  async function send() {
+    if (!q.trim() || sending) return
+    setSending(true)
+    const res = await fetch(`/api/ad-hoc-tasks/${taskId}/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q }),
+    })
+    const d = await res.json().catch(() => ({}))
+    setSending(false)
+    if (!res.ok) return showToast(d.error || '发送失败', 'error')
+    setQ('')
+    load()
+  }
+
+  return (
+    <div className="card" style={{ marginTop: 14, padding: '14px 20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 14, fontWeight: 700 }}>💬 对话框</span>
+        {!wikiReady && <span className="hook-badge" style={{ color: '#b45309', background: 'rgba(245,158,11,.12)', borderColor: 'rgba(245,158,11,.4)' }}>Wiki 未就绪 · 仍可对话</span>}
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          {wikiReady
+            ? '直接吩咐临时小改——每轮自动带上本任务 Wiki 入口；与飞书私聊同一会话上下文，实例空闲立即回答，正忙时排队、忙完即答（是否排队以下方实时进度为准）'
+            : `现在就能说，不用等流水线——流水线仍在「${TASK_STATUS_LABEL[taskStatus] || taskStatus || '推进中'}」，本轮不带 Wiki 入口，需要引用文档请直接给路径。与飞书私聊同一会话上下文，实例空闲立即回答，正忙时排队、忙完即答。`}
+        </span>
+      </div>
+      <div ref={bodyRef} style={{ maxHeight: 360, overflowY: 'auto', marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        {msgs.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '12px 0', textAlign: 'center' }}>（还没有对话 — 例如："某供应商把历史某个接口的字段改了，帮我改一下"）</div>}
+        {msgs.map(m => m.role === 'user' ? (
+          <div key={m.id} style={{ alignSelf: 'flex-end', maxWidth: '78%', background: 'var(--accent,#2563eb)', color: '#fff', borderRadius: '10px 10px 2px 10px', padding: '7px 11px', fontSize: 12.5, whiteSpace: 'pre-wrap' }}>
+            {m.text}
+            <div style={{ fontSize: 10, opacity: .65, marginTop: 3 }}>{String(m.createdAt).substring(11, 16)}</div>
+          </div>
+        ) : (
+          <div key={m.id} style={{ alignSelf: 'flex-start', maxWidth: '86%', background: 'rgba(107,114,128,.1)', border: '1px solid var(--border,#e5e7eb)', borderRadius: '10px 10px 10px 2px', padding: '7px 11px', fontSize: 12.5 }}>
+            {m.status === 'PENDING' ? (
+              m.text ? (
+                // 后端回写的实时进度摘要 — 灰色小字 + spinner，不走 ReactMarkdown（防止误认成最终答案）
+                <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
+                  <span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />
+                  {m.text}
+                </span>
+              ) : (
+                <span style={{ color: 'var(--text-dim)' }}><span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />处理中…</span>
+              )
+            ) : (
+              <div className="md-body" style={{ color: m.status === 'FAILED' ? 'var(--error)' : 'var(--text)' }}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
+              </div>
+            )}
+            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>
+              {String(m.createdAt).substring(11, 16)}
+              {m.status === 'PENDING' && elapsedLabel(m.createdAt) ? ` · ${elapsedLabel(m.createdAt)}` : ''}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <input className="form-input" style={{ flex: 1 }} placeholder="吩咐临时小改，例如：某供应商把历史接口字段改了，帮我改一下…（回车发送）"
+          value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') send() }} />
+        <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={!q.trim() || sending} onClick={send}>
+          {sending ? '发送中…' : '📤 发送'}
+        </button>
+      </div>
+    </div>
+  )
+}
