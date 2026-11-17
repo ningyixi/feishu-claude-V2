@@ -215,6 +215,94 @@ public class SupplierJobService {
         } catch (Exception e) { log.warn("[SupplierJob] 孤儿节点清扫失败: {}", e.getMessage()); }
     }
 
+    // ===== 僵尸占用解除（11-17-unblock-instance-chat S3/S4） =====
+
+    /**
+     * S3 解除占用：僵尸 RUNNING 的人工第二出口（R2 死锁三角的 ②runNode 拒重跑 ③无打断入口）——
+     * 节点 RUNNING→PENDING，note 追加留痕（含操作时间），随即可重新执行（AC3）；会话有活跃轮次则
+     * <b>落库后</b>中止（<b>用户显式点按</b>触发的唯一打断通道；S5 禁止的是"自动"打断）。
+     * <p>
+     * quick 任务的 phase 记账不由本方法触碰：QuickProbeService.runAgentStage 的轮询探针看到节点
+     * 离开 RUNNING 且 note 非空时，会把 quick_error 置为本段失败原因（可从该段重试），记账自洽——
+     * 自洽的前提是 {@link #applyNodeReply} 的陈旧回写守卫保住本方法写入的 note，两者不可拆开。
+     *
+     * @return true=顺带中止了实例的活跃轮次
+     */
+    public boolean releaseNode(Long jobId, String nodeId) {
+        SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
+        SupplierJobNode n = nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
+                .orElseThrow(() -> new IllegalArgumentException("节点不存在: " + nodeId));
+        if (!"RUNNING".equals(n.getStatus())) throw new IllegalArgumentException("节点不在执行中，无需解除占用");
+        TerminalSession session = job.getInstanceId() == null ? null : claudeCodeService.getSession(job.getInstanceId());
+        boolean aborted = session != null && session.isTurnActive();
+        n.setStatus("PENDING");
+        n.setPendingQuestion("");
+        n.setProgress(""); n.setThinking("");
+        n.setNote(appendNote(n.getNote(), LocalDateTime.now() + " 手动解除占用（RUNNING→PENDING"
+                + (aborted ? "，已中止实例活跃轮次" : "") + "）"));
+        nodeRepo.save(n);
+        // 顺序硬约束：先落库再中止。中止会立刻唤醒原派发线程的陈旧回写（applyNodeReply "已停止"），
+        // 回写侧以"DB 行仍为 RUNNING"为所有权守卫——先落 PENDING 才能保证守卫必然拦截，
+        // 否则两边并发写库顺序不定，留痕会被抹掉、artifact 会被写成"已停止"垃圾。
+        if (aborted) session.abortCurrentTurn();
+        log.warn("[SupplierJob] 节点解除占用: job={}, node={}, 中止活跃轮次={}", jobId, nodeId, aborted);
+        return aborted;
+    }
+
+    /** note 追加留痕纯函数：旧内容非空则换行追加，不覆盖历史 */
+    static String appendNote(String oldNote, String line) {
+        return oldNote == null || oldNote.isBlank() ? line : oldNote.stripTrailing() + "\n" + line;
+    }
+
+    /** S4 僵尸巡检阈值（分钟）：RUNNING+无待答+会话空闲持续达到该时长即自动降级；-Dsupplier.zombieNodeMinutes 可覆盖 */
+    @org.springframework.beans.factory.annotation.Value("${supplier.zombieNodeMinutes:10}")
+    private long zombieNodeMinutes = 10;
+
+    /**
+     * S4 僵尸降级判定纯函数（可单测，不测时钟）：四个条件同时成立才降级——
+     * RUNNING、无待答问题（pq 空白）、实例会话无活跃轮次、空闲时长 ≥ 阈值。
+     * <b>会话活跃时绝不降级</b>（AC4），阈值边界取"≥"。
+     */
+    static boolean shouldReleaseZombie(String status, String pendingQuestion, boolean turnActive,
+                                       long idleMinutes, long thresholdMinutes) {
+        if (!"RUNNING".equals(status)) return false;
+        if (pendingQuestion != null && !pendingQuestion.isBlank()) return false;
+        if (turnActive) return false;
+        return idleMinutes >= thresholdMinutes;
+    }
+
+    /**
+     * S4 僵尸巡检（定时，默认 2 分钟一轮）：answerNode 答复卡点后 pq 被清空但该轮未回写 →
+     * 节点永久停 RUNNING（R2 僵尸），答复入口消失且 runNode 拒绝重跑。本巡检把满足
+     * {@link #shouldReleaseZombie} 的节点自动打回 PENDING 并 note 留痕「已自动解除僵尸占用」。
+     * <p>
+     * 空闲锚点 = 节点心跳列 updated_at（progress/thinking 每次变化都刷新），缺失退回 started_at，
+     * 都缺失则跳过（无法判定持续时长，宁可不降级）。quick 任务 phase 记账同 releaseNode 说明。
+     */
+    @org.springframework.scheduling.annotation.Scheduled(fixedDelayString = "${supplier.zombieNodeSweepMs:120000}")
+    public void sweepZombieRunningNodes() {
+        try {
+            for (SupplierJobNode n : nodeRepo.findByStatus("RUNNING")) {
+                if (!n.getPendingQuestion().isBlank()) continue;   // 卡点待答不是僵尸（等用户答复）
+                Long instanceId = jobRepo.findById(n.getJobId()).map(SupplierJob::getInstanceId).orElse(null);
+                TerminalSession session = instanceId == null ? null : claudeCodeService.getSession(instanceId);
+                boolean turnActive = session != null && session.isTurnActive();
+                LocalDateTime anchor = n.getUpdatedAt() != null ? n.getUpdatedAt() : n.getStartedAt();
+                if (anchor == null) continue;
+                long idleMinutes = java.time.Duration.between(anchor, LocalDateTime.now()).toMinutes();
+                if (!shouldReleaseZombie(n.getStatus(), n.getPendingQuestion(), turnActive, idleMinutes, zombieNodeMinutes)) continue;
+                n.setStatus("PENDING");
+                n.setPendingQuestion(""); n.setProgress(""); n.setThinking("");
+                n.setNote(appendNote(n.getNote(), LocalDateTime.now() + " 已自动解除僵尸占用（RUNNING 无待答问题且实例会话空闲超 "
+                        + idleMinutes + " 分钟）"));
+                nodeRepo.save(n);
+                log.warn("[SupplierJob] 僵尸 RUNNING 节点已自动解除: job={}, node={}, 空闲{}分钟", n.getJobId(), n.getNodeId(), idleMinutes);
+            }
+        } catch (Exception e) {
+            log.warn("[SupplierJob] 僵尸节点巡检失败（下轮再试）: {}", e.getMessage());
+        }
+    }
+
     // ===== 三期迁移（11-03-supplier-flow-polish-p3，幂等） =====
 
     static final String N45_TITLE = "开发期沟通 → 提示词重写";
@@ -588,6 +676,10 @@ public class SupplierJobService {
             } catch (Exception e) {
                 if (knowledgeService != null) knowledgeService.finish(auditId, usage.get(), null);
                 log.error("[SupplierJob] 节点执行异常: job={}, node={}", jobId, nodeId, e);
+                if (!nodeWritebackOwned(jobId, nodeId)) {
+                    log.warn("[SupplierJob] 节点已被解除占用/接管，丢弃陈旧异常回写: job={}, node={}", jobId, nodeId);
+                    return;
+                }
                 n.setNote("执行异常: " + e.getMessage());
                 n.setStatus("PENDING");
                 n.setProgress("");
@@ -656,8 +748,20 @@ public class SupplierJobService {
         } catch (Exception ignore) { }
     }
 
-    /** 统一处理节点回复：❌→note；行首【卡点】→挂起待答；正常→artifact 落库回 PENDING（等玩家点完成） */
-    private void applyNodeReply(SupplierJobNode n, String reply) {
+    /**
+     * 统一处理节点回复：❌→note；行首【卡点】→挂起待答；正常→artifact 落库回 PENDING（等玩家点完成）。
+     * <p>
+     * 包级可见供单测。<b>陈旧回写守卫（11-17-unblock-instance-chat S3/S4）</b>：n 是派发时的旧实体；
+     * 节点被 releaseNode（含中止活跃轮次）/僵尸巡检/删档接管后，DB 行已离开 RUNNING，此时旧轮次的
+     * 回写（abort 返回"已停止"）必须整体丢弃——否则会抹掉解除占用留痕、把"已停止"写进 artifact，
+     * QuickProbeService 的轮询会把 note 空+artifact 非空的段误判为<b>成功</b>并带垃圾工件续跑下一段。
+     */
+    void applyNodeReply(SupplierJobNode n, String reply) {
+        if (!nodeWritebackOwned(n.getJobId(), n.getNodeId())) {
+            log.warn("[SupplierJob] 节点已被解除占用/接管，丢弃陈旧回写: job={}, node={}, 回复{}字",
+                    n.getJobId(), n.getNodeId(), reply == null ? 0 : reply.length());
+            return;
+        }
         if (reply != null && reply.startsWith("❌")) {
             n.setNote("执行失败: " + reply);
             n.setStatus("PENDING");
@@ -676,6 +780,21 @@ public class SupplierJobService {
         }
         if (!"RUNNING".equals(n.getStatus())) { n.setProgress(""); n.setThinking(""); }   // 只有卡点挂起态保留最后进度
         nodeRepo.save(n);
+    }
+
+    /**
+     * 回写所有权守卫：DB 行仍为 RUNNING = 本轮（正常完成/❌失败/【卡点】）回写仍拥有该节点；
+     * 已被解除占用、巡检降级或删档（行不存在）→ false，陈旧回写整体丢弃。
+     * 读库失败时放行回写（宁可覆盖也不丢真实产物——解除留痕可再补，artifact 丢了要重跑整轮）。
+     */
+    private boolean nodeWritebackOwned(Long jobId, String nodeId) {
+        try {
+            return nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
+                    .map(f -> "RUNNING".equals(f.getStatus())).orElse(false);
+        } catch (Exception e) {
+            log.warn("[SupplierJob] 回写守卫读库失败，按仍持有处理: job={}, node={}, {}", jobId, nodeId, e.getMessage());
+            return true;
+        }
     }
 
     /** 玩家确认节点完成：蓝→绿，推进当前节点。带写代码门禁的节点必须先交齐会议文档+KV配置 */

@@ -307,6 +307,7 @@ function safeParseNodes(json) {
 // ===== 执行视图 =====
 
 function GameView({ jobId, onBack, showToast }) {
+  const confirmAction = useConfirm()
   const [managed, setManaged] = useState(false)
   const occupied = useOccupied()
   const [job, setJob] = useState(null)
@@ -364,6 +365,16 @@ function GameView({ jobId, onBack, showToast }) {
     if (!res.ok) return showToast(data.error || '答复发送失败', 'error')
     setSteerAnswer('')
     showToast('已答复，实例将继续执行', 'success')
+    load()
+  }
+  // S3 解除占用（11-17-unblock-instance-chat）：僵尸 RUNNING 的人工出口。
+  // 刻意不受 managed 限制——引擎托管的工作同样要能解锁（后端该端点也不走托管闸门）
+  async function releaseNode(nodeId) {
+    if (!await confirmAction({ kind: 'popconfirm', title: '解除占用？', body: '节点将从「执行中」回到待执行，随后可立即重新执行。若实例仍在跑这一轮，会先中止它（该轮未完成的输出将丢失）。', confirmLabel: '解除占用' })) return
+    const res = await fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/release`, { method: 'POST' })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) return showToast(data.error || '解除失败', 'error')
+    showToast(data.abortedTurn ? '已解除占用（实例活跃轮次已中止），可重新执行该节点' : '已解除占用，可重新执行该节点', 'success')
     load()
   }
   async function completeNode(nodeId) {
@@ -522,7 +533,11 @@ function GameView({ jobId, onBack, showToast }) {
                       {cur.status === 'RUNNING' ? '执行中…' : (cur.artifact ? '🔄 带指示重跑' : '▶ 让实例执行')}
                     </button>
                   </div>
-                  {cur.pendingQuestion && (
+                  {/* S2 入口与状态解耦（11-17-unblock-instance-chat）：RUNNING 时卡点区始终渲染——
+                      有 pq 显示问题原文+答复框；无 pq 显示"执行中（无待答问题）"+解除占用入口，
+                      答复入口不再因 pendingQuestion 被清空而消失（R2 僵尸死锁的前端一角） */}
+                  {(cur.pendingQuestion || cur.status === 'RUNNING') && (
+                    cur.pendingQuestion ? (
                     <div style={{ marginTop: 10, padding: '10px 12px', border: '1px solid #f59e0b', background: 'rgba(245,158,11,.08)', borderRadius: 8 }}>
                       <div style={{ fontSize: 12, fontWeight: 700, color: '#b45309', marginBottom: 6 }}>❓ 实例遇到卡点，答复后将注入原会话继续执行</div>
                       <div className="md-body" style={{ fontSize: 12.5, maxHeight: 220, overflowY: 'auto' }}>
@@ -538,6 +553,17 @@ function GameView({ jobId, onBack, showToast }) {
                           onClick={() => answerNode(cur.nodeId)}>📤 发送答复</button>
                       </div>
                     </div>
+                    ) : (
+                    <div style={{ marginTop: 10, padding: '10px 12px', border: '1px solid #06b6d4', background: 'rgba(6,182,212,.06)', borderRadius: 8 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, color: '#0e7490' }}>⏳ 执行中（无待答问题）</div>
+                      <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 4 }}>
+                        实例可能仍在推进；若它其实已空闲（可在下方对话区问一句核实，空闲时会立即回答），或状态长时间停在这里不动，可解除占用后重新执行。
+                      </div>
+                      <button className="btn" style={{ fontSize: 12, padding: '4px 12px', marginTop: 8 }}
+                        data-tooltip="节点回到待执行；若实例仍在跑这一轮，会先中止它" tabIndex={0}
+                        onClick={() => releaseNode(cur.nodeId)}>🔓 解除占用</button>
+                    </div>
+                    )
                   )}
                   {!job.instanceId && <div style={{ fontSize: 12, color: 'var(--error)', marginTop: 6 }}>⚠️ 还没绑定执行实例，先在右上角选择</div>}
                   {cur.note && <div style={{ fontSize: 12, color: 'var(--error)', marginTop: 8 }}>⚠️ {cur.note}</div>}
@@ -1112,7 +1138,8 @@ function PagesModal({ kbCode, entry, onClose, onView, showToast }) {
   )
 }
 
-// ===== 对话区：与执行实例随问随答（提问排队，当前执行段结束后被回答） =====
+// ===== 对话区：与执行实例随问随答（与飞书同一条主会话：实例空闲立即回答；真有一轮在跑才排队——
+// S5 排队边界（11-17-unblock-instance-chat）：卡点态会话必然空闲，此处不得再出现"要等节点跑完"的误导文案） =====
 
 // PENDING 行的"已运行"时长（本地时钟算，每次轮询重渲染自然刷新）
 function elapsedLabel(createdAt) {
@@ -1159,8 +1186,8 @@ function ChatPanel({ jobId, running, showToast }) {
     <div className="card" style={{ marginTop: 14, padding: '14px 20px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
         <span style={{ fontSize: 14, fontWeight: 700 }}>💬 对话区</span>
-        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>随时问实例"现在什么情况"——节点执行中会排队，当前执行段结束后回复（同会话上下文，知道所有细节）</span>
-        {running && <span className="hook-badge" style={{ color: '#3b82f6' }}>执行中·提问将排队</span>}
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>随时问实例"现在什么情况"——同会话上下文，知道所有细节；实例空闲立即回答，正忙时排队、忙完即答（是否排队以下方实时进度为准）</span>
+        {running && <span className="hook-badge" style={{ color: '#3b82f6' }}>节点执行中</span>}
       </div>
       <div ref={bodyRef} style={{ maxHeight: 320, overflowY: 'auto', marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
         {msgs.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '12px 0', textAlign: 'center' }}>（还没有对话 — 问点什么，比如"现在进行到哪一步了？""刚才失败的原因是什么？"）</div>}
@@ -1173,13 +1200,14 @@ function ChatPanel({ jobId, running, showToast }) {
           <div key={m.id} style={{ alignSelf: 'flex-start', maxWidth: '86%', background: 'rgba(107,114,128,.1)', border: '1px solid var(--border,#e5e7eb)', borderRadius: '10px 10px 10px 2px', padding: '7px 11px', fontSize: 12.5 }}>
             {m.status === 'PENDING' ? (
               m.text ? (
-                // 后端回写的实时进度摘要 — 灰色小字 + spinner，不走 ReactMarkdown（防止误认成最终答案）
+                // 后端回写的实时进度摘要 — 灰色小字 + spinner，不走 ReactMarkdown（防止误认成最终答案）。
+                // 排队/思考状态以后端回写为准（只在真有活跃轮次时才会出现"排队"字样，S5）
                 <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
                   <span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />
-                  {m.text}{running ? '（节点正在执行，结束后自动回答）' : ''}
+                  {m.text}
                 </span>
               ) : (
-                <span style={{ color: 'var(--text-dim)' }}><span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />排队/思考中…{running ? '（节点正在执行，结束后自动回答）' : ''}</span>
+                <span style={{ color: 'var(--text-dim)' }}><span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />处理中…</span>
               )
             ) : (
               <div className="md-body" style={{ color: m.status === 'FAILED' ? 'var(--error)' : 'var(--text)' }}>

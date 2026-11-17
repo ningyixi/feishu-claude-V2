@@ -65,6 +65,58 @@ public class FeishuBotService {
             "ou_0632d12fbcbe5d2ff8f4c5446f271acd"
     );
 
+    // S1 首个私聊者自动绑定（11-17-unblock-instance-chat）：未绑定实例收到首条 p2p 消息时写入 authorized_open_id
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.lark.oapi.sample.ws.repository.BotInstanceRepository botInstanceRepo;
+
+    /** 权限判定结果（S1）：ALLOW=放行；AUTO_BIND=未绑定实例的 p2p 首聊，绑定成功后放行；DENY=拒止 */
+    enum AccessDecision { ALLOW, AUTO_BIND, DENY }
+
+    /**
+     * 权限判定纯函数（可单测，11-17-unblock-instance-chat S1）：
+     * <ul>
+     *   <li>全局白名单命中 → 放行（原语义不变，null openId 安全）</li>
+     *   <li>实例已绑定（非空白）→ 严格匹配，行为与改动前完全一致</li>
+     *   <li>实例未绑定 → 仅 p2p 且发送者 openId 有效时返回 AUTO_BIND（首个私聊者自动绑定）；
+     *       群聊 / 未知会话类型 / 空 openId 一律维持拒止（AC2：群聊绝不自动绑定）</li>
+     * </ul>
+     */
+    static AccessDecision decideAccess(Set<String> globalAllowed, String authorizedOpenId, String openId, String chatType) {
+        if (openId != null && globalAllowed.contains(openId)) return AccessDecision.ALLOW;
+        String bound = authorizedOpenId == null ? "" : authorizedOpenId.trim();
+        if (!bound.isEmpty()) return bound.equals(openId) ? AccessDecision.ALLOW : AccessDecision.DENY;
+        if ("p2p".equals(chatType) && openId != null && !openId.isBlank()) return AccessDecision.AUTO_BIND;
+        return AccessDecision.DENY;
+    }
+
+    /**
+     * S1：实例未绑定时自动绑定首个私聊者。只允许由已鉴权的飞书事件回调链路调用（无任何 HTTP 入口）。
+     * 落库前先读当前行：并发窗口内别人已绑定 → 回到严格匹配语义（不覆盖）；
+     * 绑定成功同步 conn.instance 内存快照（本进程后续消息直接放行）。
+     * 任何异常 → false（fail-closed，本轮维持拒止），且不触碰沙箱/模型/目录等其他字段。
+     */
+    boolean autoBindFirstPrivateChatter(BotInstance instance, String openId) {
+        if (instance == null || instance.getId() == null || botInstanceRepo == null) return false;
+        try {
+            BotInstance fresh = botInstanceRepo.findById(instance.getId()).orElse(null);
+            if (fresh == null) return false;
+            String bound = fresh.getAuthorizedOpenId() == null ? "" : fresh.getAuthorizedOpenId().trim();
+            if (!bound.isEmpty()) {
+                // 并发窗口：处理本条消息期间别人已绑定 → 按已绑定的严格匹配语义处理
+                instance.setAuthorizedOpenId(fresh.getAuthorizedOpenId());
+                return bound.equals(openId);
+            }
+            fresh.setAuthorizedOpenId(openId);
+            botInstanceRepo.save(fresh);
+            instance.setAuthorizedOpenId(openId);
+            log.info("[FeishuBot][{}] 实例未绑定授权用户，已自动绑定首个私聊者: openId={}", instance.getName(), openId);
+            return true;
+        } catch (Exception e) {
+            log.warn("[FeishuBot][{}] 自动绑定失败（本轮维持拒止）: {}", instance.getName(), e.getMessage());
+            return false;
+        }
+    }
+
     // 已发送过欢迎消息的用户（本次服务运行期间）
     private final Set<String> greetedUsers = ConcurrentHashMap.newKeySet();
 
@@ -481,10 +533,15 @@ public class FeishuBotService {
             log.error("[Chat] 保存对话历史失败（不影响本轮回复，继续处理）: instanceId={}, openId={}", instanceId, openId, e);
         }
 
-        // 权限检查：允许的 openId 或实例配置的 openId
-        boolean allowed = ALLOWED_OPEN_IDS.contains(openId)
-                || (instance.getAuthorizedOpenId() != null && instance.getAuthorizedOpenId().equals(openId));
-        if (!allowed) {
+        // 权限检查：允许的 openId 或实例配置的 openId；未绑定实例的 p2p 首聊自动绑定发送者并放行本轮
+        // （S1，11-17-unblock-instance-chat：打破"唯一写入口被权限判定挡死"的出厂死锁；群聊不自动绑定）
+        AccessDecision access = decideAccess(ALLOWED_OPEN_IDS, instance.getAuthorizedOpenId(), openId, chatType);
+        if (access == AccessDecision.AUTO_BIND) {
+            access = autoBindFirstPrivateChatter(instance, openId) ? AccessDecision.ALLOW : AccessDecision.DENY;
+        }
+        if (access != AccessDecision.ALLOW) {
+            log.info("[Chat][{}] 权限拒止: openId={}, chatType={}, 实例绑定={}", instanceId, openId, chatType,
+                    preview(instance.getAuthorizedOpenId(), 40));
             replyText(instanceId, openId, chatType, chatId, "⛔ 无权访问此机器人。");
             return;
         }

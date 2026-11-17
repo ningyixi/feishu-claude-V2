@@ -173,6 +173,24 @@ public class SupplierJobController {
         }
     }
 
+    /**
+     * S3 解除占用（11-17-unblock-instance-chat）：僵尸 RUNNING 节点打回待执行，会话有活跃轮次先中止。
+     * <b>刻意不设 manualOnly 托管闸门</b>——引擎托管的工作同样可能产生僵尸节点，用户必须始终能解锁
+     * （PRD 硬要求）；这是唯一的例外通道，其余写端点维持闸门不变。也不动工作流顺序门禁。
+     */
+    @PostMapping(value = "/api/supplier-jobs/{id}/nodes/{nodeId}/release", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> releaseNode(@PathVariable Long id, @PathVariable String nodeId) {
+        try {
+            boolean aborted = jobService.releaseNode(id, nodeId);
+            JsonObject o = new JsonObject();
+            o.addProperty("ok", true);
+            o.addProperty("abortedTurn", aborted);
+            return ResponseEntity.ok(o.toString());
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        }
+    }
+
     /** 玩家确认节点完成：蓝→绿 */
     @PostMapping(value = "/api/supplier-jobs/{id}/nodes/{nodeId}/complete", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> completeNode(@PathVariable Long id, @PathVariable String nodeId) {

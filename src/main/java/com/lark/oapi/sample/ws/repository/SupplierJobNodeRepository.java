@@ -10,5 +10,7 @@ public interface SupplierJobNodeRepository extends JpaRepository<SupplierJobNode
     List<SupplierJobNode> findByJobIdOrderBySeqAsc(Long jobId);
     Optional<SupplierJobNode> findByJobIdAndNodeId(Long jobId, String nodeId);
     Optional<SupplierJobNode> findFirstByJobIdAndStatusOrderBySeqAsc(Long jobId, String status);
+    /** S4 僵尸巡检（11-17-unblock-instance-chat）：按状态取节点（定时任务只查 RUNNING） */
+    List<SupplierJobNode> findByStatus(String status);
     void deleteByJobId(Long jobId);
 }
