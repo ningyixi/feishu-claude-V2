@@ -21,6 +21,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 | [Supplier Context](./supplier-context.md) | Supplier context and workflow contracts | Implemented |
 | [Supplier Wiki](./supplier-wiki.md) | TEXT/WIKI modes, compilation, delivery and experiment receipts | Implemented |
 | [Supplier Workflow](./supplier-workflow.md) | Flowable processes, human tasks, files, notifications and recovery | Implemented |
+| [Supplier Eval](./supplier-eval.md) | 代码质量测评：执行结果判定、分母诚实、只读安全闸、扫描根拆分、执行记录契约 | Implemented |
 | [Logging Guidelines](./logging-guidelines.md) | Structured logging, log levels | To fill |
 
 ---
