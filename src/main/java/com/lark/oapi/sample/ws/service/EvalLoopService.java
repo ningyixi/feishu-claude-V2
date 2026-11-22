@@ -641,6 +641,12 @@ public class EvalLoopService {
                 notes.append("\n缺少上下文变量：").append(String.join("、", target.missingVariables()))
                         .append("——在任务设置「上下文变量」里补齐后重新导入，或手动编辑补出可执行 target。")
                         .append("\n模板 target：").append(tpl.targetTemplate());
+                if (target.missingVariables().contains("repoPath")) {
+                    // repoPath 缺省由绑定实例的工作目录自动填充（templateVars）；能缺 = 自动填充也失败了
+                    notes.append("\nrepoPath = 静态扫描的仓库根目录，缺省自动取绑定实例的工作目录（claudeWorkingDir）。")
+                            .append("当前未绑定实例或实例无工作目录——请先在任务设置绑定指向供应商仓库的实例，")
+                            .append("或在「上下文变量」里显式填 repoPath 后重新导入；不会退化成在后端进程目录里扫（那会恒红且理由错误）。");
+                }
             }
             notes.append("\n（来源：内置通用模板 ").append(tpl.key()).append("）");
             c.setNotes(notes.toString());
@@ -666,10 +672,29 @@ public class EvalLoopService {
         return o;
     }
 
-    /** 模板展开用变量表 = 任务 context_json + 系统变量 evalScriptDir（自动解析，不需要用户填） */
+    /**
+     * 模板展开用变量表 = 任务 context_json + 系统变量 evalScriptDir / repoPath（自动解析，不需要用户填）。
+     * <p>
+     * repoPath（静态扫描类模板的扫描根目录）：上下文变量里显式给了 → 显式值优先；缺省 →
+     * 复用 {@link #resolveWorkDir} 取绑定实例的工作目录（claudeWorkingDir → shellWorkingDir）。
+     * 未绑定实例或实例无工作目录 → 不放值：{{repoPath}} 展不开 → 该模板导入时落「未落地」，
+     * <b>绝不静默退化成后端进程 cwd 去扫</b>（实测缺陷：那样静态扫描恒红且红的理由是错的）。
+     * 路径统一正斜杠（与 evalScriptDir 同规，node 在 Windows 也认，且避开 cmd 引号内尾部反斜杠转义坑）。
+     */
     Map<String, String> templateVars(EvalTask t) {
         Map<String, String> vars = EvalTemplates.contextVars(t.getContextJson());
         vars.put("evalScriptDir", EvalTemplates.resolveScriptDir(scriptDirConfig));
+        String explicit = vars.get("repoPath");
+        if (explicit != null && !explicit.isBlank()) {
+            vars.put("repoPath", explicit.trim().replace('\\', '/'));
+        } else {
+            File workDir = resolveWorkDir(t);
+            if (workDir != null) {
+                vars.put("repoPath", workDir.getAbsolutePath().replace('\\', '/'));
+            } else {
+                vars.remove("repoPath");   // 空白显式值也移除 → expand 统一报「缺 repoPath」→ 未落地
+            }
+        }
         return vars;
     }
 

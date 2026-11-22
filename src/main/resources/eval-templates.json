@@ -7,7 +7,8 @@
     { "name": "configKey", "label": "配置中心键名", "placeholder": "如 SS.DCYiLv.Config" },
     { "name": "collectionPath", "label": "Postman 集合文件路径", "placeholder": "如 D:/.../supplier.postman_collection.json" },
     { "name": "envPath", "label": "Postman 环境文件路径", "placeholder": "如 D:/.../supplier.env.json" },
-    { "name": "supplierClassHint", "label": "供应商实现类名（静态类检查用）", "placeholder": "如 DorakSupplierService" }
+    { "name": "supplierClassHint", "label": "供应商实现类名（静态类检查用）", "placeholder": "如 DorakSupplierService" },
+    { "name": "repoPath", "label": "供应商仓库根目录（静态扫描的扫描根；留空 = 自动取绑定实例的工作目录 claudeWorkingDir）", "placeholder": "如 D:/dida/SupplierV2（未绑定实例时必填）" }
   ],
   "templates": [
     {
@@ -95,11 +96,11 @@
       "kind": "static",
       "timeoutSec": 120,
       "requiresSandbox": false,
-      "needsVariables": ["supplierClassHint"],
-      "targetTemplate": "node \"{{evalScriptDir}}/check-class-registered.js\" \"{{supplierClassHint}}\"",
+      "needsVariables": ["supplierClassHint", "repoPath"],
+      "targetTemplate": "node \"{{evalScriptDir}}/check-class-registered.js\" \"{{supplierClassHint}}\" \"{{repoPath}}\"",
       "expectTemplate": "exit=0\nstdout=OK",
       "verified": true,
-      "description": "在执行工作目录（= 绑定实例的工作目录，应指向供应商仓库根）里 grep：类 {{supplierClassHint}} 有定义（class/interface），且至少有一个定义之外的文件引用它（工厂/注册映射里必然再次出现类名）。grep 级确定性判定，不用 AST、不用模型。"
+      "description": "在 {{repoPath}}（扫描根目录，缺省自动取绑定实例的工作目录 claudeWorkingDir，可在上下文变量显式指定）里 grep：类 {{supplierClassHint}} 有定义（class/interface），且至少有一个定义之外的文件引用它（工厂/注册映射里必然再次出现类名）。grep 级确定性判定，不用 AST、不用模型。未绑定实例且未显式填 repoPath → 落「未落地」，不会退化成扫后端进程目录。"
     },
     {
       "key": "static-no-empty-catch",
@@ -108,11 +109,11 @@
       "kind": "static",
       "timeoutSec": 120,
       "requiresSandbox": false,
-      "needsVariables": [],
-      "targetTemplate": "node \"{{evalScriptDir}}/check-no-empty-catch.js\"",
+      "needsVariables": ["repoPath"],
+      "targetTemplate": "node \"{{evalScriptDir}}/check-no-empty-catch.js\" \"{{repoPath}}\"",
       "expectTemplate": "exit=0\nstdout=OK",
       "verified": true,
-      "description": "扫描执行工作目录的 .cs 文件：① 没有空 catch {} / catch (Exception) { } 吞异常；② 没有把 password/secret/apikey 等直接赋成字符串明文（占位符与配置读取除外）。一个 .cs 文件都没扫到会判 FAIL——防止在错误的工作目录里假绿。"
+      "description": "扫描 {{repoPath}}（扫描根目录，缺省自动取绑定实例的工作目录 claudeWorkingDir，可在上下文变量显式指定）下的 .cs 文件：① 没有空 catch {} / catch (Exception) { } 吞异常；② 没有把 password/secret/apikey 等直接赋成字符串明文（占位符与配置读取除外）。一个 .cs 文件都没扫到会判 FAIL——防止在错误的目录里假绿。未绑定实例且未显式填 repoPath → 落「未落地」，不会退化成扫后端进程目录。"
     },
     {
       "key": "build-dotnet",

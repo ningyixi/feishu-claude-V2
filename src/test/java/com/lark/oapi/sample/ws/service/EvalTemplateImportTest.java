@@ -96,11 +96,11 @@ class EvalTemplateImportTest {
 
     @Test
     void importWithoutVariablesLandsNotLandedAndStaysOutOfDenominator() throws Exception {
-        task("");   // 一个变量都没填
+        task("{\"repoPath\":\"D:/supplier/repo\"}");   // 静态模板的扫描根显式给了；config-shape 仍缺 configJsonPath
 
         JsonObject r = service.importTemplates(1L, List.of("config-shape", "static-no-empty-catch"));
         assertEquals(2, r.get("imported").getAsInt());
-        assertEquals(1, r.get("landed").getAsInt(), "不需要变量的模板照常落地");
+        assertEquals(1, r.get("landed").getAsInt(), "变量填齐的模板照常落地");
         assertEquals(1, r.get("notLanded").getAsInt());
 
         ArgumentCaptor<EvalCase> captor = ArgumentCaptor.forClass(EvalCase.class);
@@ -114,6 +114,8 @@ class EvalTemplateImportTest {
                 "notes 必须写清缺哪个变量: " + missing.getNotes());
         assertTrue(missing.getNotes().contains("缺少上下文变量"), missing.getNotes());
         assertNull(missing.getLastVerdict());
+        assertEquals("node \"" + scriptDir + "/check-no-empty-catch.js\" \"D:/supplier/repo\"",
+                ready.getTarget(), "显式 repoPath 展开进 target 作扫描根参数");
 
         // stats 口径：未落地计入 notLanded，分母 executed 不含它（复用 MVP-1 computeStats，不另造）
         var s = EvalLoopService.computeStats(List.of(missing, ready));
@@ -201,8 +203,10 @@ class EvalTemplateImportTest {
                         key + " 的变量已填，不该缺");
                 case "http-basic-connectivity" -> assertEquals(List.of("baseUrl"), missing);
                 case "http-postman-collection" -> assertEquals(List.of("collectionPath", "envPath"), missing);
-                case "static-no-empty-catch", "build-dotnet" -> assertTrue(missing.isEmpty(),
-                        key + " 不需要用户变量");
+                case "static-no-empty-catch" -> assertEquals(List.of("repoPath"), missing,
+                        "任务未绑定实例且未填 repoPath → 缺扫描根（绝不退化成后端进程 cwd）");
+                case "static-class-registered" -> assertEquals(List.of("supplierClassHint", "repoPath"), missing);
+                case "build-dotnet" -> assertTrue(missing.isEmpty(), key + " 不需要用户变量");
                 default -> { }
             }
         }
