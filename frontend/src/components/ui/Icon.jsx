@@ -4,6 +4,7 @@ const paths = {
   hooks: <><path d="M12 3v12a5 5 0 0 1-10 0v-3M2 12l3 3M12 8h5a4 4 0 0 1 0 8h-1"/><circle cx="12" cy="3" r="1"/></>,
   supplier: <><rect x="3" y="4" width="7" height="7" rx="2"/><rect x="14" y="13" width="7" height="7" rx="2"/><path d="M10 7h5a3 3 0 0 1 3 3v3M7 11v6a3 3 0 0 0 3 3h4"/></>,
   probe: <><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6Z"/><path d="M14 2v6h6"/><path d="m11.5 12-2.5 4h3l-2.5 4"/></>,
+  eval: <><rect x="5" y="4" width="14" height="18" rx="2"/><path d="M9 4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v1H9V4Z"/><path d="m9 13 2 2 4-4.5"/></>,
   adhoc: <><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><path d="m12.9 7-2.4 4h2.9l-2.4 4"/></>,
   employees: <><circle cx="9" cy="8" r="3"/><path d="M3 21v-3a6 6 0 0 1 12 0v3M16 5a3 3 0 0 1 0 6M21 21v-3a6 6 0 0 0-4-5"/></>,
   logo: <><path d="m12 2 9 5-9 5-9-5 9-5ZM3 12l9 5 9-5M3 17l9 5 9-5"/></>,
