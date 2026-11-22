@@ -39,12 +39,20 @@ class EvalLoopServiceTest {
     private BotInstanceRepository instanceRepo;
     private EvalLoopService service;
 
+    /** 结果行 id 发号器（真实环境由 JPA 生成；mock 下 save 时补 id，trial 才能同步返回 resultId） */
+    private final java.util.concurrent.atomic.AtomicLong resultIds = new java.util.concurrent.atomic.AtomicLong(100);
+
     @BeforeEach
     void setUp() {
         taskRepo = mock(EvalTaskRepository.class);
         caseRepo = mock(EvalCaseRepository.class);
         resultRepo = mock(EvalCaseResultRepository.class);
         instanceRepo = mock(BotInstanceRepository.class);
+        when(resultRepo.save(any())).thenAnswer(inv -> {
+            EvalCaseResult r = inv.getArgument(0);
+            if (r.getId() == null) r.setId(resultIds.incrementAndGet());
+            return r;
+        });
         service = new EvalLoopService(taskRepo, caseRepo, resultRepo, instanceRepo,
                 tmp.resolve("eval-logs").toString(), "", "");
     }
@@ -101,11 +109,15 @@ class EvalLoopServiceTest {
         when(caseRepo.findById(10L)).thenReturn(Optional.of(c));
         service.sandboxCreds = () -> false;   // 无凭据
 
-        service.trial(1L, 10L);
+        com.google.gson.JsonObject resp = service.trial(1L, 10L);
+        assertEquals(EvalRunner.SKIPPED, resp.get("verdict").getAsString(), "同步终态直接返回 SKIPPED");
+        assertFalse(resp.get("resultId").isJsonNull(), "同步终态也返回本次 resultId");
+        assertEquals(10L, resp.get("caseId").getAsLong());
 
         ArgumentCaptor<EvalCaseResult> saved = ArgumentCaptor.forClass(EvalCaseResult.class);
         verify(resultRepo).save(saved.capture());
         assertEquals(EvalRunner.SKIPPED, saved.getValue().getVerdict(), "无凭据 → SKIPPED（单列，不进分母）");
+        assertEquals(resp.get("resultId").getAsLong(), saved.getValue().getId(), "返回的 resultId 就是落库那行");
         assertTrue(saved.getValue().getReason().contains(EvalLoopService.SANDBOX_CRED_ENV),
                 "跳过原因写明凭据探测方式: " + saved.getValue().getReason());
         assertNull(saved.getValue().getExitCode(), "跳过没有退出码——没起进程");
@@ -127,9 +139,10 @@ class EvalLoopServiceTest {
         when(caseRepo.findById(11L)).thenReturn(Optional.of(c));
         service.sandboxCreds = () -> true;
 
-        service.trial(1L, 11L);
-        // trial 是异步的：等虚拟线程把结果写完（最多 30s，实际秒级）
-        EvalCaseResult r = waitForNthResult(1);
+        com.google.gson.JsonObject resp = service.trial(1L, 11L);
+        assertEquals(EvalRunner.RUNNING, resp.get("verdict").getAsString(), "异步执行：先返回 RUNNING + resultId");
+        // trial 是异步的：按本次 resultId 等结果写完（最多 30s，实际秒级）
+        EvalCaseResult r = awaitResult(resp.get("resultId").getAsLong());
         assertEquals(EvalRunner.PASS, r.getVerdict(), "有凭据正常执行并按断言判定");
     }
 
@@ -179,7 +192,7 @@ class EvalLoopServiceTest {
         when(caseRepo.findByTaskIdOrderBySortOrderAscIdAsc(1L)).thenReturn(List.of());
         service.sandboxCreds = () -> true;
 
-        service.trial(1L, 20L);
+        com.google.gson.JsonObject respA = service.trial(1L, 20L);
         var e = assertThrows(IllegalStateException.class, () -> service.trial(1L, 21L),
                 "同任务第二条必须被串行闸拒绝（避免并发 dotnet 互锁 obj/）");
         assertTrue(e.getMessage().contains("串行"), e.getMessage());
@@ -189,10 +202,12 @@ class EvalLoopServiceTest {
         var e2 = assertThrows(IllegalStateException.class, () -> service.trial(1L, 20L));
         assertTrue(e2.getMessage().contains("正在执行中"));
 
-        waitForNthResult(1);   // 等第一条跑完释放闸
+        awaitResult(respA.get("resultId").getAsLong());   // 等第一条跑完释放闸
         // 释放后第二条可跑
-        assertDoesNotThrow(() -> service.trial(1L, 21L));
-        EvalCaseResult second = waitForNthResult(2);
+        com.google.gson.JsonObject respB = assertDoesNotThrow(() -> service.trial(1L, 21L));
+        assertNotEquals(respA.get("resultId").getAsLong(), respB.get("resultId").getAsLong(),
+                "两次执行必须是两个不同的 resultId");
+        EvalCaseResult second = awaitResult(respB.get("resultId").getAsLong());
         assertEquals(EvalRunner.PASS, second.getVerdict(), "串行闸释放后第二条正常执行");
     }
 
@@ -211,8 +226,8 @@ class EvalLoopServiceTest {
         when(caseRepo.findById(30L)).thenReturn(Optional.of(c));
         service.sandboxCreds = () -> true;
 
-        service.trial(1L, 30L);
-        EvalCaseResult r = waitForNthResult(1);
+        com.google.gson.JsonObject resp = service.trial(1L, 30L);
+        EvalCaseResult r = awaitResult(resp.get("resultId").getAsLong());
 
         assertEquals(EvalRunner.PASS, r.getVerdict(), "退出码 0 + 断言匹配 = PASS（机器判定）");
         assertEquals(0, r.getExitCode());
@@ -239,8 +254,8 @@ class EvalLoopServiceTest {
         service.sandboxCreds = () -> true;
 
         long t0 = System.currentTimeMillis();
-        service.trial(1L, 31L);
-        EvalCaseResult r = waitForNthResult(1);
+        com.google.gson.JsonObject resp = service.trial(1L, 31L);
+        EvalCaseResult r = awaitResult(resp.get("resultId").getAsLong());
         long waited = System.currentTimeMillis() - t0;
 
         assertEquals(EvalRunner.TIMEOUT, r.getVerdict(), "超时 = TIMEOUT，绝不判 PASS");
@@ -262,8 +277,8 @@ class EvalLoopServiceTest {
         when(caseRepo.findById(32L)).thenReturn(Optional.of(c));
         service.sandboxCreds = () -> true;
 
-        service.trial(1L, 32L);
-        EvalCaseResult r = waitForNthResult(1);
+        com.google.gson.JsonObject resp = service.trial(1L, 32L);
+        EvalCaseResult r = awaitResult(resp.get("resultId").getAsLong());
 
         assertEquals(EvalRunner.FAIL, r.getVerdict(), "退出码 0 但断言不匹配 = FAIL");
         assertTrue(r.getReason().contains("EXPECTED_MARK") || r.getReason().contains("未匹配"),
@@ -318,18 +333,68 @@ class EvalLoopServiceTest {
         assertEquals(2, captor.getAllValues().get(1).getSortOrder());
     }
 
-    // ===== 等待异步试跑落库（虚拟线程 → mock resultRepo.save 第 n 次调用） =====
+    // ===== MVP-1.6 追加 3 回归锁：连续两次 trial 必须拿到不同 resultId，按 id 轮询精确取到本次结果 =====
 
-    private EvalCaseResult waitForNthResult(int n) throws InterruptedException {
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    void consecutiveTrialsReturnDistinctResultIdsAndPollingByIdGetsExactlyThatRun() throws Exception {
+        EvalTask task = new EvalTask();
+        task.setId(1L);
+        EvalCase c = evalCase(40, true, "echo FIRST_RUN", null);
+        c.setKind("script");
+        c.setExpect("stdout~FIRST_RUN");
+        c.setTimeoutSec(30);
+        when(taskRepo.findById(1L)).thenReturn(Optional.of(task));
+        when(caseRepo.findById(40L)).thenReturn(Optional.of(c));
+        service.sandboxCreds = () -> true;
+
+        // 第一次试跑
+        com.google.gson.JsonObject resp1 = service.trial(1L, 40L);
+        long id1 = resp1.get("resultId").getAsLong();
+        EvalCaseResult row1 = awaitResult(id1);
+        assertEquals(EvalRunner.PASS, row1.getVerdict());
+        assertTrue(row1.getOutputSummary().contains("FIRST_RUN"), row1.getOutputSummary());
+
+        // 第二次试跑（换了命令——实测缺陷场景：换实现后按"列表第一条"轮询会读到上一轮旧结果）
+        c.setTarget("echo SECOND_RUN");
+        c.setExpect("stdout~SECOND_RUN");
+        com.google.gson.JsonObject resp2 = service.trial(1L, 40L);
+        long id2 = resp2.get("resultId").getAsLong();
+        assertNotEquals(id1, id2, "两次试跑必须返回不同的 resultId");
+
+        EvalCaseResult row2 = awaitResult(id2);
+        assertEquals(EvalRunner.PASS, row2.getVerdict());
+        assertTrue(row2.getOutputSummary().contains("SECOND_RUN"),
+                "按 resultId 精确取到的是【本次】的输出: " + row2.getOutputSummary());
+        assertFalse(row2.getOutputSummary().contains("FIRST_RUN"), "绝不是上一轮的旧输出");
+        // 上一轮那行原样保留，按 id 仍可精确回看（执行记录逐次可追溯）
+        assertTrue(row1.getOutputSummary().contains("FIRST_RUN"));
+        // 服务端 resultJson 同样按 id 精确取
+        when(resultRepo.findById(id1)).thenReturn(Optional.of(row1));
+        when(resultRepo.findById(id2)).thenReturn(Optional.of(row2));
+        assertTrue(service.resultJson(1L, 40L, id1).get("outputSummary").getAsString().contains("FIRST_RUN"),
+                "按 id1 取到第一轮结果");
+        assertTrue(service.resultJson(1L, 40L, id2).get("outputSummary").getAsString().contains("SECOND_RUN"),
+                "按 id2 取到第二轮结果");
+    }
+
+    // ===== 等待异步试跑落库（按 resultId 精确匹配，直到该行离开 RUNNING 终态为止） =====
+
+    private EvalCaseResult awaitResult(long resultId) throws InterruptedException {
         long deadline = System.currentTimeMillis() + 30_000;
         while (System.currentTimeMillis() < deadline) {
             ArgumentCaptor<EvalCaseResult> captor = ArgumentCaptor.forClass(EvalCaseResult.class);
             try {
-                verify(resultRepo, atLeast(n)).save(captor.capture());
-                if (captor.getAllValues().size() >= n) return captor.getAllValues().get(n - 1);
-            } catch (AssertionError ignore) { /* 还没到第 n 次 save */ }
+                verify(resultRepo, atLeastOnce()).save(captor.capture());
+                for (EvalCaseResult r : captor.getAllValues()) {
+                    // 同一行对象会被执行线程原地更新成终态（RUNNING → PASS/FAIL/TIMEOUT/ERROR）
+                    if (r.getId() != null && r.getId() == resultId && !EvalRunner.RUNNING.equals(r.getVerdict())) {
+                        return r;
+                    }
+                }
+            } catch (AssertionError ignore) { /* 还没有任何 save */ }
             Thread.sleep(100);
         }
-        return fail("等待第 " + n + " 条试跑结果超时（30s 内 resultRepo.save 不足 " + n + " 次）");
+        return fail("等待 resultId=" + resultId + " 的试跑结果超时（30s）");
     }
 }

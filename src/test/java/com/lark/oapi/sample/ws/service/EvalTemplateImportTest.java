@@ -96,7 +96,11 @@ class EvalTemplateImportTest {
 
     @Test
     void importWithoutVariablesLandsNotLandedAndStaysOutOfDenominator() throws Exception {
-        task("{\"repoPath\":\"D:/supplier/repo\"}");   // 静态模板的扫描根显式给了；config-shape 仍缺 configJsonPath
+        // 静态模板的扫描根（supplierDir，MVP-1.6 拆分后）显式给了；config-shape 仍缺 configJsonPath
+        Path sup = tmp.resolve("sup-dir");
+        java.nio.file.Files.createDirectories(sup);
+        String supFwd = sup.toString().replace('\\', '/');
+        task("{\"supplierDir\":\"" + supFwd + "\"}");
 
         JsonObject r = service.importTemplates(1L, List.of("config-shape", "static-no-empty-catch"));
         assertEquals(2, r.get("imported").getAsInt());
@@ -114,8 +118,8 @@ class EvalTemplateImportTest {
                 "notes 必须写清缺哪个变量: " + missing.getNotes());
         assertTrue(missing.getNotes().contains("缺少上下文变量"), missing.getNotes());
         assertNull(missing.getLastVerdict());
-        assertEquals("node \"" + scriptDir + "/check-no-empty-catch.js\" \"D:/supplier/repo\"",
-                ready.getTarget(), "显式 repoPath 展开进 target 作扫描根参数");
+        assertEquals("node \"" + scriptDir + "/check-no-empty-catch.js\" \"" + supFwd + "\"",
+                ready.getTarget(), "显式 supplierDir 展开进 target 作扫描根参数");
 
         // stats 口径：未落地计入 notLanded，分母 executed 不含它（复用 MVP-1 computeStats，不另造）
         var s = EvalLoopService.computeStats(List.of(missing, ready));
@@ -203,10 +207,11 @@ class EvalTemplateImportTest {
                         key + " 的变量已填，不该缺");
                 case "http-basic-connectivity" -> assertEquals(List.of("baseUrl"), missing);
                 case "http-postman-collection" -> assertEquals(List.of("collectionPath", "envPath"), missing);
-                case "static-no-empty-catch" -> assertEquals(List.of("repoPath"), missing,
-                        "任务未绑定实例且未填 repoPath → 缺扫描根（绝不退化成后端进程 cwd）");
-                case "static-class-registered" -> assertEquals(List.of("supplierClassHint", "repoPath"), missing);
-                case "build-dotnet" -> assertTrue(missing.isEmpty(), key + " 不需要用户变量");
+                case "static-no-empty-catch" -> assertEquals(List.of("supplierDir"), missing,
+                        "未绑定实例且探测不出 supplierDir → 缺供应商目录扫描根（绝不退化成后端进程 cwd/仓库根）");
+                case "static-class-registered" -> assertEquals(List.of("supplierClassHint", "supplierDir", "repoPath"), missing);
+                case "build-dotnet" -> assertEquals(List.of("slnPath"), missing,
+                        "无 repoPath → 解析不出唯一 .sln → 缺 slnPath（不跑必失败命令）");
                 default -> { }
             }
         }

@@ -184,35 +184,55 @@ class EvalTemplateScriptsTest {
         assertTrue(r2.out().contains("cancelUrl"), r2.out());
     }
 
-    // ===== check-class-registered.js =====
+    // ===== check-class-registered.js（MVP-1.6 双根：定义在 supplierDir、引用在 repoPath 全仓） =====
 
     @Test
-    void classRegisteredPassesAndFails() throws Exception {
-        Path root = tmp.resolve("repo");
-        Files.createDirectories(root.resolve("impl"));
-        Files.createDirectories(root.resolve("factory"));
-        Files.writeString(root.resolve("impl/DorakSupplierService.cs"),
+    void classRegisteredDualRootsPassesAndFails() throws Exception {
+        // fixture 复刻现网 id=2 case41 假红场景：定义在供应商目录，注册引用只在仓库根（供应商目录之外）
+        Path repo = tmp.resolve("repo");
+        Path sup = repo.resolve("src/Business/Supplier/Dorak");
+        Files.createDirectories(sup);
+        Files.createDirectories(repo.resolve("factory"));
+        Files.writeString(sup.resolve("DorakSupplierService.cs"),
                 "namespace Supplier.Dorak { public class DorakSupplierService : ISupplierService { } }");
-        Files.writeString(root.resolve("factory/SupplierFactory.cs"),
+        Files.writeString(repo.resolve("factory/SupplierFactory.cs"),
                 "public static class SupplierFactory { static object Get(int id) => new Dorak.DorakSupplierService(); }");
-        Files.writeString(root.resolve("impl/LonelyService.cs"),
+        Files.writeString(sup.resolve("LonelyService.cs"),
                 "namespace X { public class LonelyService { } }");
 
-        ProcResult ok = runScript(script("check-class-registered.js"), "DorakSupplierService", root.toString());
-        assertEquals(0, ok.exit(), "有定义 + 被工厂引用 → PASS: " + ok.out());
+        // 双根（修复后口径）：定义根=supplierDir、引用根=repoPath → 必须 PASS
+        ProcResult ok = runScript(script("check-class-registered.js"),
+                "DorakSupplierService", sup.toString(), repo.toString());
+        assertEquals(0, ok.exit(), "注册点在供应商目录外也必须 PASS（双根修复）: " + ok.out());
         assertTrue(ok.out().contains("OK"), ok.out());
+        assertTrue(ok.out().contains("代理判据"), "输出必须写明代理判据性质: " + ok.out());
 
-        ProcResult lonely = runScript(script("check-class-registered.js"), "LonelyService", root.toString());
-        assertEquals(1, lonely.exit(), "只有定义没被注册 → 必须 FAIL");
+        // 差异证明（旧单根口径的真实行为）：第三参缺省 = 引用根退化成定义根，
+        // 同一 fixture 必假红「只有定义」——这正是修复前现网 id=2 case41 的 FAIL 形态
+        ProcResult oldBehavior = runScript(script("check-class-registered.js"),
+                "DorakSupplierService", sup.toString());
+        assertEquals(1, oldBehavior.exit(), "单根扫描对注册点在目录外的供应商必假红（修复前/后差异证据）");
+        assertTrue(oldBehavior.out().contains("只有定义"), oldBehavior.out());
+
+        // LonelyService：全仓（repoPath）也没有任何引用 → 双根仍必须 FAIL
+        ProcResult lonely = runScript(script("check-class-registered.js"),
+                "LonelyService", sup.toString(), repo.toString());
+        assertEquals(1, lonely.exit(), "全仓都无引用 → 必须 FAIL");
         assertTrue(lonely.out().contains("LonelyService"), lonely.out());
 
-        ProcResult absent = runScript(script("check-class-registered.js"), "NoSuchClass", root.toString());
+        ProcResult absent = runScript(script("check-class-registered.js"),
+                "NoSuchClass", sup.toString(), repo.toString());
         assertEquals(1, absent.exit(), "类不存在 → 必须 FAIL");
+        assertTrue(absent.out().contains("NoSuchClass"), absent.out());
 
         Path empty = tmp.resolve("nocs");
         Files.createDirectories(empty);
-        ProcResult noCs = runScript(script("check-class-registered.js"), "X", empty.toString());
-        assertEquals(1, noCs.exit(), "一个 .cs 都没有 → FAIL（防止错误目录下假绿）");
+        ProcResult noCs = runScript(script("check-class-registered.js"), "X", empty.toString(), repo.toString());
+        assertEquals(1, noCs.exit(), "供应商目录零 .cs → FAIL（防止错误目录下假绿）");
+
+        ProcResult badRef = runScript(script("check-class-registered.js"),
+                "DorakSupplierService", sup.toString(), tmp.resolve("no-such-dir").toString());
+        assertEquals(1, badRef.exit(), "引用根不存在 → FAIL 而不是静默通过");
     }
 
     // ===== check-no-empty-catch.js =====

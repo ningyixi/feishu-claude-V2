@@ -168,12 +168,16 @@ public class EvalLoopController {
         }
     }
 
-    /** 单条试跑：异步启动（页面轮询 detail 拿 verdict/退出码/耗时/输出摘要），同任务串行 */
+    /**
+     * 单条试跑。返回体带<b>本次新建的 resultId</b>：{ok, taskId, caseId, resultId, verdict}——
+     * 前端与后续自动 loop 一律按 resultId 轮询单次结果（GET .../results/{resultId}），
+     * 不许靠「读列表第一条」（会把上一轮旧结果当成本轮的，实测缺陷）。
+     * 异步执行时 verdict=RUNNING；同步终态（只读安全闸 FAIL / 缺沙箱凭据 SKIPPED）直接给终值。
+     */
     @PostMapping(value = "/api/eval-tasks/{id}/cases/{caseId}/trial", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> trial(@PathVariable Long id, @PathVariable Long caseId) {
         try {
-            evals.trial(id, caseId);
-            return ResponseEntity.ok(evals.detail(id).toString());
+            return ResponseEntity.ok(evals.trial(id, caseId).toString());
         } catch (IllegalArgumentException e) {
             return err(e.getMessage());
         } catch (IllegalStateException e) {
@@ -184,11 +188,40 @@ public class EvalLoopController {
         }
     }
 
-    /** 单条 eval 的最近执行记录（含每次退出码/耗时/判定依据/输出摘要） */
+    /** 单条 eval 的最近执行记录（排序契约：按 id 倒序 = 最新在前；RUNNING 行 = 正在跑，空列表 = 从未跑过） */
     @GetMapping(value = "/api/eval-tasks/{id}/cases/{caseId}/results", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> caseResults(@PathVariable Long id, @PathVariable Long caseId) {
         try {
             return ResponseEntity.ok(evals.caseResults(id, caseId).toString());
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        }
+    }
+
+    /** 按 resultId 精确取单次执行结果（轮询用这个，别读列表第一条） */
+    @GetMapping(value = "/api/eval-tasks/{id}/cases/{caseId}/results/{resultId}",
+            produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> resultById(@PathVariable Long id, @PathVariable Long caseId,
+                                             @PathVariable Long resultId) {
+        try {
+            return ResponseEntity.ok(evals.resultJson(id, caseId, resultId).toString());
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        }
+    }
+
+    /**
+     * 单次执行记录的输出全文（按行分页 offsetLine/maxLines，一次不吐几 MB）。
+     * 安全：文件路径只取自库里该条记录的 outputFile 字段，<b>不接受调用方传任意路径</b>（防任意文件读取）。
+     */
+    @GetMapping(value = "/api/eval-tasks/{id}/cases/{caseId}/results/{resultId}/output",
+            produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> resultOutput(@PathVariable Long id, @PathVariable Long caseId,
+                                               @PathVariable Long resultId,
+                                               @RequestParam(name = "offsetLine", defaultValue = "0") int offsetLine,
+                                               @RequestParam(name = "maxLines", defaultValue = "200") int maxLines) {
+        try {
+            return ResponseEntity.ok(evals.resultOutput(id, caseId, resultId, offsetLine, maxLines).toString());
         } catch (IllegalArgumentException e) {
             return err(e.getMessage());
         }

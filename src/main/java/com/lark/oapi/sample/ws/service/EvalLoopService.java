@@ -24,6 +24,7 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Semaphore;
 import java.util.function.BooleanSupplier;
@@ -99,6 +100,12 @@ public class EvalLoopService {
                 c.setLastVerdict(EvalRunner.ERROR);
                 c.setLastReason("服务重启导致执行中断（未完成），请重新试跑");
                 cases.save(c);
+            }
+            // 结果行同样归位（MVP-1.6：RUNNING 行先落库拿 resultId，重启会把它们悬住）
+            for (EvalCaseResult r : results.findByVerdict(EvalRunner.RUNNING)) {
+                r.setVerdict(EvalRunner.ERROR);
+                r.setReason("服务重启导致执行中断（未完成），请重新试跑");
+                results.save(r);
             }
         } catch (Exception e) {
             log.warn("[Eval] 启动归位 RUNNING eval 失败（忽略）: {}", e.getMessage());
@@ -288,19 +295,32 @@ public class EvalLoopService {
     // ===== 单条试跑（异步执行 + 同任务串行） =====
 
     /**
-     * 启动一条 eval 的试跑：立即返回（页面轮询 detail 拿结果）。
+     * 启动一条 eval 的试跑：立即返回（含<b>本次新建的 resultId</b>——前端与后续 loop 一律按它
+     * 轮询 {@link #resultJson} 单次结果，<b>绝不靠「读列表第一条」</b>：那样会把上一轮的旧结果
+     * 当成本轮的，旧红当新红、旧输出当新输出，MVP-1.6 实测缺陷）。
+     * <p>
+     * 异步执行时结果行以 RUNNING 先行落库（id 即返回的 resultId），执行完在<b>同一行</b>上更新终态；
+     * 同步终态（只读安全闸拦截 FAIL / 缺沙箱凭据 SKIPPED）也返回该行 id。
      * 未落地（target 空）拒绝执行；同任务已有执行中条目拒绝（串行闸）。
-     * requiresSandbox 且无凭据 → 同步记 SKIPPED（不起进程）。
      *
+     * @return {ok, taskId, caseId, resultId, verdict}（verdict=RUNNING 表示异步执行中）
      * @throws IllegalArgumentException 未落地/不存在
      * @throws IllegalStateException    正在执行中（本条或同任务其他条）
      */
-    public void trial(Long taskId, Long caseId) {
+    public JsonObject trial(Long taskId, Long caseId) {
         EvalTask task = requireTask(taskId);
         EvalCase c = requireCase(taskId, caseId);
         if (!c.isEnabled()) throw new IllegalStateException("该 eval 已停用，先启用再试跑");
         if (!EvalRunner.isLanded(c.getTarget())) {
             throw new IllegalArgumentException("该 eval 还没填可执行 target（未落地）：先补出命令行再试跑，未落地条目不计入通过率");
+        }
+        // 只读安全闸（MVP-1.6 追加）：http 类 target 指向写操作端点 → 同步记 FAIL，进程根本不起。
+        // 不是 SKIPPED、不是抛异常——静默跳过的安全闸等于没有闸，必须留下诚实的 FAIL 记录。
+        EvalReadOnlyGuard.GuardResult guard = EvalReadOnlyGuard.check(c.getKind(), c.getTarget());
+        if (guard.blocked()) {
+            EvalCaseResult blocked = recordResult(task, c, EvalRunner.FAIL, null, 0,
+                    "eval 禁止写操作端点（只读安全闸，进程未启动）: " + guard.matched(), "", "");
+            return trialJson(taskId, caseId, blocked.getId(), EvalRunner.FAIL);
         }
         if (EvalRunner.RUNNING.equals(c.getLastVerdict())) {
             throw new IllegalStateException("这条 eval 正在执行中，等本轮结束");
@@ -312,24 +332,38 @@ public class EvalLoopService {
         boolean handedOff = false;
         try {
             if (EvalRunner.shouldSkip(c.isRequiresSandbox(), sandboxCreds.getAsBoolean())) {
-                recordResult(task, c, EvalRunner.SKIPPED, null, 0,
+                EvalCaseResult skipped = recordResult(task, c, EvalRunner.SKIPPED, null, 0,
                         "需要沙箱凭据（环境变量 " + SANDBOX_CRED_ENV + " 未配置），本次跳过；不计入通过率", "", "");
-                return;
+                return trialJson(taskId, caseId, skipped.getId(), EvalRunner.SKIPPED);
             }
             c.setLastVerdict(EvalRunner.RUNNING);
             c.setLastReason("");
             cases.save(c);
+            // 先落一行 RUNNING（拿到本次 resultId 同步返回）；执行线程结束时在同一行更新终态。
+            // 「从未跑过」（没有任何结果行）与「正在跑」（存在 RUNNING 行）因此在执行记录里天然可分。
+            final EvalCaseResult row = new EvalCaseResult();
+            row.setTaskId(task.getId());
+            row.setCaseId(c.getId());
+            row.setTriggerMode("TRIAL");
+            row.setVerdict(EvalRunner.RUNNING);
+            row.setExitCode(null);
+            row.setElapsedMs(0);
+            row.setReason("");
+            row.setOutputSummary("");
+            row.setOutputFile("");
+            results.save(row);
             File workDir = resolveWorkDir(task);
             final Long cid = c.getId();
             Thread.ofVirtual().name("eval-trial-" + cid).start(() -> {
                 try {
-                    runOne(task.getId(), cid, workDir);
+                    runOne(task.getId(), cid, row, workDir);
                 } catch (Exception e) {
-                    log.error("[Eval] 试跑异常 task={} case={}", task.getId(), cid, e);
+                    log.error("[Eval] 试跑异常 task={} case={} result={}", task.getId(), cid, row.getId(), e);
                     try {
                         EvalCase cc = cases.findById(cid).orElse(null);
                         if (cc != null) {
-                            recordResult(task, cc, EvalRunner.ERROR, null, 0, "执行异常: " + e.getMessage(), "", "");
+                            finishResult(row, task, cc, EvalRunner.ERROR, null, 0,
+                                    "执行异常: " + e.getMessage(), "", "");
                         }
                     } catch (Exception ignored) {}
                 } finally {
@@ -337,13 +371,26 @@ public class EvalLoopService {
                 }
             });
             handedOff = true;
+            return trialJson(taskId, caseId, row.getId(), EvalRunner.RUNNING);
         } finally {
             if (!handedOff) lock.release();
         }
     }
 
-    /** 真正跑一条：命令构造 → 进程执行（超时强杀）→ 机器判定 → 输出落盘 + 入库 */
-    void runOne(Long taskId, Long caseId, File workDir) throws Exception {
+    /** trial 返回体：本次执行的定位三要素（taskId/caseId/resultId）+ 当前 verdict */
+    static JsonObject trialJson(Long taskId, Long caseId, Long resultId, String verdict) {
+        JsonObject o = new JsonObject();
+        o.addProperty("ok", true);
+        o.addProperty("taskId", taskId);
+        o.addProperty("caseId", caseId);
+        if (resultId != null) o.addProperty("resultId", resultId);
+        else o.add("resultId", com.google.gson.JsonNull.INSTANCE);
+        o.addProperty("verdict", verdict);
+        return o;
+    }
+
+    /** 真正跑一条：命令构造 → 进程执行（超时强杀）→ 机器判定 → 输出落盘 + 更新本次结果行（trial 预建的那行） */
+    void runOne(Long taskId, Long caseId, EvalCaseResult row, File workDir) throws Exception {
         EvalTask task = requireTask(taskId);
         EvalCase c = requireCase(taskId, caseId);
         List<String> cmd = EvalRunner.buildCommand(c.getKind(), c.getTarget(), EvalRunner.isWindows());
@@ -361,16 +408,24 @@ public class EvalLoopService {
             reason = j.reason();
         }
         String outputFile = writeOutputFile(taskId, caseId, exec.output());
-        recordResult(task, c, verdict, exec.exitCode(), exec.elapsedMs(), reason,
+        finishResult(row, task, c, verdict, exec.exitCode(), exec.elapsedMs(), reason,
                 EvalRunner.summarize(exec.output()), outputFile);
     }
 
-    private void recordResult(EvalTask task, EvalCase c, String verdict, Integer exitCode, long elapsedMs,
-                              String reason, String outputSummary, String outputFile) {
+    /** 同步终态（安全闸拦截/沙箱跳过）：新建结果行并直接写终值，返回该行（含生成的 id） */
+    private EvalCaseResult recordResult(EvalTask task, EvalCase c, String verdict, Integer exitCode, long elapsedMs,
+                                        String reason, String outputSummary, String outputFile) {
         EvalCaseResult r = new EvalCaseResult();
         r.setTaskId(task.getId());
         r.setCaseId(c.getId());
         r.setTriggerMode("TRIAL");
+        finishResult(r, task, c, verdict, exitCode, elapsedMs, reason, outputSummary, outputFile);
+        return r;
+    }
+
+    /** 在给定结果行上写终值 + 同步 case 快照（判定内核不在此处——verdict 全部来自 EvalRunner.judge/闸门） */
+    private void finishResult(EvalCaseResult r, EvalTask task, EvalCase c, String verdict, Integer exitCode,
+                              long elapsedMs, String reason, String outputSummary, String outputFile) {
         r.setVerdict(verdict);
         r.setExitCode(exitCode);
         r.setElapsedMs(elapsedMs);
@@ -387,8 +442,8 @@ public class EvalLoopService {
         c.setLastOutputSummary(outputSummary);
         c.setLastOutputFile(outputFile);
         cases.save(c);
-        log.info("[Eval] 试跑完成 task={} case={}「{}」 verdict={} exit={} elapsed={}ms",
-                task.getId(), c.getId(), c.getTitle(), verdict, exitCode, elapsedMs);
+        log.info("[Eval] 试跑完成 task={} case={} result={}「{}」 verdict={} exit={} elapsed={}ms",
+                task.getId(), c.getId(), r.getId(), c.getTitle(), verdict, exitCode, elapsedMs);
     }
 
     /** 执行工作目录：绑定实例的 claudeWorkingDir → shellWorkingDir → null（继承后端进程目录） */
@@ -422,24 +477,115 @@ public class EvalLoopService {
         return Path.of(System.getProperty("java.io.tmpdir"), "feishu-eval-logs");
     }
 
+    /**
+     * 单条 eval 的最近执行记录列表。
+     * 排序契约：按 id 倒序（最新在前，见 {@link EvalCaseResultRepository#findTop20ByCaseIdOrderByIdDesc}）。
+     * 正在执行的一轮以 verdict=RUNNING 的行出现——「从未跑过」（空列表）与「正在跑」由此可分。
+     */
     public JsonArray caseResults(Long taskId, Long caseId) {
         requireCase(taskId, caseId);
         JsonArray arr = new JsonArray();
         for (EvalCaseResult r : results.findTop20ByCaseIdOrderByIdDesc(caseId)) {
-            JsonObject o = new JsonObject();
-            o.addProperty("id", r.getId());
-            o.addProperty("verdict", r.getVerdict());
-            if (r.getExitCode() != null) o.addProperty("exitCode", r.getExitCode());
-            else o.add("exitCode", com.google.gson.JsonNull.INSTANCE);
-            o.addProperty("elapsedMs", r.getElapsedMs());
-            o.addProperty("reason", r.getReason());
-            o.addProperty("outputSummary", r.getOutputSummary());
-            o.addProperty("outputFile", r.getOutputFile());
-            o.addProperty("triggerMode", r.getTriggerMode());
-            o.addProperty("ranAt", str(r.getRanAt()));
-            arr.add(o);
+            arr.add(singleResultJson(r));
         }
         return arr;
+    }
+
+    /**
+     * 按 resultId 精确取单次执行结果（轮询契约：一律用 trial 返回的 resultId 调这里，
+     * <b>不许靠「读列表第一条」</b>——那会把上一轮的旧结果当成本轮的，MVP-1.6 实测缺陷回归锁）。
+     */
+    public JsonObject resultJson(Long taskId, Long caseId, Long resultId) {
+        requireCase(taskId, caseId);
+        EvalCaseResult r = results.findById(resultId)
+                .filter(x -> caseId.equals(x.getCaseId()) && taskId.equals(x.getTaskId()))
+                .orElseThrow(() -> new IllegalArgumentException("执行记录不存在: " + resultId));
+        return singleResultJson(r);
+    }
+
+    private static JsonObject singleResultJson(EvalCaseResult r) {
+        JsonObject o = new JsonObject();
+        o.addProperty("id", r.getId());
+        o.addProperty("verdict", r.getVerdict());
+        if (r.getExitCode() != null) o.addProperty("exitCode", r.getExitCode());
+        else o.add("exitCode", com.google.gson.JsonNull.INSTANCE);
+        o.addProperty("elapsedMs", r.getElapsedMs());
+        o.addProperty("reason", r.getReason());
+        o.addProperty("outputSummary", r.getOutputSummary());
+        o.addProperty("outputFile", r.getOutputFile());
+        o.addProperty("triggerMode", r.getTriggerMode());
+        o.addProperty("ranAt", str(r.getRanAt()));
+        return o;
+    }
+
+    /**
+     * 单次执行记录的输出全文（分页读取，MVP-1.6 追加 2：「错误了要看执行的输出是什么，这样才能排查」）。
+     * <p>
+     * 安全纪律：文件路径<b>只取自库里该条 result 记录的 outputFile 字段</b>，接口绝不接受调用方传路径
+     *（否则变成任意文件读取漏洞）。按行分页（offsetLine + maxLines，maxLines 钳制 1..2000），
+     * 一次绝不吐几 MB；同时返回 totalLines/truncated 与完整输出文件路径，用户可自己打开全文。
+     */
+    public JsonObject resultOutput(Long taskId, Long caseId, Long resultId, int offsetLine, int maxLines) {
+        requireCase(taskId, caseId);
+        EvalCaseResult r = results.findById(resultId)
+                .filter(x -> caseId.equals(x.getCaseId()) && taskId.equals(x.getTaskId()))
+                .orElseThrow(() -> new IllegalArgumentException("执行记录不存在: " + resultId));
+        JsonObject o = new JsonObject();
+        o.addProperty("id", r.getId());
+        o.addProperty("verdict", r.getVerdict());
+        if (r.getExitCode() != null) o.addProperty("exitCode", r.getExitCode());
+        else o.add("exitCode", com.google.gson.JsonNull.INSTANCE);
+        o.addProperty("elapsedMs", r.getElapsedMs());
+        o.addProperty("reason", r.getReason());
+        o.addProperty("outputSummary", r.getOutputSummary());
+        o.addProperty("outputFile", r.getOutputFile());
+        o.addProperty("ranAt", str(r.getRanAt()));
+        o.addProperty("triggerMode", r.getTriggerMode());
+
+        String file = r.getOutputFile();
+        int offset = Math.max(0, offsetLine);
+        int limit = Math.min(Math.max(1, maxLines), 2000);
+        o.addProperty("offsetLine", offset);
+        o.addProperty("maxLines", limit);
+        if (file == null || file.isBlank() || !Files.isRegularFile(Path.of(file))) {
+            // SKIPPED / 只读安全闸拦截（没起进程）或落盘失败 → 没有全文可给，如实说明，不留空白
+            o.addProperty("content", "");
+            o.addProperty("totalLines", 0);
+            o.addProperty("truncated", false);
+            o.addProperty("note", "该次执行没有落盘输出文件（未起进程——如 SKIPPED/只读安全闸拦截，或当时落盘失败）；"
+                    + "判定依据见 reason，摘要见 outputSummary");
+            return o;
+        }
+        try {
+            long totalBytes = Files.size(Path.of(file));
+            StringBuilder sb = new StringBuilder();
+            int lineNo = 0;
+            boolean truncated = false;
+            try (var br = Files.newBufferedReader(Path.of(file), StandardCharsets.UTF_8)) {
+                String line;
+                while ((line = br.readLine()) != null) {
+                    if (lineNo >= offset && lineNo < offset + limit) {
+                        sb.append(line).append('\n');
+                    }
+                    lineNo++;
+                }
+            }
+            truncated = lineNo > offset + limit;
+            o.addProperty("content", sb.toString());
+            o.addProperty("totalLines", lineNo);
+            o.addProperty("totalBytes", totalBytes);
+            o.addProperty("truncated", truncated);
+            if (truncated) {
+                o.addProperty("note", "输出较长已按行分页（本页 " + offset + ".." + Math.min(lineNo, offset + limit)
+                        + " / 共 " + lineNo + " 行）；完整输出文件: " + file);
+            }
+        } catch (java.io.IOException e) {
+            o.addProperty("content", "");
+            o.addProperty("totalLines", 0);
+            o.addProperty("truncated", false);
+            o.addProperty("note", "读取输出文件失败: " + e.getMessage() + "（文件: " + file + "）");
+        }
+        return o;
     }
 
     // ===== 通过率统计（分母诚实：未落地/跳过/未跑 一律不进分母） =====
@@ -601,7 +747,9 @@ public class EvalLoopService {
      * 导入勾选的模板 → 批量建 eval（AC13′/AC14′）：
      * 变量填齐 → 落地为可执行 case（target/expect 已展开）；变量缺失 → target 留空 =
      * 「未落地」（{@link EvalRunner#isLanded} 同一口径，不进通过率分母），notes 写清缺哪个变量。
-     * 导入不做任何判定——verdict 仍只能来自之后的真实试跑。
+     * MVP-1.6：supplierDir/slnPath 由 {@link #templateVars} 自动解析（探测不到唯一候选 = 视同缺变量，
+     * notes 写明歧义原因）；http 类展开后 target 指向写操作端点 → {@link EvalReadOnlyGuard} 只读安全闸
+     * 拒绝落地（notes 写明命中片段）。导入不做任何判定——verdict 仍只能来自之后的真实试跑。
      *
      * @return {imported, landed, notLanded}
      */
@@ -625,10 +773,13 @@ public class EvalLoopService {
             c.setTaskId(t.getId());
             c.setTitle(tpl.title());
             c.setKind(EvalRunner.KINDS.contains(tpl.kind()) ? tpl.kind() : "script");
-            boolean missing = !target.missingVariables().isEmpty();
+            // 只读安全闸（MVP-1.6 追加）：http 类 target 指向写操作端点 → 拒绝落地（导入时就拦，试跑前还会再拦一道）
+            EvalReadOnlyGuard.GuardResult guard = EvalReadOnlyGuard.check(c.getKind(), target.text());
+            boolean blocked = guard.blocked();
+            boolean missing = !target.missingVariables().isEmpty() || blocked;
             if (missing) {
                 c.setTarget("");                       // 未落地：不可执行、不进分母（复用 isLanded 口径）
-                c.setExpect(expect.missingVariables().isEmpty() ? expect.text() : "");
+                c.setExpect(!blocked && expect.missingVariables().isEmpty() ? expect.text() : "");
                 notLanded++;
             } else {
                 c.setTarget(target.text());
@@ -637,15 +788,34 @@ public class EvalLoopService {
             }
             StringBuilder notes = new StringBuilder(tpl.description() == null ? "" : tpl.description());
             if (!tpl.verified()) notes.append("\n【该模板未真实验证过，首跑结果出来前请勿当作可信基线】");
-            if (missing) {
+            if (blocked) {
+                notes.append("\n【只读安全闸·拒绝导入】eval 禁止写操作端点：").append(guard.matched())
+                        .append("。对外只允许查询类请求（已知只读目标类别: ")
+                        .append(EvalReadOnlyGuard.describeAllowed())
+                        .append("）；修正上下文变量后重新导入。");
+            }
+            if (!target.missingVariables().isEmpty()) {
                 notes.append("\n缺少上下文变量：").append(String.join("、", target.missingVariables()))
                         .append("——在任务设置「上下文变量」里补齐后重新导入，或手动编辑补出可执行 target。")
                         .append("\n模板 target：").append(tpl.targetTemplate());
                 if (target.missingVariables().contains("repoPath")) {
                     // repoPath 缺省由绑定实例的工作目录自动填充（templateVars）；能缺 = 自动填充也失败了
-                    notes.append("\nrepoPath = 静态扫描的仓库根目录，缺省自动取绑定实例的工作目录（claudeWorkingDir）。")
+                    notes.append("\nrepoPath = 仓库根目录（build 找 .sln、类注册引用全仓检索用），缺省自动取绑定实例的工作目录（claudeWorkingDir）。")
                             .append("当前未绑定实例或实例无工作目录——请先在任务设置绑定指向供应商仓库的实例，")
                             .append("或在「上下文变量」里显式填 repoPath 后重新导入；不会退化成在后端进程目录里扫（那会恒红且理由错误）。");
+                }
+                if (target.missingVariables().contains("supplierDir")) {
+                    PathResolution sd = resolveSupplierDir(t, vars);
+                    notes.append("\nsupplierDir = 供应商目录（「只管本次交付」的静态检查扫描根，约定位置 ")
+                            .append(SUPPLIER_SUBDIR).append("/<供应商>）。当前自动解析未成功：")
+                            .append(sd.problem() == null ? "原因未知" : sd.problem())
+                            .append("。绝不瞎猜、绝不回退到仓库根（那会把全仓历史债算到本次交付头上，通过率恒 0 并诱导乱改无关代码）。");
+                }
+                if (target.missingVariables().contains("slnPath")) {
+                    PathResolution sln = resolveSlnPath(vars);
+                    notes.append("\nslnPath = build 模板的解决方案路径，缺省解析 repoPath 下唯一的 .sln。当前解析未成功：")
+                            .append(sln.problem() == null ? "原因未知" : sln.problem())
+                            .append("。不会跑一条缺解决方案路径、必失败的命令。");
                 }
             }
             notes.append("\n（来源：内置通用模板 ").append(tpl.key()).append("）");
@@ -673,11 +843,21 @@ public class EvalLoopService {
     }
 
     /**
-     * 模板展开用变量表 = 任务 context_json + 系统变量 evalScriptDir / repoPath（自动解析，不需要用户填）。
+     * 模板展开用变量表 = 任务 context_json + 系统变量 evalScriptDir / repoPath / supplierDir / slnPath。
      * <p>
-     * repoPath（静态扫描类模板的扫描根目录）：上下文变量里显式给了 → 显式值优先；缺省 →
-     * 复用 {@link #resolveWorkDir} 取绑定实例的工作目录（claudeWorkingDir → shellWorkingDir）。
-     * 未绑定实例或实例无工作目录 → 不放值：{{repoPath}} 展不开 → 该模板导入时落「未落地」，
+     * repoPath（<b>仓库根</b>：build 找 .sln、class-registered 全仓引用检索用）：上下文变量显式给了 →
+     * 显式值优先；缺省 → 复用 {@link #resolveWorkDir} 取绑定实例的工作目录（claudeWorkingDir → shellWorkingDir）。
+     * <p>
+     * supplierDir（<b>供应商目录</b>：no-empty-catch 等「只管本次交付」的检查用，MVP-1.6 与 repoPath 拆分——
+     * 两条静态 eval 的扫描根需求天然冲突）：显式给了 → 显式值优先；留空 → 在
+     * {@code repoPath/src/Business/Supplier/} 下按任务 supplierCode 探测（code 为空则取全部子目录），
+     * <b>唯一命中才自动填</b>；0 个或多个候选 → 不放值（模板落「未落地」，notes 写明歧义），
+     * <b>绝不瞎猜、绝不回退到仓库根</b>（全仓历史债会让通过率恒 0 并诱导乱改无关代码）。
+     * <p>
+     * slnPath（build 模板的解决方案路径）：显式给了 → 优先；缺省 → 解析 repoPath 下<b>唯一</b>的 *.sln；
+     * 0 个或多个 → 不放值（未落地），绝不跑一条缺 sln 必失败的命令。
+     * <p>
+     * 未绑定实例或实例无工作目录 → repoPath 不放值：{{repoPath}} 展不开 → 该模板导入时落「未落地」，
      * <b>绝不静默退化成后端进程 cwd 去扫</b>（实测缺陷：那样静态扫描恒红且红的理由是错的）。
      * 路径统一正斜杠（与 evalScriptDir 同规，node 在 Windows 也认，且避开 cmd 引号内尾部反斜杠转义坑）。
      */
@@ -695,7 +875,135 @@ public class EvalLoopService {
                 vars.remove("repoPath");   // 空白显式值也移除 → expand 统一报「缺 repoPath」→ 未落地
             }
         }
+        PathResolution sd = resolveSupplierDir(t, vars);
+        if (sd.path() != null) vars.put("supplierDir", sd.path());
+        else vars.remove("supplierDir");   // 探测不到唯一目录 → 展不开 → 未落地 + notes 写明歧义（AC19′）
+        PathResolution sln = resolveSlnPath(vars);
+        if (sln.path() != null) vars.put("slnPath", sln.path());
+        else vars.remove("slnPath");       // 无 sln / 多个 sln → 未落地，不跑必失败命令（AC20′）
         return vars;
+    }
+
+    /** 路径解析结果：path=null 时 problem 写明原因（导入 notes / 排查用，绝不静默） */
+    record PathResolution(String path, String problem) {
+        static PathResolution of(String path) { return new PathResolution(path, null); }
+        static PathResolution fail(String problem) { return new PathResolution(null, problem); }
+    }
+
+    /** 供应商代码目录约定（探测 supplierDir 用） */
+    static final String SUPPLIER_SUBDIR = "src/Business/Supplier";
+
+    /** 目录扫描跳过项（与 scripts/eval/*.js 的 SKIP_DIRS 同口径） */
+    private static final Set<String> SCAN_SKIP_DIRS = Set.of(
+            "bin", "obj", ".git", "node_modules", ".vs", ".idea", "packages", "TestResults");
+
+    /**
+     * supplierDir 解析（AC19′）：显式上下文变量优先（指向不存在目录也算失败，写明原因）；
+     * 缺省在 repoPath/src/Business/Supplier/ 下探测——supplierCode 非空按名字（大小写不敏感）匹配，
+     * 为空则全部子目录都是候选；<b>唯一命中才自动填</b>，0 个或多个 → 失败并写明歧义。
+     */
+    PathResolution resolveSupplierDir(EvalTask t, Map<String, String> vars) {
+        String explicit = vars.get("supplierDir");
+        if (explicit != null && !explicit.isBlank()) {
+            String norm = explicit.trim().replace('\\', '/');
+            if (!Files.isDirectory(Path.of(norm))) {
+                return PathResolution.fail("上下文变量 supplierDir 显式指向的目录不存在: " + norm);
+            }
+            return PathResolution.of(norm);
+        }
+        String repo = vars.get("repoPath");
+        if (repo == null || repo.isBlank()) {
+            return PathResolution.fail("缺 repoPath（未绑定实例或实例无工作目录，且未在上下文变量显式填写），无法探测供应商目录");
+        }
+        Path base = Path.of(repo).resolve(SUPPLIER_SUBDIR);
+        if (!Files.isDirectory(base)) {
+            return PathResolution.fail(repo + " 下不存在 " + SUPPLIER_SUBDIR + "/ 目录，无法自动探测供应商目录");
+        }
+        List<String> names;
+        try (var s = Files.list(base)) {
+            names = s.filter(Files::isDirectory).map(p -> p.getFileName().toString()).sorted().toList();
+        } catch (java.io.IOException e) {
+            return PathResolution.fail("枚举 " + base + " 失败: " + e.getMessage());
+        }
+        String code = t.getSupplierCode() == null ? "" : t.getSupplierCode().trim();
+        List<String> hits = code.isEmpty() ? names
+                : names.stream().filter(n -> n.equalsIgnoreCase(code)).toList();
+        if (hits.size() == 1) {
+            return PathResolution.of(base.resolve(hits.get(0)).toString().replace('\\', '/'));
+        }
+        if (hits.isEmpty()) {
+            return PathResolution.fail("供应商目录探测 0 个候选：" + base + " 下"
+                    + (code.isEmpty() ? "没有任何子目录" : "没有名字匹配 supplierCode=" + code + " 的目录")
+                    + "（现有: " + (names.isEmpty() ? "无" : String.join("、", names)) + "）——请在上下文变量显式填 supplierDir");
+        }
+        return PathResolution.fail("供应商目录探测有歧义（" + hits.size() + " 个候选: " + String.join("、", hits)
+                + "），唯一命中才自动填——请在上下文变量显式填 supplierDir");
+    }
+
+    /**
+     * slnPath 解析（AC20′）：显式上下文变量优先；缺省在 repoPath 下找<b>唯一</b>的 *.sln
+     *（跳过 bin/obj/.git 等目录）；0 个或多个 → 失败并写明原因，模板落「未落地」。
+     */
+    PathResolution resolveSlnPath(Map<String, String> vars) {
+        String explicit = vars.get("slnPath");
+        if (explicit != null && !explicit.isBlank()) {
+            String norm = explicit.trim().replace('\\', '/');
+            if (!Files.isRegularFile(Path.of(norm))) {
+                return PathResolution.fail("上下文变量 slnPath 显式指向的文件不存在: " + norm);
+            }
+            return PathResolution.of(norm);
+        }
+        String repo = vars.get("repoPath");
+        if (repo == null || repo.isBlank()) {
+            return PathResolution.fail("缺 repoPath（未绑定实例或实例无工作目录，且未在上下文变量显式填写），无法解析 .sln");
+        }
+        Path root = Path.of(repo);
+        if (!Files.isDirectory(root)) {
+            return PathResolution.fail("repoPath 指向的目录不存在: " + repo);
+        }
+        List<Path> slns = findSlnFiles(root);
+        if (slns.size() == 1) {
+            return PathResolution.of(slns.get(0).toString().replace('\\', '/'));
+        }
+        if (slns.isEmpty()) {
+            return PathResolution.fail("repoPath（" + repo + "）下没找到任何 .sln——请确认仓库根是否正确，或在上下文变量显式填 slnPath");
+        }
+        List<String> names = slns.stream().map(p -> root.relativize(p).toString().replace('\\', '/')).sorted().toList();
+        return PathResolution.fail("repoPath（" + repo + "）下找到 " + slns.size() + " 个 .sln（"
+                + String.join("、", names) + "），有歧义——请在上下文变量显式填 slnPath");
+    }
+
+    /** repoPath 下递归找 *.sln（跳过 bin/obj/.git/node_modules/.vs/.idea/packages/TestResults） */
+    static List<Path> findSlnFiles(Path root) {
+        List<Path> out = new java.util.ArrayList<>();
+        try {
+            Files.walkFileTree(root, new java.nio.file.SimpleFileVisitor<>() {
+                @Override
+                public java.nio.file.FileVisitResult preVisitDirectory(Path dir,
+                        java.nio.file.attribute.BasicFileAttributes attrs) {
+                    String n = dir.getFileName() == null ? "" : dir.getFileName().toString();
+                    if (!dir.equals(root) && SCAN_SKIP_DIRS.contains(n)) {
+                        return java.nio.file.FileVisitResult.SKIP_SUBTREE;
+                    }
+                    return java.nio.file.FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public java.nio.file.FileVisitResult visitFile(Path file,
+                        java.nio.file.attribute.BasicFileAttributes attrs) {
+                    if (file.getFileName().toString().toLowerCase().endsWith(".sln")) out.add(file);
+                    return java.nio.file.FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public java.nio.file.FileVisitResult visitFileFailed(Path file, java.io.IOException exc) {
+                    return java.nio.file.FileVisitResult.CONTINUE;   // 读不到的文件跳过，不让整次解析失败
+                }
+            });
+        } catch (java.io.IOException e) {
+            log.warn("[Eval] 解析 .sln 失败 root={}: {}", root, e.getMessage());
+        }
+        return out;
     }
 
     // ===== 小工具 =====

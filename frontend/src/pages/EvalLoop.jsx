@@ -248,6 +248,7 @@ function TaskDetail({ taskId, showToast, onDeleted }) {
   const [templatesOpen, setTemplatesOpen] = useState(false)
   const [expanded, setExpanded] = useState(null)      // caseId
   const [history, setHistory] = useState(null)        // {caseId, rows}
+  const [historyOut, setHistoryOut] = useState(null)  // {resultId, data, content, nextOffset, truncated}
   const pollRef = useRef(null)
 
   const load = () => fetch(`/api/eval-tasks/${taskId}`).then(r => r.ok ? r.json() : null).then(d => { if (d) setDetail(d) }).catch(() => {})
@@ -267,8 +268,34 @@ function TaskDetail({ taskId, showToast, onDeleted }) {
     const res = await fetch(`/api/eval-tasks/${taskId}/cases/${c.id}/trial`, { method: 'POST' })
     const d = await res.json().catch(() => ({}))
     if (!res.ok) return showToast(d.error || '试跑启动失败', 'error')
-    showToast(`▶ 已开始执行「${c.title}」，结果出来会自动刷新`, 'success')
     load()
+    if (d.resultId != null && d.verdict === 'RUNNING') {
+      showToast(`▶ 已开始执行「${c.title}」（本次记录 #${d.resultId}）`, 'success')
+      pollTrialResult(c, d.resultId)   // 按本次 resultId 轮询单次结果——绝不"读列表第一条"（会读到上一轮旧结果）
+    } else if (d.resultId != null) {
+      // 同步终态：只读安全闸拦截（FAIL）或缺沙箱凭据（SKIPPED），进程没起
+      showToast(`「${c.title}」→ ${VERDICT[d.verdict]?.label || d.verdict}（本次记录 #${d.resultId}，未起进程）`,
+        d.verdict === 'FAIL' ? 'error' : 'success')
+    } else {
+      showToast(`▶ 已提交「${c.title}」`, 'success')
+    }
+  }
+
+  // 轮询本次 resultId 直到离开 RUNNING；结束后刷新详情（行内直接显示失败输出）
+  function pollTrialResult(c, resultId) {
+    const started = Date.now()
+    const timer = setInterval(async () => {
+      const r = await fetch(`/api/eval-tasks/${taskId}/cases/${c.id}/results/${resultId}`)
+        .then(x => x.ok ? x.json() : null).catch(() => null)
+      if (r && r.verdict !== 'RUNNING') {
+        clearInterval(timer)
+        load()
+        showToast(`「${c.title}」→ ${VERDICT[r.verdict]?.label || r.verdict}（本次记录 #${resultId}）`,
+          r.verdict === 'PASS' ? 'success' : 'error')
+      } else if (Date.now() - started > ((c.timeoutSec || 120) + 30) * 1000) {
+        clearInterval(timer); load()   // 兜底：超时强杀后 detail 轮询会带回终态
+      }
+    }, 1500)
   }
 
   async function toggleEnabled(c) {
@@ -302,7 +329,24 @@ function TaskDetail({ taskId, showToast, onDeleted }) {
 
   async function loadHistory(c) {
     const rows = await fetch(`/api/eval-tasks/${taskId}/cases/${c.id}/results`).then(r => r.ok ? r.json() : []).catch(() => [])
+    setHistoryOut(null)
     setHistory({ caseId: c.id, rows: Array.isArray(rows) ? rows : [] })
+  }
+
+  // 单次执行记录的输出全文（后端按行分页读落盘文件；路径只由库记录给出，前端不传路径）
+  async function loadHistoryOutput(r, more = false) {
+    const offset = more && historyOut?.resultId === r.id ? historyOut.nextOffset : 0
+    const d = await fetch(`/api/eval-tasks/${taskId}/cases/${history.caseId}/results/${r.id}/output?offsetLine=${offset}&maxLines=200`)
+      .then(res => res.ok ? res.json() : null).catch(() => null)
+    if (!d) return showToast('读取执行输出失败', 'error')
+    const added = (d.content.match(/\n/g) || []).length
+    setHistoryOut(prev => ({
+      resultId: r.id,
+      data: d,
+      content: (more && prev?.resultId === r.id ? prev.content : '') + d.content,
+      nextOffset: offset + added,
+      truncated: !!d.truncated,
+    }))
   }
 
   return (
@@ -380,19 +424,49 @@ function TaskDetail({ taskId, showToast, onDeleted }) {
           showToast(`已导入 ${r.imported} 条模板 eval（可执行 ${r.landed} 条${r.notLanded > 0 ? `，未落地 ${r.notLanded} 条：缺上下文变量，不计入通过率` : ''}）`, 'success')
         }}
         showToast={showToast} />}
-      {history && <Surface kind="drawer" label="执行记录" onClose={() => setHistory(null)}>
-        <div className="modal-box" style={{ maxWidth: 640 }}>
+      {history && <Surface kind="drawer" label="执行记录" onClose={() => { setHistory(null); setHistoryOut(null) }}>
+        <div className="modal-box" style={{ maxWidth: 720 }}>
           <div className="modal-title">最近执行记录</div>
-          {history.rows.length === 0 && <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>还没有执行记录。</div>}
+          {history.rows.length === 0 && (
+            <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>
+              无执行记录——这条 eval 还没跑过。点「试跑」后这里会出现每次执行的判定、退出码、耗时与输出。
+            </div>
+          )}
           {history.rows.map(r => (
             <div key={r.id} className="card" style={{ padding: '10px 12px', marginBottom: 8 }}>
-              <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12.5 }}>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 12.5, flexWrap: 'wrap' }}>
                 <VerdictBadge verdict={r.verdict} />
+                <span style={{ color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>#{r.id}</span>
                 <span>退出码 {r.exitCode ?? '—'}</span>
                 <span>耗时 {fmtMs(r.elapsedMs)}</span>
                 <span style={{ color: 'var(--text-dim)' }}>{String(r.ranAt || '').replace('T', ' ').substring(0, 19)}</span>
+                <div style={{ flex: 1 }} />
+                {r.verdict === 'RUNNING'
+                  ? <span style={{ fontSize: 11.5, color: '#0891b2' }}>执行中——结束后此处显示本次输出</span>
+                  : <button className="btn" style={{ fontSize: 11.5, padding: '1px 10px' }}
+                      onClick={() => historyOut?.resultId === r.id ? setHistoryOut(null) : loadHistoryOutput(r)}>
+                      {historyOut?.resultId === r.id ? '收起输出' : '查看输出'}
+                    </button>}
               </div>
-              {r.reason && <div style={{ fontSize: 12, marginTop: 4, color: r.verdict === 'PASS' ? 'var(--text-dim)' : '#dc2626' }}>{r.reason}</div>}
+              {r.reason && <div style={{ fontSize: 12, marginTop: 4, color: r.verdict === 'PASS' ? 'var(--text-dim)' : '#dc2626' }}>判定依据：{r.reason}</div>}
+              {historyOut?.resultId === r.id && (
+                <div style={{ marginTop: 6 }}>
+                  <b style={{ fontSize: 12 }}>该次执行输出{historyOut.data.totalLines ? `（共 ${historyOut.data.totalLines} 行${historyOut.data.totalBytes ? ` / ${(historyOut.data.totalBytes / 1024).toFixed(1)}KB` : ''}）` : ''}：</b>
+                  <pre style={{ ...preStyle, maxHeight: 320 }}>{historyOut.content || '（无输出内容）'}</pre>
+                  {historyOut.data.note && <div style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>{historyOut.data.note}</div>}
+                  {historyOut.data.outputFile && (
+                    <div style={{ fontSize: 11.5, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>
+                      完整输出文件：{historyOut.data.outputFile}
+                    </div>
+                  )}
+                  {historyOut.truncated && (
+                    <button className="btn" style={{ fontSize: 11.5, padding: '2px 10px', marginTop: 4 }}
+                      onClick={() => loadHistoryOutput(r, true)}>
+                      加载更多（从第 {historyOut.nextOffset + 1} 行）
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -434,6 +508,23 @@ function CaseRow({ c, expanded, onToggle, onTrial, onEdit, onRemove, onToggleEna
           <button className="btn" style={{ fontSize: 12, padding: '2px 8px', color: 'var(--error)' }} disabled={running} onClick={onRemove}>删除</button>
         </div>
       </div>
+      {/* 失败时该次输出直接显示在列表行下方（不用点开再点一层）：「错误了要看执行的输出是什么，这样才能排查」 */}
+      {!expanded && ['FAIL', 'ERROR', 'TIMEOUT'].includes(c.lastVerdict) && (
+        <div style={{ borderTop: '1px solid var(--border, rgba(0,0,0,.08))', padding: '8px 14px', fontSize: 12, background: 'rgba(220,38,38,.04)' }}>
+          <div style={{ color: '#dc2626', fontWeight: 600, marginBottom: 4 }}>
+            最近执行未通过（{VERDICT[c.lastVerdict]?.label || c.lastVerdict}）——该次输出直接显示，便于排查：
+          </div>
+          {c.lastReason && <div style={{ color: '#dc2626', marginBottom: 4 }}>判定依据：{c.lastReason}</div>}
+          {c.lastOutputSummary
+            ? <pre style={{ ...preStyle, maxHeight: 160, marginBottom: 4 }}>{c.lastOutputSummary}</pre>
+            : <div style={{ color: 'var(--text-dim)', marginBottom: 4 }}>本次没有进程输出（进程未启动——如被只读安全闸拦截、缺沙箱凭据跳过，或启动失败）。</div>}
+          {c.lastOutputFile && (
+            <div style={{ color: 'var(--text-dim)', fontSize: 11.5, fontFamily: 'var(--font-mono)', wordBreak: 'break-all' }}>
+              完整输出：{c.lastOutputFile}（点行展开 →「执行记录」可分页在线查看）
+            </div>
+          )}
+        </div>
+      )}
       {expanded && (
         <div style={{ borderTop: '1px solid var(--border, rgba(0,0,0,.08))', padding: '10px 14px', fontSize: 12.5 }}>
           <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', color: 'var(--text-dim)', marginBottom: 6 }}>
