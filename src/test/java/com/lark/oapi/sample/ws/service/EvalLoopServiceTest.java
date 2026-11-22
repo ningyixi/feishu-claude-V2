@@ -46,7 +46,7 @@ class EvalLoopServiceTest {
         resultRepo = mock(EvalCaseResultRepository.class);
         instanceRepo = mock(BotInstanceRepository.class);
         service = new EvalLoopService(taskRepo, caseRepo, resultRepo, instanceRepo,
-                tmp.resolve("eval-logs").toString());
+                tmp.resolve("eval-logs").toString(), "", "");
     }
 
     private static EvalCase evalCase(long id, boolean enabled, String target, String lastVerdict) {

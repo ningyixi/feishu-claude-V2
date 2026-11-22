@@ -30,6 +30,11 @@ feishu:
   # 供应商知识库解析产物目录（与 H2 同盘：本地盘，不放 Z: NAS）
   # 跨平台部署用环境变量覆盖：FEISHU_KB_PATH=/opt/feishu-claude-data/supplier-kb
   kb-dir: ${FEISHU_KB_PATH:D:/feishu-claude-data/supplier-kb}
+  # eval 模板库文件（11-21 MVP-1.5）：空 = 先读进程目录 src/main/resources/eval-templates.json
+  # （开发态改文件即生效），再退 classpath；指向外部文件可让运维自助改模板
+  eval-templates: ${FEISHU_EVAL_TEMPLATES:}
+  # eval 通用脚本目录（scripts/eval）覆盖入口：空 = 自动按进程目录解析成绝对路径
+  eval-script-dir: ${FEISHU_EVAL_SCRIPT_DIR:}
 
 # 数字员工自动 PR（GitPrService）
 employee:

@@ -3,7 +3,7 @@
   "name": "supplier-eval-loop",
   "title": "侧边栏新功能：供应商代码质量 eval loop（可执行判定 → 循环改码 → 经验回写两个 skill）",
   "description": "",
-  "status": "planning",
+  "status": "in_progress",
   "dev_type": null,
   "scope": null,
   "package": null,

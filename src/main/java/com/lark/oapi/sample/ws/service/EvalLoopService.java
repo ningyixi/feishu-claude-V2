@@ -62,6 +62,12 @@ public class EvalLoopService {
     /** 输出落盘目录（空 = 系统临时目录下 feishu-eval-logs） */
     private final String logDirConfig;
 
+    /** 模板库文件覆盖入口（feishu.eval-templates；空 = EvalTemplates 默认解析顺序，AC16′ 改文件即生效） */
+    private final String templatesFileConfig;
+
+    /** 通用脚本目录覆盖入口（feishu.eval-script-dir；空 = 进程目录下 scripts/eval） */
+    private final String scriptDirConfig;
+
     /** 每任务一把串行闸（Semaphore 而非 ReentrantLock：加锁在 HTTP 线程、释放在执行线程） */
     private final Map<Long, Semaphore> taskLocks = new ConcurrentHashMap<>();
 
@@ -73,12 +79,16 @@ public class EvalLoopService {
 
     public EvalLoopService(EvalTaskRepository tasks, EvalCaseRepository cases, EvalCaseResultRepository results,
                            BotInstanceRepository instances,
-                           @Value("${feishu.eval-log-dir:}") String logDirConfig) {
+                           @Value("${feishu.eval-log-dir:}") String logDirConfig,
+                           @Value("${feishu.eval-templates:}") String templatesFileConfig,
+                           @Value("${feishu.eval-script-dir:}") String scriptDirConfig) {
         this.tasks = tasks;
         this.cases = cases;
         this.results = results;
         this.instances = instances;
         this.logDirConfig = logDirConfig == null ? "" : logDirConfig.trim();
+        this.templatesFileConfig = templatesFileConfig == null ? "" : templatesFileConfig.trim();
+        this.scriptDirConfig = scriptDirConfig == null ? "" : scriptDirConfig.trim();
     }
 
     /** 后端重启会把执行中 eval 悬在 RUNNING（虚拟线程已死）：启动时归位成 ERROR，防页面永远转圈 */
@@ -117,9 +127,10 @@ public class EvalLoopService {
      * 任务设置更新（patch 语义：null = 保持原值）。
      * 例外是 instanceId——前端总是显式携带该键，{@code setInstance=true} 时 null 表示解绑
      * （解绑后 eval 在后端进程目录执行）。
+     * contextJson（MVP-1.5）：任务级上下文变量，null = 保持原值；非 null 必须是扁平 JSON 对象。
      */
     public void updateTask(Long id, String name, String supplierCode, boolean setInstance, Long instanceId,
-                           String reviewSkillPath, String createSkillPath) {
+                           String reviewSkillPath, String createSkillPath, String contextJson) {
         EvalTask t = requireTask(id);
         if (name != null && !name.isBlank()) t.setName(name.trim());
         else if (name != null) throw new IllegalArgumentException("任务名不能为空");
@@ -127,7 +138,27 @@ public class EvalLoopService {
         if (setInstance) t.setInstanceId(instanceId);
         if (reviewSkillPath != null) t.setReviewSkillPath(reviewSkillPath.trim());
         if (createSkillPath != null) t.setCreateSkillPath(createSkillPath.trim());
+        if (contextJson != null) t.setContextJson(validateContextJson(contextJson));
         tasks.save(t);
+    }
+
+    /** 上下文变量必须是"扁平 JSON 对象"（键 → 字符串/数字/布尔），坏格式 fail-loud 拒存 */
+    static String validateContextJson(String contextJson) {
+        String s = contextJson == null ? "" : contextJson.trim();
+        if (s.isEmpty()) return "";
+        JsonObject o;
+        try {
+            o = com.google.gson.JsonParser.parseString(s).getAsJsonObject();
+        } catch (Exception e) {
+            throw new IllegalArgumentException("上下文变量必须是 JSON 对象（如 {\"configJsonPath\":\"D:/x.json\"}）: " + e.getMessage());
+        }
+        for (Map.Entry<String, com.google.gson.JsonElement> e : o.entrySet()) {
+            com.google.gson.JsonElement v = e.getValue();
+            if (v != null && !v.isJsonPrimitive() && !v.isJsonNull()) {
+                throw new IllegalArgumentException("上下文变量 " + e.getKey() + " 的值必须是字符串/数字，不能嵌套对象或数组");
+            }
+        }
+        return o.toString();
     }
 
     @Transactional
@@ -181,6 +212,7 @@ public class EvalLoopService {
         else o.add("instanceId", com.google.gson.JsonNull.INSTANCE);
         o.addProperty("reviewSkillPath", t.getReviewSkillPath());
         o.addProperty("createSkillPath", t.getCreateSkillPath());
+        o.addProperty("contextJson", t.getContextJson());
         o.addProperty("createdAt", str(t.getCreatedAt()));
         o.addProperty("updatedAt", str(t.getUpdatedAt()));
         return o;
@@ -514,6 +546,131 @@ public class EvalLoopService {
             n++;
         }
         return n;
+    }
+
+    // ===== 内置通用模板（MVP-1.5）：列表（含缺变量提示）+ 导入 =====
+
+    /**
+     * 模板库列表（供「导入通用模板」面板）：模板清单实时读文件（{@link EvalTemplates#load}，
+     * Java 不硬编码，改文件即生效），并按该任务当前上下文变量算出每条的 missingVariables，
+     * 页面直接告诉用户缺哪个变量。
+     */
+    public JsonObject templatesJson(Long taskId) throws java.io.IOException {
+        EvalTask t = requireTask(taskId);
+        EvalTemplates.Library lib = EvalTemplates.load(templatesFileConfig);
+        Map<String, String> vars = templateVars(t);
+        JsonObject o = new JsonObject();
+        o.addProperty("scriptDir", vars.get("evalScriptDir"));
+        o.addProperty("httpEvidenceWarning", lib.httpEvidenceWarning());
+        JsonArray vs = new JsonArray();
+        for (EvalTemplates.VariableSpec v : lib.variables()) {
+            JsonObject vo = new JsonObject();
+            vo.addProperty("name", v.name());
+            vo.addProperty("label", v.label());
+            vo.addProperty("placeholder", v.placeholder());
+            vo.addProperty("value", vars.getOrDefault(v.name(), ""));
+            vs.add(vo);
+        }
+        o.add("variables", vs);
+        JsonArray ts = new JsonArray();
+        for (EvalTemplates.Template tpl : lib.templates()) {
+            JsonObject to = new JsonObject();
+            to.addProperty("key", tpl.key());
+            to.addProperty("group", tpl.group());
+            to.addProperty("title", tpl.title());
+            to.addProperty("kind", tpl.kind());
+            to.addProperty("timeoutSec", tpl.timeoutSec() > 0 ? tpl.timeoutSec() : EvalRunner.defaultTimeoutSec(tpl.kind()));
+            to.addProperty("requiresSandbox", tpl.requiresSandbox());
+            to.addProperty("verified", tpl.verified());
+            to.addProperty("description", tpl.description());
+            to.addProperty("targetTemplate", tpl.targetTemplate());
+            to.addProperty("expectTemplate", tpl.expectTemplate());
+            JsonArray nv = new JsonArray();
+            tpl.needsVariables().forEach(nv::add);
+            to.add("needsVariables", nv);
+            JsonArray mv = new JsonArray();
+            EvalTemplates.expand(tpl.targetTemplate(), vars).missingVariables().forEach(mv::add);
+            to.add("missingVariables", mv);
+            ts.add(to);
+        }
+        o.add("templates", ts);
+        return o;
+    }
+
+    /**
+     * 导入勾选的模板 → 批量建 eval（AC13′/AC14′）：
+     * 变量填齐 → 落地为可执行 case（target/expect 已展开）；变量缺失 → target 留空 =
+     * 「未落地」（{@link EvalRunner#isLanded} 同一口径，不进通过率分母），notes 写清缺哪个变量。
+     * 导入不做任何判定——verdict 仍只能来自之后的真实试跑。
+     *
+     * @return {imported, landed, notLanded}
+     */
+    @Transactional
+    public JsonObject importTemplates(Long taskId, List<String> keys) throws java.io.IOException {
+        EvalTask t = requireTask(taskId);
+        if (keys == null || keys.isEmpty()) throw new IllegalArgumentException("没有勾选任何模板");
+        EvalTemplates.Library lib = EvalTemplates.load(templatesFileConfig);
+        Map<String, String> vars = templateVars(t);
+        List<EvalCase> existing = cases.findByTaskIdOrderBySortOrderAscIdAsc(taskId);
+        int sort = existing.stream().mapToInt(EvalCase::getSortOrder).max().orElse(0);
+        int landed = 0, notLanded = 0;
+        java.util.LinkedHashSet<String> unique = new java.util.LinkedHashSet<>(keys);
+        for (String key : unique) {
+            EvalTemplates.Template tpl = lib.templates().stream()
+                    .filter(x -> x.key().equals(key)).findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("未知的模板 key: " + key + "（模板库以文件为准，可能已被修改）"));
+            EvalTemplates.Expansion target = EvalTemplates.expand(tpl.targetTemplate(), vars);
+            EvalTemplates.Expansion expect = EvalTemplates.expand(tpl.expectTemplate(), vars);
+            EvalCase c = new EvalCase();
+            c.setTaskId(t.getId());
+            c.setTitle(tpl.title());
+            c.setKind(EvalRunner.KINDS.contains(tpl.kind()) ? tpl.kind() : "script");
+            boolean missing = !target.missingVariables().isEmpty();
+            if (missing) {
+                c.setTarget("");                       // 未落地：不可执行、不进分母（复用 isLanded 口径）
+                c.setExpect(expect.missingVariables().isEmpty() ? expect.text() : "");
+                notLanded++;
+            } else {
+                c.setTarget(target.text());
+                c.setExpect(expect.text());
+                landed++;
+            }
+            StringBuilder notes = new StringBuilder(tpl.description() == null ? "" : tpl.description());
+            if (!tpl.verified()) notes.append("\n【该模板未真实验证过，首跑结果出来前请勿当作可信基线】");
+            if (missing) {
+                notes.append("\n缺少上下文变量：").append(String.join("、", target.missingVariables()))
+                        .append("——在任务设置「上下文变量」里补齐后重新导入，或手动编辑补出可执行 target。")
+                        .append("\n模板 target：").append(tpl.targetTemplate());
+            }
+            notes.append("\n（来源：内置通用模板 ").append(tpl.key()).append("）");
+            c.setNotes(notes.toString());
+            c.setTimeoutSec(tpl.timeoutSec() > 0 ? tpl.timeoutSec() : EvalRunner.defaultTimeoutSec(c.getKind()));
+            c.setRequiresSandbox(tpl.requiresSandbox());
+            c.setEnabled(true);
+            c.setSortOrder(++sort);
+            // expect 语法预检（落地条）：模板文件被改坏 → fail-loud，绝不入库一个判不了的断言
+            if (!c.getExpect().isBlank()) {
+                List<String> errs = EvalRunner.parseExpect(c.getExpect()).errors();
+                if (!errs.isEmpty()) {
+                    throw new IllegalStateException("模板 " + tpl.key() + " 的 expect 展开后语法有误（请修模板文件）: "
+                            + String.join("; ", errs));
+                }
+            }
+            cases.save(c);
+        }
+        JsonObject o = new JsonObject();
+        o.addProperty("ok", true);
+        o.addProperty("imported", landed + notLanded);
+        o.addProperty("landed", landed);
+        o.addProperty("notLanded", notLanded);
+        return o;
+    }
+
+    /** 模板展开用变量表 = 任务 context_json + 系统变量 evalScriptDir（自动解析，不需要用户填） */
+    Map<String, String> templateVars(EvalTask t) {
+        Map<String, String> vars = EvalTemplates.contextVars(t.getContextJson());
+        vars.put("evalScriptDir", EvalTemplates.resolveScriptDir(scriptDirConfig));
+        return vars;
     }
 
     // ===== 小工具 =====

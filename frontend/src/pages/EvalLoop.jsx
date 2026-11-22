@@ -245,6 +245,7 @@ function TaskDetail({ taskId, showToast, onDeleted }) {
   const [editing, setEditing] = useState(null)        // null | 'new' | case 对象
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [draftsOpen, setDraftsOpen] = useState(false)
+  const [templatesOpen, setTemplatesOpen] = useState(false)
   const [expanded, setExpanded] = useState(null)      // caseId
   const [history, setHistory] = useState(null)        // {caseId, rows}
   const pollRef = useRef(null)
@@ -342,6 +343,10 @@ function TaskDetail({ taskId, showToast, onDeleted }) {
       {/* 工具条 */}
       <div style={{ display: 'flex', gap: 8, margin: '12px 0' }}>
         <button className="btn btn-primary" style={{ fontSize: 13 }} onClick={() => setEditing('new')}>+ 新增 eval</button>
+        <button className="btn" style={{ fontSize: 13 }} onClick={() => setTemplatesOpen(true)}
+          data-tooltip="内置通用模板（配置结构/https 校验/HTTP 连通/静态规则/构建）：填几个上下文变量就能导入，不用手写脚本；判定仍是退出码 + 输出断言" tabIndex={0}>
+          📦 导入通用模板
+        </button>
         <button className="btn" style={{ fontSize: 13 }} onClick={() => setDraftsOpen(true)}
           data-tooltip="只读 review-supplier 的 references/ 检查表，逐条搬成草稿（未落地），勾选确认后才入库；生成环节不做任何判定" tabIndex={0}>
           🧠 从 review skill 生成初版 eval
@@ -368,6 +373,12 @@ function TaskDetail({ taskId, showToast, onDeleted }) {
         onSaved={d => { setSettingsOpen(false); if (d?.id) setDetail(d); showToast('设置已保存', 'success') }} showToast={showToast} />}
       {draftsOpen && <DraftsPanel taskId={taskId} onClose={() => setDraftsOpen(false)}
         onImported={n => { setDraftsOpen(null); load(); showToast(`已导入 ${n} 条草稿（均为未落地，补出可执行 target 并试跑后才计入通过率）`, 'success') }}
+        showToast={showToast} />}
+      {templatesOpen && <TemplatePanel taskId={taskId} onClose={() => setTemplatesOpen(false)}
+        onImported={r => {
+          setTemplatesOpen(null); load()
+          showToast(`已导入 ${r.imported} 条模板 eval（可执行 ${r.landed} 条${r.notLanded > 0 ? `，未落地 ${r.notLanded} 条：缺上下文变量，不计入通过率` : ''}）`, 'success')
+        }}
         showToast={showToast} />}
       {history && <Surface kind="drawer" label="执行记录" onClose={() => setHistory(null)}>
         <div className="modal-box" style={{ maxWidth: 640 }}>
@@ -569,20 +580,29 @@ function TaskSettings({ detail, onClose, onSaved, showToast }) {
     instanceId: detail.instanceId != null ? String(detail.instanceId) : '',
     reviewSkillPath: detail.reviewSkillPath || '', createSkillPath: detail.createSkillPath || '',
   })
+  // 上下文变量（MVP-1.5）：变量清单来自后端模板文件；值存 eval_task.context_json
+  const [varSpecs, setVarSpecs] = useState(null)
+  const [ctx, setCtx] = useState(() => { try { return JSON.parse(detail.contextJson || '{}') } catch { return {} } })
   const [saving, setSaving] = useState(false)
 
   useEffect(() => { fetch('/api/instances').then(r => r.json()).then(setInstances).catch(() => {}) }, [])
+  useEffect(() => {
+    fetch(`/api/eval-tasks/${detail.id}/templates`).then(r => r.ok ? r.json() : null)
+      .then(d => { if (d?.variables) setVarSpecs(d.variables) }).catch(() => {})
+  }, [detail.id])
 
   async function save() {
     if (!form.name.trim()) return showToast('任务名不能为空', 'error')
     setSaving(true)
     try {
+      const ctxClean = Object.fromEntries(Object.entries(ctx).filter(([, v]) => String(v ?? '').trim()))
       const res = await fetch(`/api/eval-tasks/${detail.id}`, {
         method: 'PUT', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           name: form.name.trim(), supplierCode: form.supplierCode.trim(),
           instanceId: form.instanceId ? Number(form.instanceId) : null,
           reviewSkillPath: form.reviewSkillPath.trim(), createSkillPath: form.createSkillPath.trim(),
+          contextJson: JSON.stringify(ctxClean),
         }),
       })
       const d = await res.json().catch(() => ({}))
@@ -632,6 +652,23 @@ function TaskSettings({ detail, onClose, onSaved, showToast }) {
             <input className="form-input" style={{ flex: 1 }} value={form.createSkillPath}
               onChange={e => setForm(f => ({ ...f, createSkillPath: e.target.value }))} />
           </div>
+        </div>
+        {/* 上下文变量：「导入通用模板」按这些值展开 {{变量}}；变量缺失的模板会落成未落地 */}
+        <div className="form-group">
+          <label className="form-label">上下文变量（导入通用模板时做 {'{{变量}}'} 展开；改完后需重新导入模板才生效）</label>
+          {varSpecs === null && <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>变量清单加载中…</div>}
+          {varSpecs && (
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              {varSpecs.map(v => (
+                <div key={v.name} className="form-group" style={{ marginBottom: 0 }}>
+                  <label className="form-label" style={{ fontSize: 11.5 }}>{v.label || v.name}</label>
+                  <input className="form-input" style={{ fontSize: 12.5, fontFamily: 'var(--font-mono)' }}
+                    placeholder={v.placeholder} value={ctx[v.name] ?? ''}
+                    onChange={e => setCtx(s => ({ ...s, [v.name]: e.target.value }))} />
+                </div>
+              ))}
+            </div>
+          )}
         </div>
         <div className="surface-actions">
           <button className="btn" onClick={onClose}>取消</button>
@@ -732,4 +769,162 @@ function DraftsPanel({ taskId, onClose, onImported, showToast }) {
   function selectTableRows() {
     setDrafts(rows => rows.map(x => x.source && x.source.includes('report-and-validation') ? { ...x, _checked: true } : x))
   }
+}
+
+// ===== 导入通用模板抽屉（MVP-1.5）：模板清单实时来自后端模板文件，变量缺失当场标出 =====
+
+function TemplatePanel({ taskId, onClose, onImported, showToast }) {
+  const [data, setData] = useState(null)
+  const [error, setError] = useState('')
+  const [checked, setChecked] = useState({})     // key -> bool
+  const [vars, setVars] = useState({})           // 上下文变量输入值
+  const [savingVars, setSavingVars] = useState(false)
+  const [importing, setImporting] = useState(false)
+
+  const load = () => fetch(`/api/eval-tasks/${taskId}/templates`)
+    .then(async r => {
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(d.error || '模板库读取失败')
+      return d
+    })
+    .then(d => {
+      setData(d)
+      setError('')
+      setVars(Object.fromEntries((d.variables || []).map(v => [v.name, v.value || ''])))
+    })
+    .catch(e => setError(e.message))
+
+  useEffect(() => { load() /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [taskId])
+
+  const templates = data?.templates || []
+  const groups = [...new Set(templates.map(t => t.group))]
+  const checkedKeys = templates.filter(t => checked[t.key]).map(t => t.key)
+
+  async function saveVars() {
+    setSavingVars(true)
+    try {
+      const clean = Object.fromEntries(Object.entries(vars).filter(([, v]) => String(v).trim()))
+      const res = await fetch(`/api/eval-tasks/${taskId}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextJson: JSON.stringify(clean) }),
+      })
+      const d = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(d.error || '保存失败')
+      showToast('上下文变量已保存（导入时按这些值展开命令）', 'success')
+      load()
+    } catch (e) { showToast(e.message, 'error') } finally { setSavingVars(false) }
+  }
+
+  async function doImport() {
+    if (checkedKeys.length === 0) return showToast('没有勾选任何模板', 'error')
+    setImporting(true)
+    try {
+      const res = await fetch(`/api/eval-tasks/${taskId}/templates/import`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keys: checkedKeys }),
+      })
+      const d = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(d.error || '导入失败')
+      onImported(d)
+    } catch (e) { showToast(e.message, 'error') } finally { setImporting(false) }
+  }
+
+  function toggleGroup(group, on) {
+    setChecked(prev => {
+      const next = { ...prev }
+      templates.filter(t => t.group === group).forEach(t => { next[t.key] = on })
+      return next
+    })
+  }
+
+  return (
+    <Surface kind="drawer" label="导入通用模板" onClose={onClose}>
+      <div className="modal-box" style={{ maxWidth: 900 }}>
+        <div className="modal-title">📦 导入通用模板（不用手写脚本）</div>
+        <div style={{ fontSize: 12.5, color: 'var(--text-dim)', marginBottom: 10 }}>
+          模板清单来自后端可读文件（src/main/resources/eval-templates.json，改文件即生效，新增模板不用改代码）。
+          勾选后按下方「上下文变量」展开成可执行 eval；<b>变量没填齐的会落成「未落地」</b>并写清缺哪个变量，
+          不计入通过率分母。导入不带任何判定——每条都要试跑真跑出结果才算数。
+        </div>
+        {data?.httpEvidenceWarning && (
+          <div className="card" style={{ padding: '8px 12px', marginBottom: 10, fontSize: 12.5, borderColor: '#d97706' }}>
+            ⚠️ {data.httpEvidenceWarning}
+          </div>
+        )}
+        {error && <div className="card" style={{ color: 'var(--error)', fontSize: 13 }}>{error}</div>}
+        {data && (
+          <>
+            {/* 上下文变量（清单同样来自模板文件） */}
+            <div className="card" style={{ padding: '10px 12px', marginBottom: 10 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
+                <b style={{ fontSize: 13 }}>上下文变量</b>
+                <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>导入模板时做 {'{{变量}}'} 展开；只需填要用的</span>
+                <div style={{ flex: 1 }} />
+                <button className="btn btn-primary" style={{ fontSize: 12, padding: '2px 12px' }} onClick={saveVars} disabled={savingVars}>
+                  {savingVars ? '保存中…' : '保存变量'}
+                </button>
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+                {(data.variables || []).map(v => (
+                  <div key={v.name} className="form-group" style={{ marginBottom: 0 }}>
+                    <label className="form-label" style={{ fontSize: 11.5 }}>{v.label || v.name}</label>
+                    <input className="form-input" style={{ fontSize: 12.5, fontFamily: 'var(--font-mono)' }}
+                      placeholder={v.placeholder} value={vars[v.name] || ''}
+                      onChange={e => setVars(s => ({ ...s, [v.name]: e.target.value }))} />
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* 模板分组勾选 */}
+            <div style={{ maxHeight: '46vh', overflow: 'auto' }}>
+              {groups.map(g => {
+                const rows = templates.filter(t => t.group === g)
+                const allOn = rows.every(t => checked[t.key])
+                return (
+                  <div key={g} style={{ marginBottom: 10 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+                      <input type="checkbox" checked={allOn} aria-label={`全选「${g}」分组模板`}
+                        onChange={() => toggleGroup(g, !allOn)} />
+                      <b style={{ fontSize: 13 }}>{g}</b>
+                      <span style={{ fontSize: 11.5, color: 'var(--text-dim)' }}>{rows.length} 条</span>
+                    </div>
+                    {rows.map(t => (
+                      <div key={t.key} className="card" style={{ padding: '8px 10px', marginBottom: 6 }}>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                          <input type="checkbox" checked={!!checked[t.key]} aria-label={`勾选模板「${t.title}」`}
+                            onChange={() => setChecked(s => ({ ...s, [t.key]: !s[t.key] }))} />
+                          <span style={{ fontWeight: 600, fontSize: 13 }}>{t.title}</span>
+                          <span className="hook-badge dim">{t.kind}</span>
+                          {t.requiresSandbox && <span className="hook-badge dim" data-tooltip="需要沙箱凭据；无凭据时试跑记「跳过」，不计入通过率" tabIndex={0}>沙箱</span>}
+                          {!t.verified && <span className="hook-badge" style={{ color: '#d97706' }} data-tooltip="该模板的判定链路还没在真实环境跑通过，首跑结果出来前别当可信基线" tabIndex={0}>⚠ 未真实验证</span>}
+                          {(t.missingVariables || []).length > 0 && (
+                            <span className="hook-badge" style={{ color: '#dc2626' }}
+                              data-tooltip="导入后会落成「未落地」：先在上面补变量并保存，或导入后手动编辑 target" tabIndex={0}>
+                              缺变量: {t.missingVariables.join('、')}
+                            </span>
+                          )}
+                        </div>
+                        <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginTop: 4, lineHeight: 1.6 }}>{t.description}</div>
+                        <div style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', marginTop: 2, wordBreak: 'break-all' }}>
+                          {t.targetTemplate}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )
+              })}
+            </div>
+            <div className="surface-actions" style={{ marginTop: 10 }}>
+              <button className="btn" onClick={onClose}>取消</button>
+              <button className="btn btn-primary" onClick={doImport} disabled={importing || checkedKeys.length === 0}>
+                {importing ? '导入中…' : `导入勾选的 ${checkedKeys.length} 条模板`}
+              </button>
+            </div>
+          </>
+        )}
+        {!data && !error && <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>模板库读取中…</div>}
+      </div>
+    </Surface>
+  )
 }

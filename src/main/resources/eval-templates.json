@@ -1,0 +1,131 @@
+{
+  "version": 1,
+  "httpEvidenceWarning": "注意：eval 里基于脚本/curl 的连通性检查，不等价于工作台实测门禁认可的 Postman 证据（SupplierProbeEvidence 只认 Postman MCP 或 postman collection run）。跑绿这些 eval 不能免除实测。",
+  "variables": [
+    { "name": "configJsonPath", "label": "配置文件路径（本地可解析的供应商配置 JSON）", "placeholder": "如 D:/dida/SupplierV2/.../SS.DCYiLv.Config.json" },
+    { "name": "baseUrl", "label": "供应商网关基础地址", "placeholder": "如 https://gateway.example.com" },
+    { "name": "configKey", "label": "配置中心键名", "placeholder": "如 SS.DCYiLv.Config" },
+    { "name": "collectionPath", "label": "Postman 集合文件路径", "placeholder": "如 D:/.../supplier.postman_collection.json" },
+    { "name": "envPath", "label": "Postman 环境文件路径", "placeholder": "如 D:/.../supplier.env.json" },
+    { "name": "supplierClassHint", "label": "供应商实现类名（静态类检查用）", "placeholder": "如 DorakSupplierService" }
+  ],
+  "templates": [
+    {
+      "key": "config-shape",
+      "group": "配置",
+      "title": "配置文件结构齐全（SupplierID / Urls 七键 / AccountDic）",
+      "kind": "script",
+      "timeoutSec": 60,
+      "requiresSandbox": false,
+      "needsVariables": ["configJsonPath"],
+      "targetTemplate": "node \"{{evalScriptDir}}/check-config-shape.js\" \"{{configJsonPath}}\"",
+      "expectTemplate": "exit=0\nstdout=OK",
+      "verified": true,
+      "description": "读本地配置 JSON 断言：SupplierID 为数字、Urls 七键（hotelcodesUrl/hotelinfosUrl/hotelsearchUrl/precheckUrl/createUrl/searchUrl/cancelUrl）齐全、AccountDic 非空且每个账号 ConfirmMode ∈ INSTANT/ONREQUEST、paymentType 为数字。任何缺失 → FAIL 并逐条列出。判定 = 退出码 + stdout 断言，无模型参与。"
+    },
+    {
+      "key": "config-urls-https",
+      "group": "配置",
+      "title": "Urls 全部为 https 绝对地址且同前缀",
+      "kind": "script",
+      "timeoutSec": 60,
+      "requiresSandbox": false,
+      "needsVariables": ["configJsonPath"],
+      "targetTemplate": "node \"{{evalScriptDir}}/check-urls-https.js\" \"{{configJsonPath}}\"",
+      "expectTemplate": "exit=0\nstdout=OK",
+      "verified": true,
+      "description": "断言配置里 Urls.* 全部是 https 绝对地址、且全部同源（协议+主机+端口一致，即前缀一致）。判定 = 退出码 + stdout 断言。"
+    },
+    {
+      "key": "config-center-fetch",
+      "group": "配置",
+      "title": "真读配置中心并做结构校验",
+      "kind": "script",
+      "timeoutSec": 60,
+      "requiresSandbox": true,
+      "needsVariables": ["configKey"],
+      "targetTemplate": "node \"{{evalScriptDir}}/fetch-config-center.js\" \"{{configKey}}\"",
+      "expectTemplate": "exit=0\nstdout=OK",
+      "verified": false,
+      "description": "真去配置中心取 {{configKey}} 并跑与「配置结构」相同的一套断言。依赖环境变量 CONFIG_CENTER_URL / CONFIG_CENTER_TOKEN；【此 HTTP GET 协议未对真实配置中心验证过】，公司配置中心若不是这个形态，直接改 scripts/eval/fetch-config-center.js（判定仍落在退出码 + 输出）。无沙箱凭据时试跑记「跳过」，不计入通过率。"
+    },
+    {
+      "key": "http-basic-connectivity",
+      "group": "HTTP",
+      "title": "接口基础连通（GET 只读端点有 JSON 响应）",
+      "kind": "http",
+      "timeoutSec": 120,
+      "requiresSandbox": true,
+      "needsVariables": ["baseUrl"],
+      "targetTemplate": "node \"{{evalScriptDir}}/check-http-json.js\" GET \"{{baseUrl}}\"",
+      "expectTemplate": "exit=0\nstdout~OK status=",
+      "verified": true,
+      "description": "对 {{baseUrl}} 发一次真实 GET，断言：状态码 < 500、响应非空且可解析 JSON（判定链路已对本地测试服务验证；供应商网关侧未验证）。注意：脚本级连通检查不等价于工作台实测门禁认可的 Postman 证据（SupplierProbeEvidence 只认 Postman MCP / postman collection run），跑绿本条 eval 不能免除实测。"
+    },
+    {
+      "key": "http-search-minbody",
+      "group": "HTTP",
+      "title": "查价端点带最小请求体有可解析 JSON 返回",
+      "kind": "http",
+      "timeoutSec": 120,
+      "requiresSandbox": true,
+      "needsVariables": ["baseUrl"],
+      "targetTemplate": "node \"{{evalScriptDir}}/check-http-json.js\" POST \"{{baseUrl}}/open/avail/hotelsearch\" \"{{evalScriptDir}}/search-minbody.json\"",
+      "expectTemplate": "exit=0\nstdout~OK status=",
+      "verified": true,
+      "description": "POST 最小请求体到查价端点（默认路径 {{baseUrl}}/open/avail/hotelsearch；请求体在 scripts/eval/search-minbody.json，可按供应商自行编辑），断言响应非空、可解析 JSON、状态码 < 500（判定链路已对本地测试服务验证；供应商网关侧未验证）。同样注意：不等价于 Postman 实测门禁证据。"
+    },
+    {
+      "key": "http-postman-collection",
+      "group": "HTTP",
+      "title": "Postman 集合真实跑一轮（与实测门禁同源通道）",
+      "kind": "http",
+      "timeoutSec": 600,
+      "requiresSandbox": true,
+      "needsVariables": ["collectionPath", "envPath"],
+      "targetTemplate": "postman collection run \"{{collectionPath}}\" --environment \"{{envPath}}\"",
+      "expectTemplate": "exit=0",
+      "verified": false,
+      "description": "Postman CLI 真实跑集合——这是工作台实测门禁认可的通道（SupplierProbeEvidence 只认 Postman MCP / postman collection run）。断言保守：退出码 0；首跑看到真实输出后建议自行收紧（如加 stdout~failed 0）。【未对真实供应商集合跑通过，本机 Postman CLI 1.86.0 已确认存在该子命令与 --environment 参数】。"
+    },
+    {
+      "key": "static-class-registered",
+      "group": "静态",
+      "title": "供应商实现类存在且被注册",
+      "kind": "static",
+      "timeoutSec": 120,
+      "requiresSandbox": false,
+      "needsVariables": ["supplierClassHint"],
+      "targetTemplate": "node \"{{evalScriptDir}}/check-class-registered.js\" \"{{supplierClassHint}}\"",
+      "expectTemplate": "exit=0\nstdout=OK",
+      "verified": true,
+      "description": "在执行工作目录（= 绑定实例的工作目录，应指向供应商仓库根）里 grep：类 {{supplierClassHint}} 有定义（class/interface），且至少有一个定义之外的文件引用它（工厂/注册映射里必然再次出现类名）。grep 级确定性判定，不用 AST、不用模型。"
+    },
+    {
+      "key": "static-no-empty-catch",
+      "group": "静态",
+      "title": "无空 catch 吞异常、无硬编码密钥明文",
+      "kind": "static",
+      "timeoutSec": 120,
+      "requiresSandbox": false,
+      "needsVariables": [],
+      "targetTemplate": "node \"{{evalScriptDir}}/check-no-empty-catch.js\"",
+      "expectTemplate": "exit=0\nstdout=OK",
+      "verified": true,
+      "description": "扫描执行工作目录的 .cs 文件：① 没有空 catch {} / catch (Exception) { } 吞异常；② 没有把 password/secret/apikey 等直接赋成字符串明文（占位符与配置读取除外）。一个 .cs 文件都没扫到会判 FAIL——防止在错误的工作目录里假绿。"
+    },
+    {
+      "key": "build-dotnet",
+      "group": "构建",
+      "title": "dotnet build 编译通过",
+      "kind": "build",
+      "timeoutSec": 900,
+      "requiresSandbox": false,
+      "needsVariables": [],
+      "targetTemplate": "dotnet build --nologo",
+      "expectTemplate": "exit=0",
+      "verified": false,
+      "description": "【基线命令未真实验证】（PRD Q1 未定项）：在执行工作目录跑 dotnet build（仓库根有 sln/csproj 即编译它）。首次使用前请确认真实解决方案路径与参数，必要时编辑 target。判定 = 退出码 0。"
+    }
+  ]
+}

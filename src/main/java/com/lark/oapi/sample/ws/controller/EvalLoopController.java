@@ -97,7 +97,8 @@ public class EvalLoopController {
                     body.has("supplierCode") ? opt(body, "supplierCode") : null,
                     setInstance, instanceId,
                     body.has("reviewSkillPath") ? opt(body, "reviewSkillPath") : null,
-                    body.has("createSkillPath") ? opt(body, "createSkillPath") : null);
+                    body.has("createSkillPath") ? opt(body, "createSkillPath") : null,
+                    body.has("contextJson") ? opt(body, "contextJson") : null);
             return ResponseEntity.ok(evals.detail(id).toString());
         } catch (SecurityException e) {
             JsonObject fo = new JsonObject();
@@ -240,6 +241,40 @@ public class EvalLoopController {
         } catch (Exception e) {
             log.error("[Eval] 草稿导入失败 task={}", id, e);
             return err("草稿导入失败: " + e.getMessage());
+        }
+    }
+
+    // ===== 内置通用模板（MVP-1.5）：列表（含缺变量提示）+ 导入 =====
+
+    /** 模板库列表：实时读模板文件，按该任务上下文变量标注每条缺哪些变量（页面直接提示） */
+    @GetMapping(value = "/api/eval-tasks/{id}/templates", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> templates(@PathVariable Long id) {
+        try {
+            return ResponseEntity.ok(evals.templatesJson(id).toString());
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        } catch (Exception e) {
+            log.error("[Eval] 模板库读取失败 task={}", id, e);
+            return err("模板库读取失败: " + e.getMessage());
+        }
+    }
+
+    /** 导入勾选的模板：body {keys:["config-shape",…]}；变量缺失的落成未落地（不计入通过率） */
+    @PostMapping(value = "/api/eval-tasks/{id}/templates/import", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> importTemplates(@PathVariable Long id, @RequestBody String rawBody) {
+        try {
+            JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            if (!body.has("keys") || !body.get("keys").isJsonArray()) return err("缺少 keys 数组");
+            List<String> keys = new ArrayList<>();
+            body.getAsJsonArray("keys").forEach(el -> {
+                if (el.isJsonPrimitive()) keys.add(el.getAsString());
+            });
+            return ResponseEntity.ok(evals.importTemplates(id, keys).toString());
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        } catch (Exception e) {
+            log.error("[Eval] 模板导入失败 task={}", id, e);
+            return err("模板导入失败: " + e.getMessage());
         }
     }
 

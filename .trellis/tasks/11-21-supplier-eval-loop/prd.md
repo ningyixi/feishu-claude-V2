@@ -37,7 +37,40 @@
 - 独立表：`eval_task` / `eval_case` / `eval_run` / `eval_case_result`。**不碰** `supplier_job*`、`ad_hoc_*`、QuickProbe（用户「新东西不要耦合」的一贯要求）。
 - 侧边栏新入口 + 新页面 `EvalLoop.jsx`；skill 路径输入框复用 `Supplier.jsx:246-258`「关联 Skill（可多个）」的写法。
 
-## 待用户确认（PRD 未定项，别自作主张实现）
+## MVP-1.5 内置通用 eval 模板（用户 2026-11-22 明确要求，不许再让他手写脚本）
+用户原话：「脚本要我自己写，你帮我弄几个通用的吧，我现在还没时间自己编辑要执行的 eval。你可以弄几个 http 实测的，比如测试接口是否返回这种基础的；然后脚本也可以先弄几个简单的，比如运行脚本检查是否真的能读到配置文件。」
+
+### 形态
+- **模板库放可读文件，不硬编码进 Java**：`src/main/resources/eval-templates/*.json`（或单个 `eval-templates.json`），每条含 `key / title / kind / targetTemplate / expectTemplate / requiresSandbox / needsVariables / 说明`。用户以后能直接改文件而不动代码。
+- **任务级上下文变量**：`eval_task` 增列 `context_json`（`@Lob + length`，遵守 database-guidelines §3）。变量集合最小化：`baseUrl`、`configKey`（如 `SS.DCYiLv.Config`）、`configJsonPath`（本地可解析的配置文件路径）、`collectionPath`、`envPath`、`supplierClassHint`（可选，用于静态类检查）。模板里用 `{{var}}` 占位，试跑时展开。
+- **通用脚本落在仓库里**：`scripts/eval/*.js`（node，跨机器可跑、可读可改），**不要**把几十行 JS 塞进 `target` 字段里当内联字符串（不可维护、且 expect/target 会变得不可读）。target 形如 `node scripts/eval/check-config-shape.js "{{configJsonPath}}"`。
+
+### 必备模板（最小集合，宁少而真能跑，不要一堆跑不出的）
+| 分组 | 模板 | kind | 判定 | requiresSandbox |
+|---|---|---|---|---|
+| 配置 | 配置文件能被解析且必需结构齐全（`SupplierID`/`Urls` 七键/`AccountDic` 非空、`ConfirmMode ∈ {INSTANT,ONREQUEST}`、`paymentType` 为数字） | `script` | 退出码 + `stdout=OK` | 否 |
+| 配置 | 配置里 `Urls.*` 全部是 https 绝对地址且同前缀一致 | `script` | 退出码 + 断言 | 否 |
+| 配置 | 真去读配置中心拿到 `{{configKey}}` 并结构校验 | `script` | 退出码 | **是**（无凭据 → SKIPPED 不计分母） |
+| HTTP | 接口基础连通：静态酒店列表/字典类只读端点有返回且状态码 2xx/3xx | `http` | `exit=0` + `json:` 或 `stdout~<状态码>` | **是** |
+| HTTP | 查价端点带最小请求体有返回（响应非空、可解析 JSON） | `http` | 退出码 + 断言 | **是** |
+| HTTP | Postman 集合真实跑一轮（与实测门禁同源通道） | `http` | 退出码 + `SUPPLIER_EVIDENCE` 断言 | **是** |
+| 静态 | 供应商实现类存在且被注册（工厂/映射里能找到，脚本 grep/AST 判定） | `static` | 退出码 | 否 |
+| 静态 | 无空 `catch {}` 吞异常、无硬编码密钥明文（脚本判定） | `static` | 退出码 | 否 |
+| 构建 | `dotnet build <sln>` 通过 | `build` | 退出码 | 否 —— **但基线命令尚未真实验证**，导入时须在页面标注"未验证" |
+
+### 交互
+- 详情页一个「导入通用模板」入口：按分组勾选 → 展开为 eval（变量没填齐的落成 **未落地**，页面直接告诉他缺哪个变量，**不计入分母**）。
+- 模板与文案必须写明一条：**eval 里用 curl 的连通性检查，不等于工作台实测门禁认可的 Postman 证据**（`SupplierProbeEvidence.java:61-72` 只认 Postman MCP / `postman collection run`）。不许让用户误以为跑绿 eval 就能免实测。
+
+### 验收（追加）
+- AC13′ 新建任务不写一行脚本，点「导入通用模板」选 3 条本地档（配置结构/https 校验/静态类存在），在给定 `configJsonPath` 后**试跑能真拿到 PASS/FAIL**；故意把配置 JSON 的 `Urls` 少给一键 → 必须 FAIL（证明不是恒过）。
+- AC14′ 变量未填齐 → 该 eval 为 `未落地` 且 `stats.notLanded` 计入、`executed` 不含它。
+- AC15′ `requiresSandbox` 模板在无凭据时记 `SKIPPED` 且**不起进程**（复用 MVP-1 已有语义，不得回归）。
+- AC16′ 模板库改文件即生效（新增一条模板不需要改 Java 代码；测试用临时资源目录证明解析器读的是文件）。
+- AC17′ 全量 `mvn test` 红数不超过当前基线 `303 跑 / 3 失败 / 1 错误`。
+
+## MVP-2 范围与未定项（下一棒，本轮不做）
+
 - **Q1 基线可执行命令到底是什么**：`D:\dida\SupplierV2` 用 `dotnet build` / `dotnet test --filter`？公司有无统一 CI 脚本？现有测试项目在哪、能否脱离内网独立跑（不能的话 `test` 类 eval 的可行性要重估）。
 - **Q2 经验写 skill 的自动化程度**：默认「出提案 + 人点写入」；若要全自动需另设保护（仅追加、不改既有段落、可一键回滚）。
 

@@ -39,6 +39,14 @@ public class EvalTask {
     @Column(name = "create_skill_path", length = 600)
     private String createSkillPath = "";
 
+    /**
+     * 任务级上下文变量（MVP-1.5）：扁平 JSON 对象（baseUrl/configKey/configJsonPath/collectionPath/
+     * envPath/supplierClassHint…），导入通用模板时做 {{var}} 展开；变量没填齐的模板落成「未落地」。
+     */
+    @Lob
+    @Column(length = 2147483647, name = "context_json")
+    private String contextJson = "";
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 
@@ -63,6 +71,8 @@ public class EvalTask {
     public void setReviewSkillPath(String value) { reviewSkillPath = value; }
     public String getCreateSkillPath() { return createSkillPath == null ? "" : createSkillPath; }
     public void setCreateSkillPath(String value) { createSkillPath = value; }
+    public String getContextJson() { return contextJson == null ? "" : contextJson; }
+    public void setContextJson(String value) { contextJson = value == null ? "" : value; }
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }
