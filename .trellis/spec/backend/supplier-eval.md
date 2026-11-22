@@ -23,7 +23,16 @@ PASS/FAIL 只允许由**退出码 + 输出断言**（`exit=<n>` / `stdout=<子�
 ## 3. 端到端：必须走自家应用，不许绕过适配器
 测评某供应商就得触发**该供应商在自己代码里的路径**，由应用去读配置中心（`SS.<X>.Config`，运行时载入内存，**磁盘上没有这个文件**）、自己签名、自己解析响应。
 
-**禁止**用 Postman/newman/curl 直连供应商网关来充当代码质量 eval —— 那测的是"供应商可用性 + 集合自带签名"。此类目标一律降级为探针（见第 2 条）。
+**禁止**用 Postman/newman/curl 直连供应商网关来充当代码质量 eval —— 那测的是"供应商可用性 + 集合自带签名"。此类目标一律降级为探针（见第 2 条）；Postman 形态的内置模板已**移除**（用户 2026-11-22：「我是想类似于端到端直接调用我这个项目的」）。
+
+端到端的落地形态 = **一条 `dotnet test`**（模板 `e2e-supplier-unit-test`，kind=test）：由测试代码构造供应商类、调查价、断言返回结构与价格语义。`testProjectPath` 探测 repoPath 下引用 `Microsoft.NET.Test.Sdk`/xunit/nunit 的 `.csproj`，唯一命中才自动填，0/多个 → 未落地并写明"补一个 xunit 测试"的下一步，绝不瞎猜。配套 `has-unit-test`（kind=static）用文件+符号存在性（`[Fact]/[Test]` 与类名同现）确定性回答"本次交付有没有配套测试"。
+
+### 3.1 账号契约（EVAL_ACCOUNT_ID，必填）
+供应商配置 `AccountDic` 往往有多个账号（如 DCYiLv 的 `2996` instantConfirm/INSTANT 与 `3004` onRequest/ONREQUEST），跑哪个必须由人指定：**`accountId` 是端到端模板的必填变量**，未填 → 未落地（notes 点名"缺 accountId：请选择用哪个供应商账号跑本次测评"）。
+
+- target 以**环境变量**传入（Windows cmd 形态：`set EVAL_ACCOUNT_ID={{accountId}}&& dotnet test …`，注意 `&&` 前不留空格否则值带尾空格）。
+- **测试代码必须从 `EVAL_ACCOUNT_ID` 读取账号，缺省时才回落默认账号** —— 这是写测试的人与跑 eval 的人之间的显式契约，不许各猜一套。
+- 下拉候选由后端读任务 `configJsonPath` 的 `AccountDic` 枚举，**只回显账号 ID 与 `AccountName`/`ConfirmMode`，绝不回显 `appid`/`secret`/`customerCode` 等凭据值**；读不到配置 → 退化文本输入并说明原因（不报错、不空白）。
 
 ## 4. 只读安全闸（`EvalReadOnlyGuard`）
 - 判定对象是"**会不会产生写副作用**"，不是"这是谁的域名"。
@@ -44,6 +53,8 @@ PASS/FAIL 只允许由**退出码 + 输出断言**（`exit=<n>` / `stdout=<子�
 
 ## 6. eval 参数禁止写死时间
 住期、日期、"昨天/今天"一律运行时动态生成（如今天+7），并在输出里打印实际取值。写死日期会让 eval 随日历腐烂——今天绿、下周红，且没人知道为什么。
+
+已落成代码约束：模板库有单测钉死**任何模板的 target/expect/title 里不许出现日期字面量**（`EvalTemplatesTest`）；`scripts/eval/check-http-json.js` 发请求前把请求体顶层日期字段（`checkIn`/`checkOut`/`<RUNTIME…>` 标记等）运行时重写为今天+7/今天+8 并打印实际取值；`search-minbody.json` 里的日期只有 `<RUNTIME_TODAY+7>` 形态的标记，没有真实日期。
 
 ## 7. 模板与脚本外置，判定内核稳定
 模板是 `src/main/resources/eval-templates.json`（**Java 里不许硬编码模板清单**，有测试断言"改文件即生效"）；确定性检查脚本在 `scripts/eval/*.js`（纯 node、零 npm 依赖、用户可读改）。`EvalRunner.judge/execute` 是判定内核，扩展能力时加旁路纯函数，**不要往里塞业务**。

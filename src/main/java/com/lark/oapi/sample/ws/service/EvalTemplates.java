@@ -49,14 +49,22 @@ public final class EvalTemplates {
     /** 上下文变量说明（页面按此渲染输入框——变量清单同样来自文件，不硬编码） */
     public record VariableSpec(String name, String label, String placeholder) {}
 
-    /** 一条模板。verified=false 的必须在页面标「未真实验证」（如 dotnet build 基线、配置中心协议） */
+    /**
+     * 一条模板。verified=false 的必须在页面标「未真实验证」（如 dotnet build/test 基线、配置中心协议）。
+     * countsTowardScore=false = 可用性探针（MVP-1.7）：可跑、可看输出，但只回答「外部服务活着吗」，
+     * 不证明本次交付的代码正确，<b>不进通过率分母</b>；缺省 true（计分项）。
+     */
     public record Template(String key, String group, String title, String kind,
                            String targetTemplate, String expectTemplate, int timeoutSec,
                            boolean requiresSandbox, List<String> needsVariables,
-                           String description, boolean verified) {}
+                           String description, boolean verified, boolean countsTowardScore) {}
 
-    /** 模板库整体（httpEvidenceWarning：curl 类连通检查 ≠ Postman 实测门禁证据的固定警示文案） */
-    public record Library(String httpEvidenceWarning, List<VariableSpec> variables, List<Template> templates) {}
+    /**
+     * 模板库整体。httpEvidenceWarning：curl 类连通检查 ≠ Postman 实测门禁证据的固定警示文案；
+     * datePolicy（MVP-1.7 规则 5）：eval 禁止写死时间的固定警示文案（住期/日期一律运行时动态生成）。
+     */
+    public record Library(String httpEvidenceWarning, String datePolicy,
+                          List<VariableSpec> variables, List<Template> templates) {}
 
     /** {{var}} 展开结果：missingVariables 非空 = 变量没填齐（该模板须落成「未落地」，不进分母） */
     public record Expansion(String text, List<String> missingVariables) {}
@@ -98,6 +106,7 @@ public final class EvalTemplates {
             throw new IllegalStateException("模板库不是合法 JSON（" + origin + "）: " + e.getMessage());
         }
         String warning = str(root, "httpEvidenceWarning", "");
+        String datePolicy = str(root, "datePolicy", "");
         List<VariableSpec> variables = new ArrayList<>();
         JsonArray vs = root.has("variables") && root.get("variables").isJsonArray() ? root.getAsJsonArray("variables") : new JsonArray();
         for (JsonElement el : vs) {
@@ -144,12 +153,15 @@ public final class EvalTemplates {
                     o.has("timeoutSec") && o.get("timeoutSec").isJsonPrimitive() ? o.get("timeoutSec").getAsInt() : 0,
                     o.has("requiresSandbox") && o.get("requiresSandbox").isJsonPrimitive() && o.get("requiresSandbox").getAsBoolean(),
                     List.copyOf(needs), str(o, "description", ""),
-                    o.has("verified") && o.get("verified").isJsonPrimitive() && o.get("verified").getAsBoolean()));
+                    o.has("verified") && o.get("verified").isJsonPrimitive() && o.get("verified").getAsBoolean(),
+                    // countsTowardScore 缺省 true（计分项）；显式 false = 探针，不进通过率分母
+                    !o.has("countsTowardScore") || !o.get("countsTowardScore").isJsonPrimitive()
+                            || o.get("countsTowardScore").getAsBoolean()));
         }
         if (templates.isEmpty()) {
             throw new IllegalStateException("模板库没有任何模板（" + origin + "）");
         }
-        return new Library(warning, List.copyOf(variables), List.copyOf(templates));
+        return new Library(warning, datePolicy, List.copyOf(variables), List.copyOf(templates));
     }
 
     // ===== {{var}} 展开 =====

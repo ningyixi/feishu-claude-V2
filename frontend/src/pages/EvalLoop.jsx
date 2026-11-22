@@ -14,7 +14,7 @@ const KINDS = [
   { value: 'build', icon: '🏗', label: 'build · 编译', hint: '判定来源：编译退出码（基线门槛）' },
   { value: 'test', icon: '🧪', label: 'test · 测试', hint: '判定来源：测试退出码 + 用例计数断言' },
   { value: 'script', icon: '📜', label: 'script · 脚本', hint: '判定来源：脚本退出码 + stdout 断言（自然语言 eval 翻译的主要落点）' },
-  { value: 'http', icon: '🌐', label: 'http · 实测', hint: '判定来源：Postman CLI 真实调用的退出码 + 响应断言' },
+  { value: 'http', icon: '🌐', label: 'http · 实测', hint: '判定来源：真实 HTTP 请求的退出码 + 响应断言（直连供应商的属探针，不计入通过率；代码质量走端到端 dotnet test）' },
   { value: 'static', icon: '🧱', label: 'static · 结构规则', hint: '判定来源：确定性规则程序（grep/文件存在性/计数），不是模型' },
 ]
 
@@ -122,7 +122,7 @@ function TaskList({ selected, onSelect, onCreate, showToast }) {
               {t.supplierCode && <span className="hook-badge">{t.supplierCode}</span>}
             </div>
             <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 6, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <span data-tooltip="分母 = 已落地且真实执行出结果的 eval；未落地/跳过不计入" tabIndex={0}>
+              <span data-tooltip="分母 = 已落地、真实执行出结果且计入评分的 eval；未落地/跳过/探针不计入" tabIndex={0}>
                 通过 <b style={{ color: s.executed > 0 && s.passed === s.executed ? '#16a34a' : undefined }}>{s.passed ?? 0}/{s.executed ?? 0}</b>
               </span>
               {(s.notLanded ?? 0) > 0 && <span className="hook-badge dim">未落地 {s.notLanded}</span>}
@@ -366,7 +366,7 @@ function TaskDetail({ taskId, showToast, onDeleted }) {
       {/* 统计条：分母诚实——未落地/跳过单列，绝不混进通过率 */}
       <div className="card" style={{ padding: '12px 16px', display: 'flex', gap: 18, alignItems: 'center', flexWrap: 'wrap' }}>
         <div>
-          <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>通过率（分母 = 已落地且真跑出结果）</div>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>通过率（分母 = 已落地、真跑出结果且计入评分；探针不计入）</div>
           <div style={{ fontSize: 24, fontWeight: 800 }}>
             {s.executed > 0
               ? <span style={{ color: s.passed === s.executed ? '#16a34a' : undefined }}>{s.passed}<span style={{ fontSize: 14, color: 'var(--text-dim)' }}> / {s.executed}</span></span>
@@ -377,6 +377,11 @@ function TaskDetail({ taskId, showToast, onDeleted }) {
           <span className="hook-badge dim" data-tooltip="target 为空、还翻译不出可执行形式的条目——不计入通过率" tabIndex={0}>未落地 {s.notLanded ?? 0}</span>
           <span className="hook-badge dim" data-tooltip="requiresSandbox 且当前无沙箱凭据（环境变量 EVAL_SANDBOX_CREDENTIALS）——不计入通过率" tabIndex={0}>跳过 {s.skipped ?? 0}</span>
           <span className="hook-badge dim" data-tooltip="已落地但还没跑过——不计入通过率" tabIndex={0}>未跑 {s.notRun ?? 0}</span>
+          {(s.probeExecuted ?? 0) > 0 && (
+            <span className="hook-badge dim" data-tooltip="可用性探针（直连供应商网关/Postman 集合）：只回答「供应商活着吗/集合签名对不对」，不证明本次交付的代码正确——不计入通过率，也不算失败" tabIndex={0}>
+              探针·不计分 {s.probePassed ?? 0}/{s.probeExecuted}
+            </span>
+          )}
           {(s.failed ?? 0) > 0 && <span className="hook-badge" style={{ color: '#dc2626' }}>FAIL {s.failed}</span>}
           {(s.timeout ?? 0) > 0 && <span className="hook-badge" style={{ color: '#d97706' }}>超时 {s.timeout}</span>}
           {(s.error ?? 0) > 0 && <span className="hook-badge" style={{ color: '#dc2626' }}>执行错误 {s.error}</span>}
@@ -490,6 +495,7 @@ function CaseRow({ c, expanded, onToggle, onTrial, onEdit, onRemove, onToggleEna
           <div style={{ fontWeight: 600, fontSize: 13.5, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             {kind.icon} {c.title}
             {!c.landed && <span className="hook-badge dim" style={{ marginLeft: 6 }} data-tooltip="target 为空：还翻译不出可执行形式——不可执行、不计入通过率" tabIndex={0}>未落地</span>}
+            {c.countsTowardScore === false && <span className="hook-badge dim" style={{ marginLeft: 4 }} data-tooltip="可用性探针：只回答「外部服务活着吗/请求自带签名对不对」，不证明本次交付的代码正确——不计入通过率分母，也不算失败" tabIndex={0}>探针·不计分</span>}
             {c.requiresSandbox && <span className="hook-badge dim" style={{ marginLeft: 4 }} data-tooltip="需要沙箱凭据；无凭据时试跑记「跳过」，不计入通过率" tabIndex={0}>沙箱</span>}
           </div>
           <div style={{ fontSize: 11.5, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
@@ -661,6 +667,38 @@ function defaultTimeout(kind) {
   return kind === 'build' || kind === 'test' ? 600 : kind === 'static' ? 60 : 120
 }
 
+// ===== 上下文变量输入（MVP-1.7：accountId 能做下拉就不做文本框） =====
+// 候选来自后端读 configJsonPath 的 AccountDic（只回显账号 ID 与名称/确认模式，绝不回显任何凭据值）；
+// 读不到配置 → 退化成文本输入并说明原因（不报错、不空白）。
+function ContextVarField({ v, value, onChange, accountOptions }) {
+  const isAccount = v.name === 'accountId'
+  const accounts = (isAccount && accountOptions?.accounts) || []
+  return (
+    <div className="form-group" style={{ marginBottom: 0 }}>
+      <label className="form-label" style={{ fontSize: 11.5 }}>{v.label || v.name}</label>
+      {accounts.length > 0 ? (
+        <select className="form-input" style={{ fontSize: 12.5, fontFamily: 'var(--font-mono)' }}
+          value={value || ''} onChange={e => onChange(e.target.value)}>
+          <option value="">（请选择用哪个账号跑本次测评）</option>
+          {accounts.map(a => (
+            <option key={a.id} value={a.id}>
+              {a.id}{a.accountName ? ` · ${a.accountName}` : ''}{a.confirmMode ? ` · ${a.confirmMode}` : ''}
+            </option>
+          ))}
+        </select>
+      ) : (
+        <input className="form-input" style={{ fontSize: 12.5, fontFamily: 'var(--font-mono)' }}
+          placeholder={v.placeholder} value={value || ''} onChange={e => onChange(e.target.value)} />
+      )}
+      {isAccount && accounts.length === 0 && accountOptions?.problem && (
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 2 }}>
+          {accountOptions.problem}——可手动填写账号 ID
+        </div>
+      )}
+    </div>
+  )
+}
+
 // ===== 任务设置（改绑定实例 / skill 路径） =====
 
 function TaskSettings({ detail, onClose, onSaved, showToast }) {
@@ -673,13 +711,14 @@ function TaskSettings({ detail, onClose, onSaved, showToast }) {
   })
   // 上下文变量（MVP-1.5）：变量清单来自后端模板文件；值存 eval_task.context_json
   const [varSpecs, setVarSpecs] = useState(null)
+  const [accountOptions, setAccountOptions] = useState(null)
   const [ctx, setCtx] = useState(() => { try { return JSON.parse(detail.contextJson || '{}') } catch { return {} } })
   const [saving, setSaving] = useState(false)
 
   useEffect(() => { fetch('/api/instances').then(r => r.json()).then(setInstances).catch(() => {}) }, [])
   useEffect(() => {
     fetch(`/api/eval-tasks/${detail.id}/templates`).then(r => r.ok ? r.json() : null)
-      .then(d => { if (d?.variables) setVarSpecs(d.variables) }).catch(() => {})
+      .then(d => { if (d?.variables) setVarSpecs(d.variables); if (d) setAccountOptions(d.accountOptions || null) }).catch(() => {})
   }, [detail.id])
 
   async function save() {
@@ -751,12 +790,8 @@ function TaskSettings({ detail, onClose, onSaved, showToast }) {
           {varSpecs && (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
               {varSpecs.map(v => (
-                <div key={v.name} className="form-group" style={{ marginBottom: 0 }}>
-                  <label className="form-label" style={{ fontSize: 11.5 }}>{v.label || v.name}</label>
-                  <input className="form-input" style={{ fontSize: 12.5, fontFamily: 'var(--font-mono)' }}
-                    placeholder={v.placeholder} value={ctx[v.name] ?? ''}
-                    onChange={e => setCtx(s => ({ ...s, [v.name]: e.target.value }))} />
-                </div>
+                <ContextVarField key={v.name} v={v} value={ctx[v.name] ?? ''} accountOptions={accountOptions}
+                  onChange={val => setCtx(s => ({ ...s, [v.name]: val }))} />
               ))}
             </div>
           )}
@@ -942,6 +977,11 @@ function TemplatePanel({ taskId, onClose, onImported, showToast }) {
             ⚠️ {data.httpEvidenceWarning}
           </div>
         )}
+        {data?.datePolicy && (
+          <div className="card" style={{ padding: '8px 12px', marginBottom: 10, fontSize: 12.5, borderColor: '#0891b2' }}>
+            📅 {data.datePolicy}
+          </div>
+        )}
         {error && <div className="card" style={{ color: 'var(--error)', fontSize: 13 }}>{error}</div>}
         {data && (
           <>
@@ -957,12 +997,8 @@ function TemplatePanel({ taskId, onClose, onImported, showToast }) {
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
                 {(data.variables || []).map(v => (
-                  <div key={v.name} className="form-group" style={{ marginBottom: 0 }}>
-                    <label className="form-label" style={{ fontSize: 11.5 }}>{v.label || v.name}</label>
-                    <input className="form-input" style={{ fontSize: 12.5, fontFamily: 'var(--font-mono)' }}
-                      placeholder={v.placeholder} value={vars[v.name] || ''}
-                      onChange={e => setVars(s => ({ ...s, [v.name]: e.target.value }))} />
-                  </div>
+                  <ContextVarField key={v.name} v={v} value={vars[v.name] || ''} accountOptions={data.accountOptions}
+                    onChange={val => setVars(s => ({ ...s, [v.name]: val }))} />
                 ))}
               </div>
             </div>
@@ -987,6 +1023,7 @@ function TemplatePanel({ taskId, onClose, onImported, showToast }) {
                             onChange={() => setChecked(s => ({ ...s, [t.key]: !s[t.key] }))} />
                           <span style={{ fontWeight: 600, fontSize: 13 }}>{t.title}</span>
                           <span className="hook-badge dim">{t.kind}</span>
+                          {t.countsTowardScore === false && <span className="hook-badge dim" data-tooltip="可用性探针：只回答「供应商活着吗/请求自带签名对不对」，不证明本次交付的代码正确——不计入通过率，也不算失败" tabIndex={0}>探针·不计分</span>}
                           {t.requiresSandbox && <span className="hook-badge dim" data-tooltip="需要沙箱凭据；无凭据时试跑记「跳过」，不计入通过率" tabIndex={0}>沙箱</span>}
                           {!t.verified && <span className="hook-badge" style={{ color: '#d97706' }} data-tooltip="该模板的判定链路还没在真实环境跑通过，首跑结果出来前别当可信基线" tabIndex={0}>⚠ 未真实验证</span>}
                           {(t.missingVariables || []).length > 0 && (

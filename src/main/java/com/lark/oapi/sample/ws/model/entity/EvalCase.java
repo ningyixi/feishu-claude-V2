@@ -57,6 +57,18 @@ public class EvalCase {
     @Column(name = "requires_sandbox", nullable = false)
     private boolean requiresSandbox = false;
 
+    /**
+     * 是否计入通过率分母（MVP-1.7）。false = 可用性探针：可跑、可看输出，但只回答
+     * 「供应商活着吗/集合签名对不对」（如直连供应商网关、绕过被测适配器代码的检查），
+     * <b>不证明本次交付的代码正确</b>——verdict 单独统计，绝不混进 executed/passed/failed。
+     * <p>
+     * 用包装类型 + getter 里 null→true：ddl-auto=update 对存量表加的是可空列，
+     * 现网存量行（如用户真任务 id=2 已 PASS 的 case）读出来是 NULL，一律按默认值 true 处理——
+     * 不许让加列把存量计分项静默变成探针（分母缩水 = 通过率造假，方向同样是 dishonest）。
+     */
+    @Column(name = "counts_toward_score")
+    private Boolean countsTowardScore = Boolean.TRUE;
+
     @Column(nullable = false)
     private boolean enabled = true;
 
@@ -122,6 +134,9 @@ public class EvalCase {
     public void setTimeoutSec(int timeoutSec) { this.timeoutSec = timeoutSec; }
     public boolean isRequiresSandbox() { return requiresSandbox; }
     public void setRequiresSandbox(boolean requiresSandbox) { this.requiresSandbox = requiresSandbox; }
+    /** null（存量行加列前落库的）一律按默认值 true 处理 */
+    public boolean isCountsTowardScore() { return countsTowardScore == null || countsTowardScore; }
+    public void setCountsTowardScore(Boolean countsTowardScore) { this.countsTowardScore = countsTowardScore; }
     public boolean isEnabled() { return enabled; }
     public void setEnabled(boolean enabled) { this.enabled = enabled; }
     public int getSortOrder() { return sortOrder; }

@@ -104,7 +104,46 @@ case 41 供应商类被注册          同一根 → FAIL "类 DCYiLvBusiness �
 4. 已知尖角：`EvalReadOnlyGuard` 对路径分段做 `contains`（`create|cancel|pay|refund|confirm|order`），因此**只读但名字含这些词的应用路由会被误拦**（如 `/api/supplier/order/query`）。宁可拦错不放过是对的，但误拦必须给出**可读原因（命中哪个词、哪一段）**与**一次显式的人工放行**（放行要落进执行记录，便于追责），不得变成用户看不懂的静默红。
 5. eval 参数**禁止写死时间**（住期等一律运行时动态生成，如"今天+7 起 1 晚"）—— 现有集合里 `11/20-21` 这种写死日期会随日历腐烂，且会让红/绿失去意义。
 
+### MVP-1.7 落地形态修正 + 用户追加两条（2026-11-22，本轮已实现）
+**修正：端到端 = 一条 `dotnet test`，不是打 HTTP。** 实勘：`D:/dida/SupplierV2` 本机没有被端到端驱动的服务（`C:\ProjectInstance\SupplierServiceCore.Open` 不存在、无进程、无监听）；`SSTest` 是 WinExe 工具工程（无 `[Fact]/[Test]`）、`RegressionTest` 是依赖该部署目录的 console 批跑器 —— "现成可跑的端到端测试"在本机不存在。规则 1 的"自家应用入口"因此落成新模板 `e2e-supplier-unit-test`（kind=test，`verified=false`）：`dotnet test "{{testProjectPath}}" --filter "FullyQualifiedName~{{supplierClassHint}}"`，由测试代码构造供应商类、调查价、断言返回结构与价格语义 —— 这就是"写好代码了调用代码就行了"。`testProjectPath` 探测 repoPath 下引用 `Microsoft.NET.Test.Sdk`/xunit/nunit 的 `.csproj`，唯一命中才自动填，0/多个 → 未落地并写明"补一个 xunit 测试"的下一步。配套 `has-unit-test`（kind=static，确定性脚本）回答 review 检查表"本次交付有没有配套测试"：`[Fact]/[Theory]/[Test]` 特性与供应商类名同现即算，文件+符号存在性判定，零模型。
+
+**追加① accountId 必填 + `EVAL_ACCOUNT_ID` 契约。** 用户原话：「账号是 2996…编辑的时候给个框给我我能填用哪个账号，不然读配置文件读不了」。背景：`SS.DCYiLv.Config` 的 `AccountDic` 有两个账号（`2996` instantConfirm/INSTANT、`3004` onRequest/ONREQUEST），Postman env 里 `appid/secret/customerCode` 全空串（直连探针 401 的真因）。要求：新变量 `accountId` **必填**，未填 → 未落地 + notes 点名「缺 accountId：请选择用哪个供应商账号跑本次测评」；任务已填 `configJsonPath` 时后端读 `AccountDic` 枚举下拉候选（辅助说明 `AccountName`/`ConfirmMode`，例 `2996 · instantConfirm · INSTANT`），**只回显账号 ID 与名称，绝不回显任何凭据值**；读不到配置 → 退化文本框并说明原因（不报错、不空白）。**契约（写进模板 description 与 `.trellis/spec/backend/supplier-eval.md`）**：target 以环境变量传账号（Windows cmd 形态 `set EVAL_ACCOUNT_ID={{accountId}}&& dotnet test …`），**测试代码必须从 `EVAL_ACCOUNT_ID` 读取账号，缺省时才回落默认账号** —— 写测试的人和跑 eval 的人不许各猜一套。
+
+**追加② 移除 Postman 形态模板。** 用户原话：「还是用的 postman 的，我是想类似于端到端直接调用我这个项目的」。`http-postman-collection` 内置模板**直接去掉**（不是降级为探针；移除原因记录在模板文件 `removedTemplates` 字段）：Postman 集合测的是集合自身签名与环境变量，不证明交付代码正确；端到端一律走 `dotnet test`。`collectionPath`/`envPath` 变量随之移除。现网 `case 42` 那条数据由主会话处理。规则 2 的探针降级保留给 `http-basic-connectivity` / `http-search-minbody` 两条（title 加「探针·」前缀、`countsTowardScore=false`、`computeStats` 分母只含计分项，探针 verdict 单独统计 `probeExecuted/probePassed`）。
+
+## MVP-2 循环改代码（用户 2026-11-22 亲自定义的行为，照此实现）
+用户原话：「我执行 eval 的时候，如果完成数不等于 eval 数，就要一直循环修改代码并重新执行，直到所有 eval 数都通过才停，然后总结修改调整了什么，维护进 skill 里，维护的记录都要有个地方能给我看，最好设置一个循环最大次数，超过了就不要再循环了，或者再给个按钮能给我中断不要再循环下去。」
+
+### 循环语义
+1. 启动 = 跑全部**计入评分**的 eval → `passed/total`；`passed == total` 即收敛停止。
+2. 未全过 → 把失败清单（每条：标题、退出码、输出摘要、落盘输出文件路径）交给**绑定实例主会话**（`ClaudeCodeService.chat`，与飞书同 session），要求改代码；改完**重跑全量**（不是只跑失败的 —— 防止改好一条弄坏另一条）。
+3. **不自动 commit / 不自动 push 他的仓库**。每轮记录：改了哪些文件、增删行数、关键 diff 摘要，供他自行决定提交。
+4. 状态轨迹三态：`一直失败` / `失败→通过`（经验来源）/ **`曾通过→又失败`（regression，红标置顶）**。
+5. **最大轮次**：默认 6，任务级可配（`maxRounds`）。达到上限 → 停，写终态与原因，不静默。
+6. **停滞即停**：连续两轮失败集合完全相同 → 判定"改不动了"，停止并走【卡点】问他（复用卡点协议 + 待确认 + 飞书通知），**不要继续烧额度**。
+7. **中断按钮**：页面上「停止循环」→ 置 `abortRequested`，当前轮 eval 跑完后不再进入下一轮；若此刻实例正在改代码，按钮提供一次**显式**的「同时中止本轮」（走 `abortCurrentTurn`）。这不违反"非卡点不许插话"的既有纪律 —— 那是禁止**自动**插话/打断，人工按键属于显式授权。
+8. 全程状态可查：轮次列表、每轮 `passed/total`、每轮失败项、实例动作进度（复用现有 progress/thinking 展示）。
+
+### 两个必须先堵的坑（否则这循环要么永不停机，要么假装成功）
+- **P1 探针绝不参与收敛判定。** 直连供应商那几条（如 `case 42`：env 里 `appid/secret/customerCode` **全为空** → 必然 `401`，且改代码无法修复）若计入分母，`passed` 永远 `< total`，循环会**一直跑到轮次上限、每轮都让实例去改一堆与它无关的代码**。已由 MVP-1.7 的 `countsTowardScore=false` 解决，此处必须再断言：收敛条件只看计入评分的条目。
+- **P2 未落地条目阻塞启动，不进循环。** "没有可执行测试/缺变量"不是改代码能解决的 —— 让实例为一个无法验证的目标乱改，比不跑更糟。启动循环前做前置校验：计入评分的 eval 若存在未落地项 → **拒绝启动**并列出缺什么（例：`缺 testProjectPath：该供应商还没有 xunit 测试工程，请先在开发节点补测试`）。
+
+### 经验维护进 skill（默认提案制）
+- 对每条「失败→通过」，汇总 {eval 标题、失败时的输出摘要、该轮 diff 摘要、命中的 review 条目} → 生成经验条目，落库可查（页面「维护记录」面板：时间、来源轮次、eval、目标 skill 文件、提案正文）。
+- 目标 skill 由任务上的两个路径决定：`review-supplier`（经验类落 `references/history-and-decisions.md`，该文件本就为此存在）与 `create-supplier`（影响生成口径的落它）。
+- **默认只出提案 diff，用户点「写入」才落盘**（跨仓库改 skill 会影响后续所有供应商）。自动写入需要显式开关，且必须：只追加不改写既有条目、写入前备份原文件、可在记录页一键回滚。
+
+### 验收（追加）
+- AC22′ 2 条 eval、第 1 轮 1 过 1 失败 → 自动进入第 2 轮改码 → 第 2 轮全过 → 停止，轮次记录含 2 条，`passed==total`。
+- AC23′ 探针类失败**不触发**新一轮（P1 的回归锁）。
+- AC24′ 存在未落地条目时启动循环被拒，错误信息点名缺哪个变量/缺什么（P2）。
+- AC25′ 连续两轮失败集合相同 → 停在第 N 轮并产生【卡点】+ 待确认记录，不再起新一轮。
+- AC26′ 达到 `maxRounds` 自动停；「停止循环」按钮能在当前轮结束后终止；「同时中止本轮」只在显式点击时才 `abortCurrentTurn`。
+- AC27′ 全程不产生任何对 `D:/dida/SupplierV2` 的 git commit/push（测试断言无写操作，可用只读 mock 实例会话）。
+- AC28′ 经验提案能查看、可确认写入、写入后在维护记录里可回滚；默认不自动写。
+
 ## MVP-2 范围与未定项（下一棒，本轮不做）
+
 
 
 

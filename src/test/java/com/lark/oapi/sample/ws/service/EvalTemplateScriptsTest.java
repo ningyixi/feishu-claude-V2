@@ -286,6 +286,121 @@ class EvalTemplateScriptsTest {
         assertEquals(1, r3.exit(), "零 .cs 文件 → FAIL（防假绿）");
     }
 
+    // ===== check-has-unit-test.js（MVP-1.7：「本次交付有没有配套测试」= 文件+符号存在性，零模型） =====
+
+    @Test
+    void hasUnitTestPassesAndFailsDeterministically() throws Exception {
+        Path sup = tmp.resolve("sup");
+        Files.createDirectories(sup);
+        Files.writeString(sup.resolve("DCYiLvBusiness.cs"),
+                "namespace Supplier.DCYiLv { public class DCYiLvBusiness : ISupplierService { } }");
+        Files.writeString(sup.resolve("DCYiLvBusinessTest.cs"), """
+                using Xunit;
+                public class DCYiLvBusinessTest {
+                    [Fact]
+                    public void SearchReturnsRates() {
+                        var b = new DCYiLvBusiness();
+                        Assert.NotNull(b);
+                    }
+                }
+                """);
+
+        ProcResult ok = runScript(script("check-has-unit-test.js"), "DCYiLvBusiness", sup.toString());
+        assertEquals(0, ok.exit(), "[Fact] 与类名同现的测试文件存在 → PASS: " + ok.out());
+        assertTrue(ok.out().startsWith("OK"), ok.out());
+        assertTrue(ok.out().contains("DCYiLvBusinessTest.cs"), "输出必须定位到测试文件: " + ok.out());
+
+        // 反例 1：有测试文件但测的不是供应商类 → FAIL（不是恒过）
+        Path sup2 = tmp.resolve("sup2");
+        Files.createDirectories(sup2);
+        Files.writeString(sup2.resolve("OtherTest.cs"),
+                "using Xunit;\npublic class OtherTest { [Fact] public void X() { Assert.True(true); } }");
+        ProcResult noRef = runScript(script("check-has-unit-test.js"), "DCYiLvBusiness", sup2.toString());
+        assertEquals(1, noRef.exit(), "没有测试文件引用供应商类 → FAIL");
+        assertTrue(noRef.out().contains("DCYiLvBusiness"), noRef.out());
+
+        // 反例 2：引用了类但没有 [Fact]/[Test] 特性 → 不算测试文件 → FAIL
+        Path sup3 = tmp.resolve("sup3");
+        Files.createDirectories(sup3);
+        Files.writeString(sup3.resolve("Helper.cs"),
+                "public class Helper { void Use() { var b = new DCYiLvBusiness(); } }");
+        ProcResult noAttr = runScript(script("check-has-unit-test.js"), "DCYiLvBusiness", sup3.toString());
+        assertEquals(1, noAttr.exit(), "引用类但没有测试特性 → 没有配套测试 → FAIL");
+        assertTrue(noAttr.out().contains("[Fact]"), noAttr.out());
+
+        // 防假绿：根不存在 / 零 .cs / 参数未展开 → 一律 FAIL
+        assertEquals(1, runScript(script("check-has-unit-test.js"), "X",
+                tmp.resolve("nope").toString()).exit(), "根不存在 → FAIL");
+        Path empty = tmp.resolve("no-cs");
+        Files.createDirectories(empty);
+        assertEquals(1, runScript(script("check-has-unit-test.js"), "X", empty.toString()).exit(),
+                "零 .cs → FAIL（防止错误目录下假绿）");
+        assertEquals(1, runScript(script("check-has-unit-test.js"), "X", "{{supplierDir}}").exit(),
+                "未展开占位符参数 → fail-loud，不当成合法根");
+
+        // 多根：配套测试在独立测试工程目录（第三参）→ 也算命中
+        Path testProj = tmp.resolve("testproj");
+        Files.createDirectories(testProj);
+        Path sup4 = tmp.resolve("sup4");
+        Files.createDirectories(sup4);
+        Files.writeString(sup4.resolve("Impl.cs"), "public class DBusiness { }");
+        Files.writeString(testProj.resolve("DBusinessTests.cs"),
+                "using NUnit.Framework;\npublic class DBusinessTests { [Test] public void T() { new DBusiness(); } }");
+        ProcResult multi = runScript(script("check-has-unit-test.js"), "DBusiness",
+                sup4.toString(), testProj.toString());
+        assertEquals(0, multi.exit(), "测试工程目录可作第二扫描根: " + multi.out());
+
+        // bin/obj 里的生成文件不算配套测试
+        Path sup5 = tmp.resolve("sup5");
+        Files.createDirectories(sup5.resolve("obj"));
+        Files.writeString(sup5.resolve("obj/Generated.cs"),
+                "using Xunit;\npublic class G { [Fact] public void T() { new Target(); } }");
+        Files.writeString(sup5.resolve("Target.cs"), "public class Target { }");
+        assertEquals(1, runScript(script("check-has-unit-test.js"), "Target", sup5.toString()).exit(),
+                "obj/ 下的测试文件不算（跳过 bin/obj）");
+    }
+
+    // ===== MVP-1.7 规则 5：eval 禁止写死时间——请求体日期字段运行时动态生成（今天+7/今天+8） =====
+
+    @Test
+    void httpJsonRewritesBodyDatesAtRuntimeNeverHardcoded() throws Exception {
+        java.util.concurrent.atomic.AtomicReference<String> received =
+                new java.util.concurrent.atomic.AtomicReference<>("");
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/echo", ex -> {
+            received.set(new String(ex.getRequestBody().readAllBytes(), StandardCharsets.UTF_8));
+            respond(ex, 200, "application/json", "{\"data\":[{\"rate\":1}]}");
+        });
+        server.start();
+        try {
+            String base = "http://127.0.0.1:" + server.getAddress().getPort();
+            java.time.LocalDate in = java.time.LocalDate.now().plusDays(7);
+            java.time.LocalDate out = java.time.LocalDate.now().plusDays(8);
+
+            // 写死的腐烂日期（DCYiLv 集合 11/20-21 同款坑）→ 发送前必须被重写为今天+7/今天+8
+            Path body = writeFixture("hardcoded.json",
+                    "{\"checkIn\":\"2025-11-20\",\"checkOut\":\"2025-11-21\",\"rooms\":1}");
+            ProcResult r = runScript(script("check-http-json.js"), "POST", base + "/echo", body.toString());
+            assertEquals(0, r.exit(), r.out());
+            assertTrue(received.get().contains("\"checkIn\":\"" + in + "\""),
+                    "实际发送的请求体必须是动态生成的今天+7: " + received.get());
+            assertTrue(received.get().contains("\"checkOut\":\"" + out + "\""), received.get());
+            assertFalse(received.get().contains("2025-11-20"), "写死日期绝不允许原样发出");
+            assertTrue(r.out().contains("实际使用的日期") && r.out().contains(in.toString())
+                            && r.out().contains(out.toString()),
+                    "输出必须打印实际使用的日期取值: " + r.out());
+
+            // 模板自带的 search-minbody.json（<RUNTIME_TODAY+7> 标记）→ 同样被重写成真实日期
+            ProcResult r2 = runScript(script("check-http-json.js"), "POST", base + "/echo",
+                    scripts.resolve("search-minbody.json").toString());
+            assertEquals(0, r2.exit(), r2.out());
+            assertTrue(received.get().contains("\"checkIn\":\"" + in + "\""), received.get());
+            assertFalse(received.get().contains("RUNTIME"), "标记必须被重写掉: " + received.get());
+        } finally {
+            server.stop(0);
+        }
+    }
+
     // ===== check-http-json.js / fetch-config-center.js（对本地测试服务真实收发） =====
 
     @Test

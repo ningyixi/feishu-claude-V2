@@ -464,4 +464,103 @@ class EvalStaticRepoPathTest {
         EvalCase c4 = importLanded(t4, "build-dotnet");
         assertEquals("dotnet build \"" + fwd(repo2.resolve("A.sln")) + "\" --nologo", c4.getTarget());
     }
+
+    // ===== ⑧ MVP-1.7：testProjectPath 探测——引用测试 SDK 的 .csproj 唯一命中才自动填，0/多个 → 未落地 =====
+
+    /** 测试工程 fixture：引用 Microsoft.NET.Test.Sdk + xunit（探测标记） */
+    static final String TEST_CSPROJ = """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><TargetFramework>net9.0</TargetFramework></PropertyGroup>
+              <ItemGroup>
+                <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.0.0" />
+                <PackageReference Include="xunit" Version="2.9.0" />
+              </ItemGroup>
+            </Project>
+            """;
+
+    /** 非测试工程 fixture：WinExe 工具（复刻真仓 SSTest 形态）——不含测试引用，绝不算候选 */
+    static final String PLAIN_CSPROJ = """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net9.0-windows</TargetFramework></PropertyGroup>
+            </Project>
+            """;
+
+    @Test
+    void uniqueTestCsprojAutoFillsAndLandsE2eTemplateWithoutRunningDotnet() throws Exception {
+        Path repo = tmp.resolve("e2e-repo");
+        Path testProj = repo.resolve("src/Test/Supplier.Dorak.Tests");
+        Files.createDirectories(testProj);
+        Files.writeString(testProj.resolve("Supplier.Dorak.Tests.csproj"), TEST_CSPROJ, StandardCharsets.UTF_8);
+        Path tool = repo.resolve("src/Test/SSTest");   // WinExe 工具工程 → 不算测试工程
+        Files.createDirectories(tool);
+        Files.writeString(tool.resolve("SSTest.csproj"), PLAIN_CSPROJ, StandardCharsets.UTF_8);
+        Files.createDirectories(repo.resolve("obj"));   // obj 里的 .csproj 不参与探测
+        Files.writeString(repo.resolve("obj/Cached.csproj"), TEST_CSPROJ, StandardCharsets.UTF_8);
+
+        // 只钉 target 构造与变量探测——本机红线：dotnet 一律不真跑，所以不走 trial
+        EvalCase c = importLanded(task(null, "{\"repoPath\":\"" + fwd(repo) + "\",\"accountId\":\"2996\","
+                + "\"supplierClassHint\":\"DorakSupplierService\"}"), "e2e-supplier-unit-test");
+        assertEquals("set EVAL_ACCOUNT_ID=2996&& dotnet test \""
+                        + fwd(testProj.resolve("Supplier.Dorak.Tests.csproj"))
+                        + "\" --filter \"FullyQualifiedName~DorakSupplierService\" --nologo",
+                c.getTarget(), "唯一测试工程命中 → 展开进 target；账号经 EVAL_ACCOUNT_ID 环境变量传入");
+        assertEquals("test", c.getKind());
+        assertTrue(c.isCountsTowardScore(), "端到端是计分项");
+        assertTrue(c.getNotes().contains("未真实验证"), "verified=false 橙标语义保留: " + c.getNotes());
+    }
+
+    @Test
+    void zeroOrAmbiguousTestCsprojLandsNotLandedWithNextStep() throws Exception {
+        // 0 个命中：仓库只有 WinExe 工具工程（复刻真仓 SupplierV2 现状——没有可执行的单元测试工程）
+        Path repo = tmp.resolve("no-test-repo");
+        Files.createDirectories(repo.resolve("src/Test/SSTest"));
+        Files.writeString(repo.resolve("src/Test/SSTest/SSTest.csproj"), PLAIN_CSPROJ, StandardCharsets.UTF_8);
+
+        EvalTask t = task(null, "{\"repoPath\":\"" + fwd(repo) + "\",\"accountId\":\"2996\","
+                + "\"supplierClassHint\":\"DCYiLvBusiness\"}");
+        JsonObject r = service.importTemplates(1L, List.of("e2e-supplier-unit-test"));
+        assertEquals(0, r.get("landed").getAsInt());
+        assertEquals(1, r.get("notLanded").getAsInt());
+        ArgumentCaptor<EvalCase> cap = ArgumentCaptor.forClass(EvalCase.class);
+        verify(caseRepo).save(cap.capture());
+        EvalCase c = cap.getValue();
+        assertEquals("", c.getTarget(), "无测试工程 → 未落地，绝不跑一条必失败或恒绿的 dotnet test");
+        assertTrue(c.getNotes().contains("没找到任何单元测试工程"), c.getNotes());
+        assertTrue(c.getNotes().contains("xunit") && c.getNotes().contains("DCYiLvBusiness"),
+                "notes 给下一步人话（为供应商类补 xunit 测试）: " + c.getNotes());
+        var s = EvalLoopService.computeStats(List.of(c));
+        assertEquals(0, s.executed(), "未落地不进分母");
+        assertEquals(1, s.notLanded());
+
+        // 多个命中 → 歧义，列出全部候选，绝不瞎猜
+        reset(caseRepo);
+        when(caseRepo.findByTaskIdOrderBySortOrderAscIdAsc(1L)).thenReturn(List.of());
+        Path repo2 = tmp.resolve("multi-test-repo");
+        Files.createDirectories(repo2.resolve("t1"));
+        Files.createDirectories(repo2.resolve("t2"));
+        Files.writeString(repo2.resolve("t1/A.Tests.csproj"), TEST_CSPROJ, StandardCharsets.UTF_8);
+        Files.writeString(repo2.resolve("t2/B.Tests.csproj"), TEST_CSPROJ.replace("xunit", "NUnit"),
+                StandardCharsets.UTF_8);
+        EvalTask t2 = task(null, "{\"repoPath\":\"" + fwd(repo2) + "\",\"accountId\":\"2996\","
+                + "\"supplierClassHint\":\"X\"}");
+        when(taskRepo.findById(1L)).thenReturn(Optional.of(t2));
+        service.importTemplates(1L, List.of("e2e-supplier-unit-test"));
+        ArgumentCaptor<EvalCase> cap2 = ArgumentCaptor.forClass(EvalCase.class);
+        verify(caseRepo).save(cap2.capture());
+        assertEquals("", cap2.getValue().getTarget(), "多个测试工程 → 未落地");
+        assertTrue(cap2.getValue().getNotes().contains("歧义"), cap2.getValue().getNotes());
+        assertTrue(cap2.getValue().getNotes().contains("t1/A.Tests.csproj")
+                        && cap2.getValue().getNotes().contains("t2/B.Tests.csproj"),
+                "notes 列出全部候选: " + cap2.getValue().getNotes());
+
+        // 显式 testProjectPath 优先于探测（歧义也能被显式值化解）
+        reset(caseRepo);
+        when(caseRepo.findByTaskIdOrderBySortOrderAscIdAsc(1L)).thenReturn(List.of());
+        EvalTask t3 = task(null, "{\"repoPath\":\"" + fwd(repo2) + "\",\"accountId\":\"3004\","
+                + "\"supplierClassHint\":\"X\",\"testProjectPath\":\"" + fwd(repo2.resolve("t2/B.Tests.csproj")) + "\"}");
+        when(taskRepo.findById(1L)).thenReturn(Optional.of(t3));
+        EvalCase c3 = importLanded(t3, "e2e-supplier-unit-test");
+        assertEquals("set EVAL_ACCOUNT_ID=3004&& dotnet test \"" + fwd(repo2.resolve("t2/B.Tests.csproj"))
+                + "\" --filter \"FullyQualifiedName~X\" --nologo", c3.getTarget());
+    }
 }

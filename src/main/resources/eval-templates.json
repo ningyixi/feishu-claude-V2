@@ -1,16 +1,24 @@
 {
   "version": 1,
   "httpEvidenceWarning": "注意：eval 里基于脚本/curl 的连通性检查，不等价于工作台实测门禁认可的 Postman 证据（SupplierProbeEvidence 只认 Postman MCP 或 postman collection run）。跑绿这些 eval 不能免除实测。",
+  "datePolicy": "eval 禁止写死时间：住期/日期（checkIn/checkOut 等）一律运行时动态生成（如今天+7 起 1 晚），并在输出里打印实际取值。写死日期会随日历腐烂——DCYiLv 集合里的「11/20-21」就是前车之鉴：今天绿、下周红，且没人知道为什么。模板库有单测钉死：任何模板的 target/expect 里出现日期字面量即测试失败。",
+  "removedTemplates": [
+    {
+      "key": "http-postman-collection",
+      "removedIn": "MVP-1.7",
+      "reason": "用户明确不要 Postman 形态的 eval（原话：「还是用的 postman 的，我是想类似于端到端直接调用我这个项目的」）：Postman 集合测的是集合自身签名与环境变量，不证明本次交付的代码正确（实测事故：直连拿到 401 未授权，是集合凭据全空串所致，与供应商代码无关）。端到端一律走 dotnet test（e2e-supplier-unit-test），本模板不再提供。"
+    }
+  ],
   "variables": [
     { "name": "configJsonPath", "label": "配置文件路径（本地可解析的供应商配置 JSON）", "placeholder": "如 D:/dida/SupplierV2/.../SS.DCYiLv.Config.json" },
     { "name": "baseUrl", "label": "供应商网关基础地址", "placeholder": "如 https://gateway.example.com" },
     { "name": "configKey", "label": "配置中心键名", "placeholder": "如 SS.DCYiLv.Config" },
-    { "name": "collectionPath", "label": "Postman 集合文件路径", "placeholder": "如 D:/.../supplier.postman_collection.json" },
-    { "name": "envPath", "label": "Postman 环境文件路径", "placeholder": "如 D:/.../supplier.env.json" },
+    { "name": "accountId", "label": "供应商账号 ID（端到端 dotnet test 必填：本次测评用 AccountDic 里的哪个账号；已填 configJsonPath 时页面自动枚举下拉候选，只回显账号 ID 与名称/确认模式，绝不回显任何凭据。经环境变量 EVAL_ACCOUNT_ID 传给测试——测试代码必须从 EVAL_ACCOUNT_ID 读账号，缺省时才回落默认账号）", "placeholder": "如 2996（instantConfirm/INSTANT）或 3004（onRequest/ONREQUEST）" },
     { "name": "supplierClassHint", "label": "供应商实现类名（静态类检查用）", "placeholder": "如 DorakSupplierService" },
     { "name": "repoPath", "label": "仓库根目录（build 找 .sln、类注册引用全仓检索用；留空 = 自动取绑定实例的工作目录 claudeWorkingDir）", "placeholder": "如 D:/dida/SupplierV2（未绑定实例时必填）" },
     { "name": "supplierDir", "label": "供应商目录（「只管本次交付」的静态检查扫描根；留空 = 在 repoPath/src/Business/Supplier/ 下按供应商代码探测，唯一命中才自动填，绝不瞎猜）", "placeholder": "如 D:/dida/SupplierV2/src/Business/Supplier/DCYiLv" },
-    { "name": "slnPath", "label": "解决方案 .sln 路径（build 模板用；留空 = 自动解析 repoPath 下唯一的 .sln，0 个或多个则不落地）", "placeholder": "如 D:/dida/SupplierV2/Dida.Supplier.Core.sln" }
+    { "name": "slnPath", "label": "解决方案 .sln 路径（build 模板用；留空 = 自动解析 repoPath 下唯一的 .sln，0 个或多个则不落地）", "placeholder": "如 D:/dida/SupplierV2/Dida.Supplier.Core.sln" },
+    { "name": "testProjectPath", "label": "单元测试工程 .csproj 路径（端到端 dotnet test 用；留空 = 在 repoPath 下自动探测引用 Microsoft.NET.Test.Sdk / xunit / nunit 的 .csproj，唯一命中才自动填，0 个或多个则不落地、绝不瞎猜）", "placeholder": "如 D:/dida/SupplierV2/src/Test/Supplier.DCYiLv.Tests/Supplier.DCYiLv.Tests.csproj" }
   ],
   "templates": [
     {
@@ -53,43 +61,60 @@
       "description": "真去配置中心取 {{configKey}} 并跑与「配置结构」相同的一套断言。依赖环境变量 CONFIG_CENTER_URL / CONFIG_CENTER_TOKEN；【此 HTTP GET 协议未对真实配置中心验证过】，公司配置中心若不是这个形态，直接改 scripts/eval/fetch-config-center.js（判定仍落在退出码 + 输出）。无沙箱凭据时试跑记「跳过」，不计入通过率。"
     },
     {
+      "key": "e2e-supplier-unit-test",
+      "group": "端到端",
+      "title": "端到端：dotnet test 跑本供应商单元测试（走被测代码路径）",
+      "kind": "test",
+      "timeoutSec": 900,
+      "requiresSandbox": false,
+      "countsTowardScore": true,
+      "needsVariables": ["accountId", "testProjectPath", "supplierClassHint"],
+      "targetTemplate": "set EVAL_ACCOUNT_ID={{accountId}}&& dotnet test \"{{testProjectPath}}\" --filter \"FullyQualifiedName~{{supplierClassHint}}\" --nologo",
+      "expectTemplate": "exit=0",
+      "verified": false,
+      "description": "端到端判定 = dotnet test 真跑本供应商的单元测试：测试代码构造供应商类、调查价、断言返回结构与价格语义——请求走被测适配器代码（读配置、签名、映射、解析），不是绕过适配器直连供应商网关（那只证明「供应商活着吗」，已降级为探针；Postman 形态的模板已移除）。【账号契约·必填】AccountDic 里往往有多个账号（如 2996=instantConfirm/INSTANT 与 3004=onRequest/ONREQUEST，确认模式与价格行为不同），必须由人指定本次测评用哪个：accountId 经环境变量 EVAL_ACCOUNT_ID 传进 dotnet test（target 形如 set EVAL_ACCOUNT_ID=2996&& dotnet test …，Windows cmd 写法；非 Windows 请改模板文件为 EVAL_ACCOUNT_ID=2996 dotnet test … 形式）——测试代码必须从 EVAL_ACCOUNT_ID 读取账号，缺省时才回落默认账号（契约见 .trellis/spec/backend/supplier-eval.md）。未填 accountId → 本条落「未落地」，不计入通过率。testProjectPath 留空时自动探测 repoPath 下引用 Microsoft.NET.Test.Sdk / xunit / nunit 的 .csproj，唯一命中才自动填；0 个或多个 → 未落地并写清原因与下一步，绝不瞎猜。⚠ 与 has-unit-test 配套使用：本条只看退出码，filter 匹配到 0 个用例时部分 dotnet 版本也返回 0 退出码（假绿），「配套测试存在吗」由 has-unit-test 的文件+符号确定性判定回答。【未真实验证】dotnet test 基线未在真实仓库跑过，首跑看到真实输出后建议自行收紧断言（如 stdout~Failed: 0；输出格式随 SDK/语言环境变化，写死正则可能判红）。"
+    },
+    {
       "key": "http-basic-connectivity",
       "group": "HTTP",
-      "title": "接口基础连通（GET 只读端点有 JSON 响应）",
+      "title": "探针·接口基础连通（GET 只读端点有 JSON 响应）",
       "kind": "http",
       "timeoutSec": 120,
       "requiresSandbox": true,
+      "countsTowardScore": false,
       "needsVariables": ["baseUrl"],
       "targetTemplate": "node \"{{evalScriptDir}}/check-http-json.js\" GET \"{{baseUrl}}\"",
       "expectTemplate": "exit=0\nstdout~OK status=",
       "verified": true,
-      "description": "对 {{baseUrl}} 发一次真实 GET，断言：状态码 < 500、响应非空且可解析 JSON（判定链路已对本地测试服务验证；供应商网关侧未验证）。注意：脚本级连通检查不等价于工作台实测门禁认可的 Postman 证据（SupplierProbeEvidence 只认 Postman MCP / postman collection run），跑绿本条 eval 不能免除实测。⚠ eval 强制只读（安全闸）：target 指向提交类端点（create/cancel/pay/refund/confirm/order）→ 导入被拒、试跑记 FAIL 且进程不启动。"
+      "description": "【MVP-1.7 降级为可用性探针，不计入通过率】直连供应商网关绕过了被测适配器代码，它只回答「供应商活着吗」，不证明本次交付的代码正确；代码质量检查请用「端到端」分组的 e2e-supplier-unit-test + has-unit-test。功能不变：对 {{baseUrl}} 发一次真实 GET，断言：状态码 < 500、响应非空且可解析 JSON（判定链路已对本地测试服务验证；供应商网关侧未验证）。注意：脚本级连通检查不等价于工作台实测门禁认可的 Postman 证据（SupplierProbeEvidence 只认 Postman MCP / postman collection run），跑绿本条 eval 不能免除实测。⚠ eval 强制只读（安全闸）：target 指向提交类端点（create/cancel/pay/refund/confirm/order）→ 导入被拒、试跑记 FAIL 且进程不启动。"
     },
     {
       "key": "http-search-minbody",
       "group": "HTTP",
-      "title": "查价端点带最小请求体有可解析 JSON 返回",
+      "title": "探针·查价端点带最小请求体有可解析 JSON 返回",
       "kind": "http",
       "timeoutSec": 120,
       "requiresSandbox": true,
+      "countsTowardScore": false,
       "needsVariables": ["baseUrl"],
       "targetTemplate": "node \"{{evalScriptDir}}/check-http-json.js\" POST \"{{baseUrl}}/open/avail/hotelsearch\" \"{{evalScriptDir}}/search-minbody.json\"",
       "expectTemplate": "exit=0\nstdout~OK status=",
       "verified": true,
-      "description": "POST 最小请求体到查价端点（默认路径 {{baseUrl}}/open/avail/hotelsearch；请求体在 scripts/eval/search-minbody.json，可按供应商自行编辑），断言响应非空、可解析 JSON、状态码 < 500（判定链路已对本地测试服务验证；供应商网关侧未验证）。同样注意：不等价于 Postman 实测门禁证据。⚠ eval 强制只读（安全闸）：hotelsearch 属查询类白名单；target 指向提交类端点（create/cancel/pay/refund/confirm/order）→ 导入被拒、试跑记 FAIL 且进程不启动。"
+      "description": "【MVP-1.7 降级为可用性探针，不计入通过率】直连供应商网关绕过了被测适配器代码，它只回答「供应商活着吗/请求形态对不对」，不证明本次交付的代码正确；代码质量检查请用「端到端」分组的 e2e-supplier-unit-test + has-unit-test。功能不变：POST 最小请求体到查价端点（默认路径 {{baseUrl}}/open/avail/hotelsearch；请求体在 scripts/eval/search-minbody.json，可按供应商自行编辑），断言响应非空、可解析 JSON、状态码 < 500（判定链路已对本地测试服务验证；供应商网关侧未验证）。同样注意：不等价于 Postman 实测门禁证据。⚠ eval 强制只读（安全闸）：hotelsearch 属查询类白名单；target 指向提交类端点（create/cancel/pay/refund/confirm/order）→ 导入被拒、试跑记 FAIL 且进程不启动。【eval 禁止写死时间】请求体里如需住期日期，须运行时动态生成，不许写死（写死日期随日历腐烂）。"
     },
     {
-      "key": "http-postman-collection",
-      "group": "HTTP",
-      "title": "Postman 集合真实跑一轮（与实测门禁同源通道）",
-      "kind": "http",
-      "timeoutSec": 600,
-      "requiresSandbox": true,
-      "needsVariables": ["collectionPath", "envPath"],
-      "targetTemplate": "postman collection run \"{{collectionPath}}\" --environment \"{{envPath}}\"",
-      "expectTemplate": "exit=0",
-      "verified": false,
-      "description": "Postman CLI 真实跑集合——这是工作台实测门禁认可的通道（SupplierProbeEvidence 只认 Postman MCP / postman collection run）。断言保守：退出码 0；首跑看到真实输出后建议自行收紧（如加 stdout~failed 0）。【未对真实供应商集合跑通过，本机 Postman CLI 1.86.0 已确认存在该子命令与 --environment 参数】。"
+      "key": "has-unit-test",
+      "group": "静态",
+      "title": "本次交付有配套测试（测试文件引用供应商类 + [Fact]/[Test]）",
+      "kind": "static",
+      "timeoutSec": 120,
+      "requiresSandbox": false,
+      "countsTowardScore": true,
+      "needsVariables": ["supplierClassHint", "supplierDir"],
+      "targetTemplate": "node \"{{evalScriptDir}}/check-has-unit-test.js\" \"{{supplierClassHint}}\" \"{{supplierDir}}\"",
+      "expectTemplate": "exit=0\nstdout=OK",
+      "verified": true,
+      "description": "确定性回答 review 检查表「本次交付有没有配套测试」：供应商目录 {{supplierDir}} 下存在带 [Fact]/[Theory]/[Test] 特性的 .cs 测试文件，且其中至少一个引用了类名 {{supplierClassHint}}（同现即算——判据是文件与符号存在性，不是模型判断）。防假绿：扫描根不存在、或一个 .cs 都扫不到 → 判 FAIL；有测试文件但没引用该类也 FAIL 并列出示例。若配套测试放在独立测试工程目录（testProjectPath 所在），导入后可手动编辑 target 把该目录追加为脚本第三个参数。与 e2e-supplier-unit-test 配套：本条回答「测试存在吗」，那条回答「测试真能跑过吗」（dotnet test 退出码）。supplierDir 留空时按 repoPath/src/Business/Supplier/<供应商代码> 探测，唯一命中才自动填；探测不到或有歧义 → 落「未落地」并写明原因，绝不瞎猜、绝不回退到仓库根。"
     },
     {
       "key": "static-class-registered",

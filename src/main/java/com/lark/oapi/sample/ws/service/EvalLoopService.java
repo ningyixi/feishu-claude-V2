@@ -588,19 +588,24 @@ public class EvalLoopService {
         return o;
     }
 
-    // ===== 通过率统计（分母诚实：未落地/跳过/未跑 一律不进分母） =====
+    // ===== 通过率统计（分母诚实：未落地/跳过/未跑/探针 一律不进分母） =====
 
     /**
-     * executed（分母）= enabled 且已落地 且 最近一次执行出了客观结果（PASS/FAIL/TIMEOUT）。
-     * notLanded（target 空）、skipped（缺沙箱凭据）、notRun（落地了还没跑过）单列，绝不混进分母。
+     * executed（分母）= enabled 且已落地 且 <b>计入评分</b>（countsTowardScore=true，MVP-1.7）
+     * 且 最近一次执行出了客观结果（PASS/FAIL/TIMEOUT）。
+     * notLanded（target 空）、skipped（缺沙箱凭据）、notRun（落地了还没跑过）单列，绝不混进分母；
+     * 探针（countsTowardScore=false，如直连供应商网关的连通检查）的真实执行结果单独进
+     * probeExecuted/probePassed——它只回答「外部服务活着吗」，不证明交付代码正确，
+     * <b>既不许虚增通过率（探针 PASS 不进 passed/executed），也不许算成失败（探针 FAIL 不进 failed）</b>。
      */
     public record Stats(int total, int enabled, int landed, int notLanded, int executed,
                         int passed, int failed, int timeout, int error, int skipped,
-                        int running, int notRun) {}
+                        int running, int notRun, int probeExecuted, int probePassed) {}
 
     static Stats computeStats(List<EvalCase> all) {
         int total = all.size(), enabled = 0, landed = 0, notLanded = 0, executed = 0, passed = 0,
-                failed = 0, timeout = 0, error = 0, skipped = 0, running = 0, notRun = 0;
+                failed = 0, timeout = 0, error = 0, skipped = 0, running = 0, notRun = 0,
+                probeExecuted = 0, probePassed = 0;
         for (EvalCase c : all) {
             if (!c.isEnabled()) continue;
             enabled++;
@@ -608,10 +613,17 @@ public class EvalLoopService {
             landed++;
             String v = c.getLastVerdict();
             if (v == null) { notRun++; continue; }
+            boolean scored = c.isCountsTowardScore();
             switch (v) {
-                case EvalRunner.PASS -> { executed++; passed++; }
-                case EvalRunner.FAIL -> { executed++; failed++; }
-                case EvalRunner.TIMEOUT -> { executed++; timeout++; }
+                case EvalRunner.PASS -> {
+                    if (scored) { executed++; passed++; } else { probeExecuted++; probePassed++; }
+                }
+                case EvalRunner.FAIL -> {
+                    if (scored) { executed++; failed++; } else { probeExecuted++; }
+                }
+                case EvalRunner.TIMEOUT -> {
+                    if (scored) { executed++; timeout++; } else { probeExecuted++; }
+                }
                 case EvalRunner.SKIPPED -> skipped++;      // 单列，不进分母
                 case EvalRunner.ERROR -> error++;           // 环境/启动问题，单列，不进分母（跑都没跑起来）
                 case EvalRunner.RUNNING -> running++;
@@ -619,7 +631,7 @@ public class EvalLoopService {
             }
         }
         return new Stats(total, enabled, landed, notLanded, executed, passed, failed, timeout, error,
-                skipped, running, notRun);
+                skipped, running, notRun, probeExecuted, probePassed);
     }
 
     static JsonObject statsJson(Stats s) {
@@ -636,6 +648,8 @@ public class EvalLoopService {
         o.addProperty("skipped", s.skipped());
         o.addProperty("running", s.running());
         o.addProperty("notRun", s.notRun());
+        o.addProperty("probeExecuted", s.probeExecuted());
+        o.addProperty("probePassed", s.probePassed());
         return o;
     }
 
@@ -708,6 +722,8 @@ public class EvalLoopService {
         JsonObject o = new JsonObject();
         o.addProperty("scriptDir", vars.get("evalScriptDir"));
         o.addProperty("httpEvidenceWarning", lib.httpEvidenceWarning());
+        o.addProperty("datePolicy", lib.datePolicy());
+        o.add("accountOptions", accountOptionsJson(vars));
         JsonArray vs = new JsonArray();
         for (EvalTemplates.VariableSpec v : lib.variables()) {
             JsonObject vo = new JsonObject();
@@ -728,6 +744,7 @@ public class EvalLoopService {
             to.addProperty("timeoutSec", tpl.timeoutSec() > 0 ? tpl.timeoutSec() : EvalRunner.defaultTimeoutSec(tpl.kind()));
             to.addProperty("requiresSandbox", tpl.requiresSandbox());
             to.addProperty("verified", tpl.verified());
+            to.addProperty("countsTowardScore", tpl.countsTowardScore());
             to.addProperty("description", tpl.description());
             to.addProperty("targetTemplate", tpl.targetTemplate());
             to.addProperty("expectTemplate", tpl.expectTemplate());
@@ -740,6 +757,69 @@ public class EvalLoopService {
             ts.add(to);
         }
         o.add("templates", ts);
+        return o;
+    }
+
+    /**
+     * accountId 下拉候选（MVP-1.7 追加①，用户原话「编辑的时候给个框给我我能填用哪个账号」）：
+     * 任务已填 configJsonPath 时，读那份配置 JSON 的 AccountDic 键枚举候选，附 AccountName/ConfirmMode
+     * 作辅助说明（例：2996 · instantConfirm · INSTANT）。
+     * <p>
+     * 安全纪律：只回显账号 ID 与名称/确认模式，<b>绝不回显 appid/secret/customerCode 等任何凭据值</b>
+     *（枚举副本里 secret 是占位符也不透出）。读不到文件 / AccountDic 缺失或为空 / JSON 坏 →
+     * accounts 空数组 + problem 写明原因（前端据此退化成文本输入，不报错、不空白）。
+     */
+    static JsonObject accountOptionsJson(Map<String, String> vars) {
+        JsonObject o = new JsonObject();
+        JsonArray arr = new JsonArray();
+        o.add("accounts", arr);
+        String cfgPath = vars.get("configJsonPath");
+        if (cfgPath == null || cfgPath.isBlank()) {
+            o.addProperty("problem", "未填 configJsonPath，无法从配置枚举账号候选");
+            return o;
+        }
+        Path p;
+        try {
+            p = Path.of(cfgPath.trim());
+        } catch (Exception e) {
+            o.addProperty("problem", "configJsonPath 不是合法路径（" + cfgPath + "），无法枚举账号候选");
+            return o;
+        }
+        if (!Files.isRegularFile(p)) {
+            o.addProperty("problem", "configJsonPath 指向的文件读不到（" + cfgPath + "），无法枚举账号候选");
+            return o;
+        }
+        try {
+            JsonObject cfg = com.google.gson.JsonParser
+                    .parseString(Files.readString(p, StandardCharsets.UTF_8)).getAsJsonObject();
+            if (!cfg.has("AccountDic") || !cfg.get("AccountDic").isJsonObject()) {
+                o.addProperty("problem", "配置 JSON 里没有 AccountDic 对象，无法枚举账号候选");
+                return o;
+            }
+            JsonObject dic = cfg.getAsJsonObject("AccountDic");
+            List<String> ids = new java.util.ArrayList<>(dic.keySet());
+            java.util.Collections.sort(ids);
+            for (String id : ids) {
+                JsonObject a = new JsonObject();
+                a.addProperty("id", id);
+                // 白名单式取字段：只取 AccountName/ConfirmMode 作辅助说明，凭据字段一律不碰
+                if (dic.get(id) != null && dic.get(id).isJsonObject()) {
+                    JsonObject acct = dic.get(id).getAsJsonObject();
+                    for (String field : List.of("AccountName", "ConfirmMode")) {
+                        if (acct.has(field) && acct.get(field).isJsonPrimitive()) {
+                            a.addProperty(Character.toLowerCase(field.charAt(0)) + field.substring(1),
+                                    acct.get(field).getAsString());
+                        }
+                    }
+                }
+                arr.add(a);
+            }
+            if (arr.isEmpty()) {
+                o.addProperty("problem", "配置 AccountDic 里没有任何账号，无法枚举候选");
+            }
+        } catch (Exception e) {
+            o.addProperty("problem", "解析配置 JSON 失败（" + e.getMessage() + "），无法枚举账号候选");
+        }
         return o;
     }
 
@@ -817,11 +897,50 @@ public class EvalLoopService {
                             .append(sln.problem() == null ? "原因未知" : sln.problem())
                             .append("。不会跑一条缺解决方案路径、必失败的命令。");
                 }
+                if (target.missingVariables().contains("accountId")) {
+                    // MVP-1.7 追加①：端到端跑哪个供应商账号必须由人指定，不猜默认账号
+                    notes.append("\n缺 accountId：请选择用哪个供应商账号跑本次测评（AccountDic 里往往有多个账号，")
+                            .append("确认模式与价格行为不同，选错账号 = 测的不是想要的行为）。");
+                    JsonObject acc = accountOptionsJson(vars);
+                    if (acc.getAsJsonArray("accounts").size() > 0) {
+                        StringBuilder cand = new StringBuilder();
+                        for (var el : acc.getAsJsonArray("accounts")) {
+                            JsonObject a = el.getAsJsonObject();
+                            if (cand.length() > 0) cand.append("；");
+                            cand.append(a.get("id").getAsString());
+                            if (a.has("accountName")) cand.append(" · ").append(a.get("accountName").getAsString());
+                            if (a.has("confirmMode")) cand.append(" · ").append(a.get("confirmMode").getAsString());
+                        }
+                        notes.append("当前配置里的候选账号：").append(cand).append("。");
+                    } else if (acc.has("problem")) {
+                        notes.append("（").append(acc.get("problem").getAsString()).append("，可手动填写账号 ID。）");
+                    }
+                    notes.append("accountId 经环境变量 EVAL_ACCOUNT_ID 传给 dotnet test——测试代码必须从 EVAL_ACCOUNT_ID 读取账号，")
+                            .append("缺省时才回落默认账号（契约见 .trellis/spec/backend/supplier-eval.md）。");
+                }
+                if (target.missingVariables().contains("testProjectPath")) {
+                    // MVP-1.7：端到端 = dotnet test 走被测代码；没有可执行测试工程就落未落地并给下一步，绝不瞎猜
+                    PathResolution tp = resolveTestProjectPath(vars);
+                    String hint = vars.get("supplierClassHint");
+                    String who = hint != null && !hint.isBlank() ? hint.trim() : "该供应商实现类";
+                    notes.append("\ntestProjectPath = 单元测试工程（引用 Microsoft.NET.Test.Sdk / xunit / nunit 的 .csproj）。当前解析未成功：")
+                            .append(tp.problem() == null ? "原因未知" : tp.problem())
+                            .append("。该供应商还没有可执行的单元测试工程（实勘：仓库现有 SSTest 是 WinExe 工具工程、")
+                            .append("RegressionTest 是依赖 C:\\ProjectInstance 部署目录的 console 批跑器，本机跑不起来——都不算单元测试工程）。")
+                            .append("下一步：在开发节点为 ").append(who)
+                            .append(" 补一个 xunit 测试——构造供应商 Business 类、调查价、断言返回结构与价格语义；补完再重新导入/重跑本 eval。")
+                            .append("绝不代跑一条必失败或恒绿的 dotnet test 命令。");
+                }
+            }
+            if (!tpl.countsTowardScore()) {
+                notes.append("\n【探针·不计入通过率】它只回答「外部服务活着吗/请求自带签名对不对」，不证明本次交付的代码正确；")
+                        .append("执行结果单独统计（probeExecuted/probePassed），既不进分母也不算失败。");
             }
             notes.append("\n（来源：内置通用模板 ").append(tpl.key()).append("）");
             c.setNotes(notes.toString());
             c.setTimeoutSec(tpl.timeoutSec() > 0 ? tpl.timeoutSec() : EvalRunner.defaultTimeoutSec(c.getKind()));
             c.setRequiresSandbox(tpl.requiresSandbox());
+            c.setCountsTowardScore(tpl.countsTowardScore());
             c.setEnabled(true);
             c.setSortOrder(++sort);
             // expect 语法预检（落地条）：模板文件被改坏 → fail-loud，绝不入库一个判不了的断言
@@ -857,6 +976,10 @@ public class EvalLoopService {
      * slnPath（build 模板的解决方案路径）：显式给了 → 优先；缺省 → 解析 repoPath 下<b>唯一</b>的 *.sln；
      * 0 个或多个 → 不放值（未落地），绝不跑一条缺 sln 必失败的命令。
      * <p>
+     * testProjectPath（端到端 dotnet test 模板的测试工程，MVP-1.7）：显式给了 → 优先；缺省 → 探测
+     * repoPath 下引用 Microsoft.NET.Test.Sdk / xunit / nunit 的<b>唯一</b> .csproj；0 个或多个 → 不放值
+     *（未落地，notes 写明原因与「补一个 xunit 测试」的下一步），绝不瞎猜。
+     * <p>
      * 未绑定实例或实例无工作目录 → repoPath 不放值：{{repoPath}} 展不开 → 该模板导入时落「未落地」，
      * <b>绝不静默退化成后端进程 cwd 去扫</b>（实测缺陷：那样静态扫描恒红且红的理由是错的）。
      * 路径统一正斜杠（与 evalScriptDir 同规，node 在 Windows 也认，且避开 cmd 引号内尾部反斜杠转义坑）。
@@ -881,6 +1004,9 @@ public class EvalLoopService {
         PathResolution sln = resolveSlnPath(vars);
         if (sln.path() != null) vars.put("slnPath", sln.path());
         else vars.remove("slnPath");       // 无 sln / 多个 sln → 未落地，不跑必失败命令（AC20′）
+        PathResolution tp = resolveTestProjectPath(vars);
+        if (tp.path() != null) vars.put("testProjectPath", tp.path());
+        else vars.remove("testProjectPath");   // 0 个或多个测试工程 → 展不开 → 未落地 + notes 写明原因与下一步（MVP-1.7）
         return vars;
     }
 
@@ -973,6 +1099,87 @@ public class EvalLoopService {
                 + String.join("、", names) + "），有歧义——请在上下文变量显式填 slnPath");
     }
 
+    /**
+     * testProjectPath 解析（MVP-1.7 端到端 = dotnet test）：显式上下文变量优先（指向不存在的文件也算失败，写明原因）；
+     * 缺省在 repoPath 下探测引用 Microsoft.NET.Test.Sdk / xunit / nunit 的 .csproj（跳过 bin/obj 等），
+     * <b>唯一命中才自动填</b>；0 个或多个 → 失败并写明原因/歧义，模板落「未落地」，
+     * 绝不瞎猜、绝不跑一条必失败或恒绿的 dotnet test 命令（探测纪律与 supplierDir/slnPath 同款）。
+     */
+    PathResolution resolveTestProjectPath(Map<String, String> vars) {
+        String explicit = vars.get("testProjectPath");
+        if (explicit != null && !explicit.isBlank()) {
+            String norm = explicit.trim().replace('\\', '/');
+            if (!Files.isRegularFile(Path.of(norm))) {
+                return PathResolution.fail("上下文变量 testProjectPath 显式指向的文件不存在: " + norm);
+            }
+            return PathResolution.of(norm);
+        }
+        String repo = vars.get("repoPath");
+        if (repo == null || repo.isBlank()) {
+            return PathResolution.fail("缺 repoPath（未绑定实例或实例无工作目录，且未在上下文变量显式填写），无法探测单元测试工程");
+        }
+        Path root = Path.of(repo);
+        if (!Files.isDirectory(root)) {
+            return PathResolution.fail("repoPath 指向的目录不存在: " + repo);
+        }
+        List<Path> hits = findTestCsprojFiles(root);
+        if (hits.size() == 1) {
+            return PathResolution.of(hits.get(0).toString().replace('\\', '/'));
+        }
+        if (hits.isEmpty()) {
+            return PathResolution.fail("repoPath（" + repo + "）下没找到任何单元测试工程"
+                    + "（探测引用 Microsoft.NET.Test.Sdk / xunit / nunit 的 .csproj，命中 0 个）"
+                    + "——请确认仓库根，或在上下文变量显式填 testProjectPath");
+        }
+        List<String> names = hits.stream().map(p -> root.relativize(p).toString().replace('\\', '/')).sorted().toList();
+        return PathResolution.fail("repoPath（" + repo + "）下找到 " + hits.size() + " 个单元测试工程，有歧义（"
+                + String.join("、", names) + "），唯一命中才自动填——请在上下文变量显式填 testProjectPath");
+    }
+
+    /** 测试工程标记（.csproj 内容小写化后做确定性文本判定，不是模型判断） */
+    private static final List<String> TEST_CSPROJ_MARKERS = List.of("microsoft.net.test.sdk", "xunit", "nunit");
+
+    /** repoPath 下递归找测试工程 .csproj（跳过 bin/obj/.git/node_modules 等，与 findSlnFiles 同口径） */
+    static List<Path> findTestCsprojFiles(Path root) {
+        List<Path> out = new java.util.ArrayList<>();
+        try {
+            Files.walkFileTree(root, new java.nio.file.SimpleFileVisitor<>() {
+                @Override
+                public java.nio.file.FileVisitResult preVisitDirectory(Path dir,
+                        java.nio.file.attribute.BasicFileAttributes attrs) {
+                    String n = dir.getFileName() == null ? "" : dir.getFileName().toString();
+                    if (!dir.equals(root) && SCAN_SKIP_DIRS.contains(n)) {
+                        return java.nio.file.FileVisitResult.SKIP_SUBTREE;
+                    }
+                    return java.nio.file.FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public java.nio.file.FileVisitResult visitFile(Path file,
+                        java.nio.file.attribute.BasicFileAttributes attrs) {
+                    if (!file.getFileName().toString().toLowerCase().endsWith(".csproj")) {
+                        return java.nio.file.FileVisitResult.CONTINUE;
+                    }
+                    try {
+                        String content = Files.readString(file, StandardCharsets.UTF_8).toLowerCase();
+                        if (TEST_CSPROJ_MARKERS.stream().anyMatch(content::contains)) out.add(file);
+                    } catch (java.io.IOException ignored) {
+                        // 读不到的 .csproj 跳过，不让整次探测失败（剩余候选仍然诚实）
+                    }
+                    return java.nio.file.FileVisitResult.CONTINUE;
+                }
+
+                @Override
+                public java.nio.file.FileVisitResult visitFileFailed(Path file, java.io.IOException exc) {
+                    return java.nio.file.FileVisitResult.CONTINUE;
+                }
+            });
+        } catch (java.io.IOException e) {
+            log.warn("[Eval] 探测单元测试工程失败 root={}: {}", root, e.getMessage());
+        }
+        return out;
+    }
+
     /** repoPath 下递归找 *.sln（跳过 bin/obj/.git/node_modules/.vs/.idea/packages/TestResults） */
     static List<Path> findSlnFiles(Path root) {
         List<Path> out = new java.util.ArrayList<>();
@@ -1022,6 +1229,7 @@ public class EvalLoopService {
         o.addProperty("notes", c.getNotes());
         o.addProperty("timeoutSec", c.getTimeoutSec());
         o.addProperty("requiresSandbox", c.isRequiresSandbox());
+        o.addProperty("countsTowardScore", c.isCountsTowardScore());
         o.addProperty("enabled", c.isEnabled());
         o.addProperty("sortOrder", c.getSortOrder());
         o.addProperty("landed", EvalRunner.isLanded(c.getTarget()));

@@ -205,8 +205,10 @@ class EvalTemplateImportTest {
             switch (key) {
                 case "config-shape", "config-urls-https" -> assertTrue(missing.isEmpty(),
                         key + " 的变量已填，不该缺");
+                case "e2e-supplier-unit-test" -> assertEquals(List.of("accountId", "testProjectPath", "supplierClassHint"),
+                        missing, "端到端模板三个变量全缺（缺省顺序 = target 里出现顺序，accountId 必填在最前）");
                 case "http-basic-connectivity" -> assertEquals(List.of("baseUrl"), missing);
-                case "http-postman-collection" -> assertEquals(List.of("collectionPath", "envPath"), missing);
+                case "has-unit-test" -> assertEquals(List.of("supplierClassHint", "supplierDir"), missing);
                 case "static-no-empty-catch" -> assertEquals(List.of("supplierDir"), missing,
                         "未绑定实例且探测不出 supplierDir → 缺供应商目录扫描根（绝不退化成后端进程 cwd/仓库根）");
                 case "static-class-registered" -> assertEquals(List.of("supplierClassHint", "supplierDir", "repoPath"), missing);
@@ -215,6 +217,135 @@ class EvalTemplateImportTest {
                 default -> { }
             }
         }
+    }
+
+    // ===== MVP-1.7 追加①：accountId 必填 + EVAL_ACCOUNT_ID 契约 + 下拉候选不回显凭据 =====
+
+    @Test
+    void e2eTemplateLandsWithAccountIdEnvVarContract() throws Exception {
+        Path csproj = tmp.resolve("Supplier.DCYiLv.Tests.csproj");
+        Files.writeString(csproj, "<Project><ItemGroup><PackageReference Include=\"xunit\" /></ItemGroup></Project>");
+        task("{\"accountId\":\"2996\",\"supplierClassHint\":\"DCYiLvBusiness\",\"testProjectPath\":\""
+                + csproj.toString().replace('\\', '/') + "\"}");
+
+        JsonObject r = service.importTemplates(1L, List.of("e2e-supplier-unit-test"));
+        assertEquals(1, r.get("landed").getAsInt());
+        ArgumentCaptor<EvalCase> captor = ArgumentCaptor.forClass(EvalCase.class);
+        verify(caseRepo).save(captor.capture());
+        EvalCase c = captor.getValue();
+        // target 构造精确等值：账号经环境变量 EVAL_ACCOUNT_ID 传入（cmd 形态，&& 前不留空格）
+        assertEquals("set EVAL_ACCOUNT_ID=2996&& dotnet test \"" + csproj.toString().replace('\\', '/')
+                + "\" --filter \"FullyQualifiedName~DCYiLvBusiness\" --nologo", c.getTarget());
+        assertEquals("test", c.getKind());
+        assertEquals("exit=0", c.getExpect());
+        assertTrue(c.isCountsTowardScore(), "端到端是计分项（探针才不计分）");
+        assertFalse(c.isRequiresSandbox(), "dotnet test 在本机跑，不依赖 EVAL_SANDBOX_CREDENTIALS");
+        assertEquals(900, c.getTimeoutSec());
+        assertTrue(c.getNotes().contains("未真实验证"),
+                "verified=false 的模板导入时必须带未验证警示: " + c.getNotes());
+    }
+
+    @Test
+    void e2eTemplateWithoutAccountIdLandsNotLandedWithPointedNotes() throws Exception {
+        Path csproj = tmp.resolve("T.csproj");
+        Files.writeString(csproj, "<Project><ItemGroup><PackageReference Include=\"nunit\" /></ItemGroup></Project>");
+        task("{\"supplierClassHint\":\"DCYiLvBusiness\",\"testProjectPath\":\""
+                + csproj.toString().replace('\\', '/') + "\"}");
+
+        JsonObject r = service.importTemplates(1L, List.of("e2e-supplier-unit-test"));
+        assertEquals(0, r.get("landed").getAsInt());
+        assertEquals(1, r.get("notLanded").getAsInt(), "accountId 必填：未填 → 未落地，不进分母");
+        ArgumentCaptor<EvalCase> captor = ArgumentCaptor.forClass(EvalCase.class);
+        verify(caseRepo).save(captor.capture());
+        EvalCase c = captor.getValue();
+        assertEquals("", c.getTarget());
+        assertTrue(c.getNotes().contains("缺 accountId：请选择用哪个供应商账号跑本次测评"),
+                "notes 必须点名缺 accountId 并说人话: " + c.getNotes());
+        assertTrue(c.getNotes().contains("EVAL_ACCOUNT_ID"), "notes 写明契约传递方式: " + c.getNotes());
+        var s = EvalLoopService.computeStats(List.of(c));
+        assertEquals(1, s.notLanded());
+        assertEquals(0, s.executed());
+    }
+
+    @Test
+    void accountOptionsEnumerateFromConfigWithoutLeakingCredentials() throws Exception {
+        // 配置副本带占位符凭据（与真实 SS.DCYiLv.Config 同构：双账号 2996/3004）
+        Path cfg = tmp.resolve("SS.Test.Config.json");
+        Files.writeString(cfg, """
+                { "SupplierID": 2226,
+                  "AccountDic": {
+                    "3004": { "SupplierAccountID": 3004, "AccountName": "onRequest",
+                              "appid": "<APPID>", "secret": "TOP-SECRET-VALUE", "customerCode": "<CC>",
+                              "paymentType": 1, "ConfirmMode": "ONREQUEST" },
+                    "2996": { "SupplierAccountID": 2996, "AccountName": "instantConfirm",
+                              "appid": "<APPID>", "secret": "TOP-SECRET-VALUE", "customerCode": "<CC>",
+                              "paymentType": 1, "ConfirmMode": "INSTANT" }
+                  } }
+                """);
+        task("{\"configJsonPath\":\"" + cfg.toString().replace('\\', '/') + "\"}");
+
+        JsonObject o = service.templatesJson(1L);
+        JsonObject acc = o.getAsJsonObject("accountOptions");
+        var accounts = acc.getAsJsonArray("accounts");
+        assertEquals(2, accounts.size());
+        assertEquals("2996", accounts.get(0).getAsJsonObject().get("id").getAsString(), "候选按账号 ID 排序");
+        assertEquals("instantConfirm", accounts.get(0).getAsJsonObject().get("accountName").getAsString());
+        assertEquals("INSTANT", accounts.get(0).getAsJsonObject().get("confirmMode").getAsString());
+        assertEquals("3004", accounts.get(1).getAsJsonObject().get("id").getAsString());
+        // 安全纪律：绝不回显任何凭据值（连字段名都不出现）
+        String accJson = acc.toString();
+        assertFalse(accJson.contains("TOP-SECRET-VALUE"), "凭据值绝不回显: " + accJson);
+        assertFalse(accJson.contains("secret") || accJson.contains("appid") || accJson.contains("customerCode"),
+                "凭据字段名也不出现: " + accJson);
+        assertFalse(accJson.contains("<APPID>"), "占位符也不透出: " + accJson);
+
+        // 读不到配置 → accounts 空 + problem 说明原因（前端退化文本框，不报错不空白）
+        task("{\"configJsonPath\":\"" + tmp.resolve("nope.json").toString().replace('\\', '/') + "\"}");
+        JsonObject miss = service.templatesJson(1L).getAsJsonObject("accountOptions");
+        assertEquals(0, miss.getAsJsonArray("accounts").size());
+        assertTrue(miss.get("problem").getAsString().contains("读不到"), miss.toString());
+
+        task("");
+        JsonObject none = service.templatesJson(1L).getAsJsonObject("accountOptions");
+        assertEquals(0, none.getAsJsonArray("accounts").size());
+        assertTrue(none.get("problem").getAsString().contains("configJsonPath"), none.toString());
+    }
+
+    // ===== MVP-1.7 规则 2：探针不计分——导入即标 countsTowardScore=false，stats 前后对比 =====
+
+    @Test
+    void probeTemplatesImportAsNonScoringAndStatsKeepThemOutOfDenominator() throws Exception {
+        task("{\"baseUrl\":\"https://gw.example.com\",\"configJsonPath\":\"D:/cfg.json\"}");
+
+        JsonObject r = service.importTemplates(1L, List.of("http-basic-connectivity", "config-shape"));
+        assertEquals(2, r.get("landed").getAsInt());
+        ArgumentCaptor<EvalCase> captor = ArgumentCaptor.forClass(EvalCase.class);
+        verify(caseRepo, times(2)).save(captor.capture());
+        EvalCase probe = captor.getAllValues().get(0);
+        EvalCase scored = captor.getAllValues().get(1);
+        assertFalse(probe.isCountsTowardScore(), "直连供应商网关的连通检查 = 探针，不计分");
+        assertTrue(probe.getTitle().startsWith("探针·"), probe.getTitle());
+        assertTrue(probe.getNotes().contains("探针·不计入通过率"), probe.getNotes());
+        assertTrue(scored.isCountsTowardScore(), "配置结构检查是计分项（缺省 true）");
+
+        // stats 前后对比：探针 PASS + 计分 FAIL —— 通过率必须是 0/1，绝不被探针虚增成 1/2
+        probe.setLastVerdict(EvalRunner.PASS);
+        scored.setLastVerdict(EvalRunner.FAIL);
+        var s = EvalLoopService.computeStats(List.of(probe, scored));
+        assertEquals(1, s.executed(), "分母只含计分项");
+        assertEquals(0, s.passed());
+        assertEquals(1, s.failed());
+        assertEquals(1, s.probeExecuted(), "探针 verdict 单独统计");
+        assertEquals(1, s.probePassed());
+        // 反向也不成立：探针 FAIL 不算失败、不拉低通过率（"供应商挂了"不冒充"代码有问题"）
+        probe.setLastVerdict(EvalRunner.FAIL);
+        scored.setLastVerdict(EvalRunner.PASS);
+        var s2 = EvalLoopService.computeStats(List.of(probe, scored));
+        assertEquals(1, s2.executed());
+        assertEquals(1, s2.passed(), "通过率 1/1，探针 FAIL 不进 failed");
+        assertEquals(0, s2.failed());
+        assertEquals(1, s2.probeExecuted(), "探针 FAIL 只进 probeExecuted");
+        assertEquals(0, s2.probePassed());
     }
 
     // ===== context_json 校验（坏格式 fail-loud 拒存） =====

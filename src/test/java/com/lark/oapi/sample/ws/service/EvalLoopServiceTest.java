@@ -97,6 +97,36 @@ class EvalLoopServiceTest {
         assertEquals(0.333, (double) s.passed() / s.executed(), 0.001);
     }
 
+    // ===== MVP-1.7：探针（countsTowardScore=false）不进分母、单独统计、探针失败不算失败 =====
+
+    @Test
+    void statsKeepProbesOutOfDenominatorInAllVerdicts() {
+        EvalCase probeTimeout = evalCase(11, true, "node probe.js", EvalRunner.TIMEOUT);
+        probeTimeout.setCountsTowardScore(false);
+        EvalCase probeSkip = evalCase(12, true, "node probe.js", EvalRunner.SKIPPED);
+        probeSkip.setCountsTowardScore(false);
+        EvalCase probeNotLanded = evalCase(13, true, "", null);
+        probeNotLanded.setCountsTowardScore(false);
+        EvalCase scored = evalCase(14, true, "dotnet test x", EvalRunner.PASS);
+        // 存量行：加列前落库的读出来是 NULL → 一律按默认值 true（计分项）处理，
+        // 绝不因加列把现网真任务（id=2）的分母悄悄缩水或把计分项变成探针
+        EvalCase legacy = evalCase(15, true, "node legacy.js", EvalRunner.FAIL);
+        legacy.setCountsTowardScore(null);
+        assertTrue(legacy.isCountsTowardScore(), "NULL（存量行）必须按 true 处理");
+
+        var s = EvalLoopService.computeStats(List.of(probeTimeout, probeSkip, probeNotLanded, scored, legacy));
+        assertEquals(2, s.executed(), "分母只含计分项的真实执行（PASS 1 + 存量 NULL 按计分的 FAIL 1）");
+        assertEquals(1, s.passed());
+        assertEquals(1, s.failed(), "存量 NULL 行的 FAIL 照常计入——通过率没有被加列改变");
+        assertEquals(0, s.timeout(), "探针超时不进计分 timeout（探针挂了不是代码挂了）");
+        assertEquals(1, s.probeExecuted(), "探针的真实执行结果单独统计");
+        assertEquals(0, s.probePassed());
+        assertEquals(1, s.skipped(), "探针 SKIPPED 仍单列进 skipped（不影响通过率）");
+        assertEquals(1, s.notLanded(), "探针未落地仍单列进 notLanded");
+        assertEquals(0.5, (double) s.passed() / s.executed(), 0.001,
+                "通过率 = 1/2 —— 探针既没虚增分子，也没把失败算进来");
+    }
+
     // ===== requiresSandbox 跳过语义：不起进程、结果落 SKIPPED =====
 
     @Test

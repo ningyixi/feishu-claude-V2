@@ -1,6 +1,6 @@
 {
-  "checkIn": "2026-12-01",
-  "checkOut": "2026-12-02",
+  "checkIn": "<RUNTIME_TODAY+7>",
+  "checkOut": "<RUNTIME_TODAY+8>",
   "rooms": 1,
   "adults": 2,
   "hotelCodes": ["PROBE1"]
