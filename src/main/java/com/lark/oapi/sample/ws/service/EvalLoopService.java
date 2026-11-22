@@ -1024,9 +1024,16 @@ public class EvalLoopService {
             "bin", "obj", ".git", "node_modules", ".vs", ".idea", "packages", "TestResults");
 
     /**
-     * supplierDir 解析（AC19′）：显式上下文变量优先（指向不存在目录也算失败，写明原因）；
-     * 缺省在 repoPath/src/Business/Supplier/ 下探测——supplierCode 非空按名字（大小写不敏感）匹配，
-     * 为空则全部子目录都是候选；<b>唯一命中才自动填</b>，0 个或多个 → 失败并写明歧义。
+     * supplierDir 解析（AC19′ + MVP-1.8 缺陷B）：显式上下文变量优先（指向不存在目录也算失败，写明原因）；
+     * 缺省在 repoPath/src/Business/Supplier/ 下探测，匹配顺序：
+     * ① supplierCode 按目录名匹配（大小写不敏感）；
+     * ② 匹配不上时用 supplierClassHint 兜底——先按类名原样，再去掉 Business/Service/Impl 等后缀
+     *    得到标识串（DCYiLvBusiness → DCYiLv）再匹配。现网实测缺口：任务的 supplierCode 是数字（2226），
+     *    而目录名是标识串（DCYiLv），只按 code 匹配必然 0 命中；
+     * ③ supplierCode 为空则全部子目录都是候选（唯一才命中）。
+     * <b>唯一命中才自动填</b>，0 个或多个 → 失败：notes 必须点名「拿什么值找过、目录里实际有什么」
+     * （候选列表截断到 {@value #PROBE_LIST_LIMIT} 个，不整份罗列刷屏）并给出下一步（显式填 supplierDir），
+     * 绝不瞎猜、绝不回退到仓库根。
      */
     PathResolution resolveSupplierDir(EvalTask t, Map<String, String> vars) {
         String explicit = vars.get("supplierDir");
@@ -1052,18 +1059,82 @@ public class EvalLoopService {
             return PathResolution.fail("枚举 " + base + " 失败: " + e.getMessage());
         }
         String code = t.getSupplierCode() == null ? "" : t.getSupplierCode().trim();
-        List<String> hits = code.isEmpty() ? names
-                : names.stream().filter(n -> n.equalsIgnoreCase(code)).toList();
+        String hint = vars.get("supplierClassHint") == null ? "" : vars.get("supplierClassHint").trim();
+        List<String> hits = code.isEmpty() ? names : matchIgnoreCase(names, code);
+        String basis = code.isEmpty() ? "" : "supplierCode=" + code;
+        StringBuilder tried = new StringBuilder(basis);   // 失败信息用：点名「拿什么值找过」（不许只说歧义）
+        // ② supplierCode 匹配不上（现网常态：数字 code 2226 vs 目录名 DCYiLv）→ supplierClassHint 兜底
+        if (hits.isEmpty() && !code.isEmpty() && !hint.isEmpty()) {
+            String derived = stripSupplierSuffixes(hint);
+            tried.append("，也试过 supplierClassHint=").append(hint);
+            if (!derived.isEmpty() && !derived.equalsIgnoreCase(hint)) {
+                tried.append("（去后缀 → ").append(derived).append("）");
+            }
+            hits = matchIgnoreCase(names, hint);
+            if (!hits.isEmpty()) {
+                basis = "supplierClassHint=" + hint;
+            } else if (!derived.isEmpty() && !derived.equalsIgnoreCase(hint)) {
+                hits = matchIgnoreCase(names, derived);
+                if (!hits.isEmpty()) {
+                    basis = "supplierClassHint=" + hint + " 去后缀 → " + derived;
+                }
+            }
+        }
         if (hits.size() == 1) {
             return PathResolution.of(base.resolve(hits.get(0)).toString().replace('\\', '/'));
         }
         if (hits.isEmpty()) {
-            return PathResolution.fail("供应商目录探测 0 个候选：" + base + " 下"
-                    + (code.isEmpty() ? "没有任何子目录" : "没有名字匹配 supplierCode=" + code + " 的目录")
-                    + "（现有: " + (names.isEmpty() ? "无" : String.join("、", names)) + "）——请在上下文变量显式填 supplierDir");
+            if (names.isEmpty()) {
+                return PathResolution.fail("供应商目录探测 0 个候选：" + base + " 下没有任何子目录"
+                        + "——下一步：在上下文变量显式填 supplierDir，或先确认 repoPath 是否指对了仓库根");
+            }
+            return PathResolution.fail("供应商目录探测 0 个候选：" + base + " 下没有名字匹配 "
+                    + (tried.length() == 0 ? "任何目录" : tried) + " 的目录（现有 " + names.size()
+                    + " 个: " + truncateList(names) + "）——下一步：在上下文变量显式填 supplierDir（例如 "
+                    + base.toString().replace('\\', '/') + "/<供应商目录名>），别指望自动探测");
         }
-        return PathResolution.fail("供应商目录探测有歧义（" + hits.size() + " 个候选: " + String.join("、", hits)
-                + "），唯一命中才自动填——请在上下文变量显式填 supplierDir");
+        return PathResolution.fail("供应商目录探测有歧义（" + hits.size() + " 个候选: " + truncateList(hits)
+                + (basis.isEmpty() ? "" : "；匹配依据 " + basis)
+                + "），唯一命中才自动填——下一步：在上下文变量显式填 supplierDir");
+    }
+
+    /** 候选列表在失败信息里的展示上限（MVP-1.8 缺陷B：真仓 200+ 个供应商目录不许整份罗列刷屏） */
+    static final int PROBE_LIST_LIMIT = 8;
+
+    /** 截断展示：前 {@value #PROBE_LIST_LIMIT} 个 + 「…（共 N 个）」 */
+    static String truncateList(List<String> names) {
+        if (names.isEmpty()) return "无";
+        if (names.size() <= PROBE_LIST_LIMIT) return String.join("、", names);
+        return String.join("、", names.subList(0, PROBE_LIST_LIMIT)) + "…（共 " + names.size() + " 个）";
+    }
+
+    /** 大小写不敏感的目录名等值匹配 */
+    static List<String> matchIgnoreCase(List<String> names, String value) {
+        return names.stream().filter(n -> n.equalsIgnoreCase(value)).toList();
+    }
+
+    /** 供应商类名常见后缀（去后缀得到目录标识串：DCYiLvBusiness → DCYiLv、DorakSupplierService → Dorak） */
+    static final List<String> SUPPLIER_CLASS_SUFFIXES =
+            List.of("business", "services", "service", "supplier", "provider", "impl");
+
+    /**
+     * 类名 → 供应商标识串：反复去掉 Business/Service/Services/Supplier/Provider/Impl 后缀
+     *（大小写不敏感；每步剥后至少保留 1 个字符，绝不剥成空串）。无后缀可剥时原样返回。
+     */
+    static String stripSupplierSuffixes(String classHint) {
+        String s = classHint == null ? "" : classHint.trim();
+        boolean changed = true;
+        while (changed && !s.isEmpty()) {
+            changed = false;
+            for (String suf : SUPPLIER_CLASS_SUFFIXES) {
+                if (s.length() > suf.length() && s.toLowerCase().endsWith(suf)) {
+                    s = s.substring(0, s.length() - suf.length());
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        return s;
     }
 
     /**

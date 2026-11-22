@@ -98,7 +98,7 @@ public class EvalLoopController {
                     setInstance, instanceId,
                     body.has("reviewSkillPath") ? opt(body, "reviewSkillPath") : null,
                     body.has("createSkillPath") ? opt(body, "createSkillPath") : null,
-                    body.has("contextJson") ? opt(body, "contextJson") : null);
+                    body.has("contextJson") ? contextJsonRaw(body.get("contextJson")) : null);
             return ResponseEntity.ok(evals.detail(id).toString());
         } catch (SecurityException e) {
             JsonObject fo = new JsonObject();
@@ -106,7 +106,27 @@ public class EvalLoopController {
             return ResponseEntity.status(403).body(fo.toString());
         } catch (IllegalArgumentException e) {
             return err(e.getMessage());
+        } catch (Exception e) {
+            // 实测缺陷（MVP-1.8 缺陷A）：contextJson 传 JSON 对象形态时 opt() 的 getAsString() 抛
+            // UnsupportedOperationException，旧代码没兜住 → 裸 500（Spring 白板错误体、无服务端日志），
+            // 上下文静默没存上，后续 GET templates 的 accountOptions 因「未填 configJsonPath」枚举不出账号。
+            // 任何未预期异常都必须留日志 + 回可读错误，绝不静默。
+            log.error("[Eval] 任务更新失败 id={}", id, e);
+            return err("更新失败: " + e.getMessage());
         }
+    }
+
+    /**
+     * contextJson 的原始请求值 → 字符串（MVP-1.8 缺陷A 修复）：
+     * 字符串形态（前端一直这么传）与 JSON 对象形态（curl/Postman 手写体的自然形态，
+     * 实测用户就是这么传的）都收——对象序列化成字符串后交给
+     * {@link EvalLoopService#validateContextJson} 做同一套校验（嵌套/数组仍 fail-loud 拒存）。
+     * JsonNull → ""（清空上下文，维持既有语义）。
+     */
+    static String contextJsonRaw(com.google.gson.JsonElement el) {
+        if (el == null || el.isJsonNull()) return "";
+        if (el.isJsonObject() || el.isJsonArray()) return el.toString();
+        return el.getAsString();
     }
 
     @DeleteMapping(value = "/api/eval-tasks/{id}", produces = "application/json;charset=UTF-8")

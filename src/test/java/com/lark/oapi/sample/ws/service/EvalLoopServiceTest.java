@@ -388,7 +388,7 @@ class EvalLoopServiceTest {
         // 第二次试跑（换了命令——实测缺陷场景：换实现后按"列表第一条"轮询会读到上一轮旧结果）
         c.setTarget("echo SECOND_RUN");
         c.setExpect("stdout~SECOND_RUN");
-        com.google.gson.JsonObject resp2 = service.trial(1L, 40L);
+        com.google.gson.JsonObject resp2 = trialWhenIdle(1L, 40L);
         long id2 = resp2.get("resultId").getAsLong();
         assertNotEquals(id1, id2, "两次试跑必须返回不同的 resultId");
 
@@ -409,6 +409,28 @@ class EvalLoopServiceTest {
     }
 
     // ===== 等待异步试跑落库（按 resultId 精确匹配，直到该行离开 RUNNING 终态为止） =====
+
+    /**
+     * 与 awaitResult 的竞态修复：awaitResult 在结果行写成终态时即返回，但执行线程释放同任务串行闸
+     * （finally lock.release()）发生在其后一瞬——紧接着的下一次 trial 可能撞上尚未释放的闸而被拒。
+     * 这是测试侧的时序问题（生产逻辑正确：串行闸本就该拒绝并发试跑），用短重试吸收释放延迟，
+     * 让「连续两次试跑」稳定复现而非偶发红。仅重试「正在执行」这一种可恢复拒绝。
+     */
+    private com.google.gson.JsonObject trialWhenIdle(Long taskId, Long caseId) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (true) {
+            try {
+                return service.trial(taskId, caseId);
+            } catch (IllegalStateException e) {
+                if (e.getMessage() != null && e.getMessage().contains("正在执行")
+                        && System.currentTimeMillis() < deadline) {
+                    Thread.sleep(50);   // 等上一轮执行线程释放串行闸
+                    continue;
+                }
+                throw e;
+            }
+        }
+    }
 
     private EvalCaseResult awaitResult(long resultId) throws InterruptedException {
         long deadline = System.currentTimeMillis() + 30_000;
