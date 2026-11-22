@@ -63,6 +63,7 @@ class AdHocServiceTest {
         SupplierWikiService wiki = mock(SupplierWikiService.class);
         SupplierWikiRevisionRepository wikiRevisions = mock(SupplierWikiRevisionRepository.class);
         ClaudeCodeService claude = mock(ClaudeCodeService.class);
+        FeishuBotService feishu = mock(FeishuBotService.class);
         AdHocService service;
 
         /** 知识库条目真值表（kb.list 的返回源，测试直接改状态模拟解析推进） */
@@ -73,16 +74,24 @@ class AdHocServiceTest {
         SupplierWikiRevision wikiRow;
         /** build 产出的新行状态（"READY"/"FAILED"） */
         String buildResult = "READY";
+        /** build 产出的 manifest（默认一页干净内容；卡点场景往里塞带【卡点】的页面正文） */
+        String buildManifest = "{\"pages\":[{\"id\":\"api-overview\",\"title\":\"接口总览\",\"summary\":\"历史接口清单与字段\",\"content\":\"取消接口必须携带供应商订单号。\"}]}";
+        /** build 产出的版本行 id（每次 build 递增，模拟"重编总是产生新版本行"） */
+        long nextRevisionId = 77L;
         final AtomicInteger builds = new AtomicInteger();
         final AtomicInteger sleeps = new AtomicInteger();
         /** 对话流水真值表 */
         final List<AdHocChat> chats = new ArrayList<>();
         String chatReply = "好的，已按 Wiki 页面 api-overview 处理。";
+        /** 卡点飞书推送结果（默认成功）；失败场景改成 new NotifyResult(false, "<原因>") */
+        FeishuBotService.NotifyResult notifyResult = FeishuBotService.NotifyResult.OK;
+        /** 实际推送出去的飞书文案（断言通知内容/次数） */
+        final List<String> notices = new ArrayList<>();
 
         AdHocTask task;
 
         Harness() {
-            service = new AdHocService(taskRepo, chatRepo, instanceRepo, kb, wiki, wikiRevisions, claude);
+            service = new AdHocService(taskRepo, chatRepo, instanceRepo, kb, wiki, wikiRevisions, claude, feishu);
             service.pollIntervalMs = 2;
             service.stepTimeoutMs = 10_000;
             service.sleeper = ms -> sleeps.incrementAndGet();
@@ -99,7 +108,7 @@ class AdHocServiceTest {
             when(taskRepo.findAll()).thenAnswer(inv -> task == null ? List.of() : List.of(task));
             when(taskRepo.findAllByOrderByIdDesc()).thenAnswer(inv -> task == null ? List.of() : List.of(task));
 
-            // 实例（工作目录/模型走与工作台同源读法）
+            // 实例（工作目录/模型走与工作台同源读法；authorized_open_id = 卡点通知收件人）
             BotInstance inst = new BotInstance();
             inst.setId(5L);
             inst.setEnabled(true);
@@ -107,6 +116,7 @@ class AdHocServiceTest {
             inst.setClaudeWorkingDir("/work");
             inst.setShellWorkingDir("/shell");
             inst.setClaudeModel("sonnet");
+            inst.setAuthorizedOpenId("ou_testuser0001");
             when(instanceRepo.findById(5L)).thenReturn(Optional.of(inst));
 
             // 知识库：add 建条目（url/pdf/html=RAW 待解析，md 入库即 DONE）；reparse 按 reparseResult 转态
@@ -137,12 +147,12 @@ class AdHocServiceTest {
                     .thenAnswer(inv -> Optional.ofNullable(wikiRow));
             when(wiki.build(any(SupplierJob.class))).thenAnswer(inv -> {
                 builds.incrementAndGet();
-                wikiRow = revision(77L);
+                wikiRow = revision(nextRevisionId++);
                 wikiRow.setKbCode("adhoc-1");
                 wikiRow.setStatus(buildResult);
                 wikiRow.setSourceCount(1);
                 wikiRow.setDirectory("D:/kb/.wiki/xyz/revisions/77");
-                wikiRow.setManifestJson("{\"pages\":[{\"id\":\"api-overview\",\"title\":\"接口总览\",\"summary\":\"历史接口清单与字段\"}]}");
+                wikiRow.setManifestJson(buildManifest);
                 if ("FAILED".equals(buildResult)) wikiRow.setError("模型输出不是 JSON");
                 return wikiRow;
             });
@@ -160,6 +170,13 @@ class AdHocServiceTest {
 
             when(claude.chat(anyLong(), anyString(), anyString(), anyString(), nullable(String.class), any(TurnListener.class)))
                     .thenAnswer(inv -> chatReply);
+
+            // 卡点飞书推送：记下文案，按 notifyResult 返回成功/失败
+            when(feishu.notifyUserChecked(nullable(Long.class), nullable(String.class), nullable(String.class)))
+                    .thenAnswer(inv -> {
+                        notices.add(inv.getArgument(2));
+                        return notifyResult;
+                    });
         }
 
         /** 预置一个已存在的任务（不触发流水线） */
@@ -741,5 +758,257 @@ class AdHocServiceTest {
         assertEquals("FAILED", steps.get(1).getAsJsonObject().get("status").getAsString());
         assertEquals("FAILED", o.getAsJsonObject("wiki").get("status").getAsString());
         assertEquals("接口文档", o.getAsJsonArray("kbEntries").get(0).getAsJsonObject().get("title").getAsString());
+    }
+
+    // ===== i) 卡点待确认（11-17-adhoc-blocker-notify）：判定 / 状态迁移 / 通知落库 / 纪律文案 =====
+
+    /** 决策 1：复用全项目唯一卡点协议 SupplierJobService.STANDBLOCK，本类不得另拷一份正则 */
+    @Test
+    void standblockDetectionReusesProjectWideProtocol() {
+        assertTrue(AdHocService.isStandblock("【卡点】多酒店查价上限是多少？"), "行首标记命中");
+        assertTrue(AdHocService.isStandblock("先说结论。\n  【卡点】需要用户给上限\n后续说明"), "行首允许空白");
+        assertFalse(AdHocService.isStandblock("转述纪律：以【卡点】开头写清问题"), "行中提及不算命中");
+        assertFalse(AdHocService.isStandblock("已完成，无需确认"), "普通回复不误报");
+        assertFalse(AdHocService.isStandblock(null), "null 安全");
+
+        assertEquals("【卡点】多酒店上限是多少？\nA. 10\nB. 20",
+                AdHocService.extractStandblockQuestion("分析如下\n【卡点】多酒店上限是多少？\nA. 10\nB. 20"),
+                "问题原文 = 标记行起到文本末尾（保留原文）");
+        assertNull(AdHocService.extractStandblockQuestion("没有卡点"), "未命中返回 null");
+
+        String cut = AdHocService.extractStandblockQuestion("【卡点】" + "问".repeat(AdHocService.MAX_QUESTION_CHARS + 200));
+        assertTrue(cut.length() <= AdHocService.MAX_QUESTION_CHARS + 1, "超长截断到上限: " + cut.length());
+        assertTrue(cut.endsWith("…"), "截断有省略号");
+
+        // 语义与 STANDBLOCK 完全一致（同一协议），且本类没有自带 Pattern 字段
+        for (String s : List.of("【卡点】a", "x\n【卡点】b", " 【卡点】c", "无标记", "中间【卡点】不算")) {
+            assertEquals(SupplierJobService.STANDBLOCK.matcher(s).find(), AdHocService.isStandblock(s), "判定与协议正则一致: " + s);
+        }
+        assertTrue(java.util.Arrays.stream(AdHocService.class.getDeclaredFields())
+                        .noneMatch(f -> java.util.regex.Pattern.class.isAssignableFrom(f.getType())),
+                "卡点正则必须引用 SupplierJobService.STANDBLOCK，不得在 AdHocService 里另拷一份");
+    }
+
+    /** 决策 2 + AC6：提问纪律文案（先问再改的清单与顺序）+ 剥离式双向禁词断言 */
+    @Test
+    void askDisciplinePinsAskBeforeEditAndCarriesNoBannedWording() {
+        String rule = AdHocService.ASK_DISCIPLINE;
+        assertTrue(rule.contains("【卡点】"), "复用全项目卡点标记，不发明新词");
+        assertTrue(rule.contains("配置文件") && rule.contains("配置项"), "清单①改配置文件/新增配置项");
+        assertTrue(rule.contains("多酒店查价的酒店数量上限"), "清单②业务参数取值无法确定（PRD 指定的例子）");
+        assertTrue(rule.contains("线上行为") && rule.contains("线上数据"), "清单③影响线上行为或数据");
+        assertTrue(rule.contains("两种以上合理解释"), "清单④同一需求多种合理解释");
+        assertTrue(rule.contains("Wiki 覆盖范围"), "清单⑤要动的文件不在 Wiki 覆盖范围");
+        assertTrue(rule.contains("输出【卡点】之前不得调用任何写文件"), "顺序写死：先问再改");
+        assertTrue(rule.contains("不改任何代码、不写任何文件"), "命中即本轮停手");
+        assertTrue(rule.contains("不必问的：纯实现细节"), "纯实现细节不问");
+        assertTrue(rule.contains("用户") && rule.contains("不要另起会话"), "答复走同一会话续跑");
+
+        // 剥离式双向断言：纪律文案自身不含措辞纪律句（剥离后等于自身），且不得引入任何被禁说辞
+        assertEquals(rule, SupplierJobService.stripWordingRule(rule), "提问纪律独立于 WORDING_RULE");
+        for (String banned : List.of("玩家", "开一局", "通关", "存档", "🎮")) {
+            assertFalse(rule.contains(banned), "提问纪律不得引入被禁说辞: " + banned);
+        }
+
+        String prompt = AdHocService.buildChatPrompt("头部", "给多酒店查价加上数量上限");
+        assertTrue(prompt.contains(rule), "纪律注入每一轮对话");
+        assertTrue(prompt.endsWith(SupplierJobService.WORDING_RULE), "措辞纪律仍收尾（既有注入面契约不破）");
+        assertTrue(prompt.indexOf(rule) < prompt.indexOf("措辞纪律"), "提问纪律排在措辞纪律之前");
+        assertFalse(SupplierJobService.stripWordingRule(prompt).contains("玩家"), "剥离纪律句后无裸用禁词");
+    }
+
+    /** AC1 + AC2 + 决策 3/4：命中卡点 → 对话行 BLOCKED、任务行记问题原文、飞书推送并记录结果 */
+    @Test
+    void chatTurnHittingStandblockBlocksRowRecordsQuestionAndPushesFeishu() {
+        var h = new Harness();
+        h.givenTask("READY", "");
+        h.chatReply = "我先看了下代码。\n【卡点】多酒店查价的数量上限定多少？\nA. 10 家\nB. 20 家";
+
+        h.service.ask(1L, "给多酒店查价加上数量上限");
+
+        AdHocChat agent = h.chats.get(1);
+        assertEquals(AdHocService.CHAT_BLOCKED, agent.getStatus(), "命中卡点 → agent 行 BLOCKED（不是 DONE）");
+        assertTrue(agent.getText().contains("【卡点】多酒店查价的数量上限定多少？"), "问题原文保留在对话行");
+
+        String expectedQuestion = "【卡点】多酒店查价的数量上限定多少？\nA. 10 家\nB. 20 家";
+        assertEquals(expectedQuestion, h.task.getPendingQuestion(), "任务行记问题原文（待确认卡数据源）");
+        assertNotNull(h.task.getNotifiedAt(), "推送成功记时间");
+        assertEquals("", h.task.getNotifyError(), "成功时无失败原因");
+
+        assertEquals(1, h.notices.size(), "命中即推一条飞书私聊");
+        assertEquals("【临时需求·待确认】改历史接口字段\n" + expectedQuestion + "\n\n直接在本对话回复即可，我会继续。",
+                h.notices.get(0), "通知文案逐字对齐 PRD 决策 4");
+        verify(h.feishu).notifyUserChecked(eq(5L), eq("ou_testuser0001"), anyString());
+
+        // 前端数据源：详情卡 + 列表标记
+        var detail = h.service.detail(1L);
+        assertEquals(expectedQuestion, detail.get("pendingQuestion").getAsString());
+        assertEquals("", detail.get("notifyError").getAsString());
+        assertTrue(detail.has("notifiedAt"), "详情带推送时间");
+        assertTrue(h.service.listJson().get(0).getAsJsonObject().get("blocked").getAsBoolean(), "列表行标 blocked");
+    }
+
+    /** 普通回复不误报：不置 BLOCKED、不记待确认、不推飞书 */
+    @Test
+    void ordinaryReplyDoesNotTriggerStandblockPath() {
+        var h = new Harness();
+        h.givenTask("READY", "");
+
+        h.service.ask(1L, "在吗");
+
+        assertEquals("DONE", h.chats.get(1).getStatus());
+        assertEquals("", h.task.getPendingQuestion());
+        assertNull(h.task.getNotifiedAt());
+        assertEquals(List.of(), h.notices, "没卡点就不推送");
+        assertFalse(h.service.listJson().get(0).getAsJsonObject().get("blocked").getAsBoolean());
+    }
+
+    /** AC2：推送失败必须可见 —— 原因落库并进详情 JSON，且待确认卡（权威事实源）照常显示 */
+    @Test
+    void standblockNotifyFailureIsPersistedNotSwallowed() {
+        var h = new Harness();
+        h.givenTask("READY", "");
+        h.chatReply = "【卡点】历史接口的兼容期定多久？";
+        h.notifyResult = new FeishuBotService.NotifyResult(false, "飞书实例未连接（长连接未建立或已断开）");
+
+        h.service.ask(1L, "把兼容期加上");
+
+        assertEquals(AdHocService.CHAT_BLOCKED, h.chats.get(1).getStatus());
+        assertEquals("【卡点】历史接口的兼容期定多久？", h.task.getPendingQuestion(), "推送失败也要留下待确认问题");
+        assertNull(h.task.getNotifiedAt(), "未成功推送不记时间");
+        assertEquals("飞书实例未连接（长连接未建立或已断开）", h.task.getNotifyError(), "失败原因落库");
+        assertEquals("飞书实例未连接（长连接未建立或已断开）",
+                h.service.detail(1L).get("notifyError").getAsString(), "详情 JSON 暴露原因，前端明示不静默");
+    }
+
+    /** AC3：用户回一句即视为答复 → 清空待确认，仍在同一实例主会话续跑（不新建 lane / 不 steer / 不打断） */
+    @Test
+    void answeringClearsPendingQuestionAndContinuesOnSameMainSession() {
+        var h = new Harness();
+        h.givenTask("READY", "");
+        h.task.setPendingQuestion("【卡点】多酒店查价的数量上限定多少？");
+        h.task.setNotifyError("飞书实例未连接");
+        h.task.setNotifiedAt(java.time.LocalDateTime.now().minusMinutes(5));
+
+        h.service.ask(1L, "上限按 20 家");
+
+        assertEquals("", h.task.getPendingQuestion(), "答复即清空待确认（卡片收起）");
+        assertEquals("", h.task.getNotifyError(), "上一轮通知失败原因一并清掉");
+        assertEquals(List.of(), h.notices, "答复轮本身不是卡点，不推送");
+        assertEquals("DONE", h.chats.get(1).getStatus(), "答复轮正常收尾");
+
+        // 续跑靠"下一句自然进同一主会话"：同实例 + 同 openId（= 同 TerminalSession/同 sessionID，同队列）
+        verify(h.claude).chat(eq(5L), eq("ad-hoc-task-1"), anyString(), eq("/work"), eq("sonnet"), any(TurnListener.class));
+        verify(h.claude, never()).chatInLane(anyString(), anyLong(), anyString(), anyString(), nullable(String.class), any(TurnListener.class));
+        verify(h.claude, never()).steer(anyLong(), anyString());
+        verify(h.claude, never()).newSession(anyLong(), anyString(), nullable(String.class));
+        verify(h.claude, never()).destroySession(anyLong());
+    }
+
+    /** 已知局限的缓解：提示词拦不住"先改再问"，就把本轮写类工具动作明写在回复里 */
+    @Test
+    void blockedTurnSurfacesWriteToolTraceToUser() {
+        assertEquals("", AdHocService.writeActionBanner(List.of("Read", "Grep", "Glob")), "只读工具不告警");
+        assertEquals("", AdHocService.writeActionBanner(List.of()), "空清单不告警");
+        assertEquals("", AdHocService.writeActionBanner(null), "null 安全");
+        String banner = AdHocService.writeActionBanner(List.of("Read", "Edit", "Bash", "Edit"));
+        assertTrue(banner.contains("Edit、Bash"), "写类工具按发生顺序去重列出: " + banner);
+        assertTrue(banner.contains("提问纪律要求先问再改"), "文案点明纪律");
+
+        var h = new Harness();
+        h.givenTask("READY", "");
+        h.chatReply = "【卡点】上限按多少？";
+        when(h.claude.chat(anyLong(), anyString(), anyString(), anyString(), nullable(String.class), any(TurnListener.class)))
+                .thenAnswer(inv -> {
+                    TurnListener l = inv.getArgument(5);
+                    l.onTurnStart();
+                    l.onToolStart(new ToolStep("t1", "Read", "HotelPriceService.java", false));
+                    l.onToolStart(new ToolStep("t2", "Edit", "application.yml", false));
+                    l.onToolStart(new ToolStep("t3", "Bash", "git diff", false));
+                    return h.chatReply;
+                });
+
+        h.service.ask(1L, "给多酒店查价加上数量上限");
+
+        assertEquals(AdHocService.CHAT_BLOCKED, h.chats.get(1).getStatus());
+        assertTrue(h.chats.get(1).getText().contains("本轮在提问之前已出现可写工具动作：Edit、Bash"),
+                "本轮工具动作流水对可见: " + h.chats.get(1).getText());
+        assertFalse(h.chats.get(1).getText().contains("Read"), "只读工具不进告警");
+    }
+
+    /** 决策 5 的判定面：manifest 必须解码后再扫（转义 \n 让多行正则在原始 JSON 串上永远匹配不到） */
+    @Test
+    void wikiStandblockQuestionScansDecodedManifestPhaseAndError() {
+        SupplierWikiRevision page = revision(9L);
+        page.setStatus("READY");
+        page.setManifestJson("{\"pages\":[{\"id\":\"p\",\"title\":\"t\",\"summary\":\"s\","
+                + "\"content\":\"取消必须带订单号。\\n【卡点】多酒店查价上限未在任何材料中给出，请用户确认。\"}]}");
+        assertEquals("【卡点】多酒店查价上限未在任何材料中给出，请用户确认。", AdHocService.wikiStandblockQuestion(page));
+        assertFalse(SupplierJobService.STANDBLOCK.matcher(page.getManifestJson()).find(),
+                "直接扫原始 JSON 串会漏（\\n 是字面量）——证明必须解码");
+
+        SupplierWikiRevision warn = revision(10L);
+        warn.setManifestJson("{\"pages\":[],\"warnings\":[\"【卡点】来源文档打不开，需要用户提供访问方式\"]}");
+        assertEquals("【卡点】来源文档打不开，需要用户提供访问方式", AdHocService.wikiStandblockQuestion(warn), "warnings 同样扫");
+
+        SupplierWikiRevision clean = revision(11L);
+        clean.setManifestJson("{\"pages\":[{\"id\":\"p\",\"title\":\"t\",\"summary\":\"s\",\"content\":\"干净正文\"}],\"warnings\":[]}");
+        assertNull(AdHocService.wikiStandblockQuestion(clean), "干净产物不误报");
+        assertNull(AdHocService.wikiStandblockQuestion(null), "null 安全");
+
+        SupplierWikiRevision broken = revision(12L);
+        broken.setManifestJson("不是 JSON");
+        assertNull(AdHocService.wikiStandblockQuestion(broken), "manifest 异常不抛，按未检出");
+
+        SupplierWikiRevision failedPhase = revision(13L);
+        failedPhase.setPhase("【卡点】编译取不到原文");
+        assertEquals("【卡点】编译取不到原文", AdHocService.wikiStandblockQuestion(failedPhase), "phase 直扫");
+    }
+
+    /** AC4：Wiki 编译产物含【卡点】→ 任务不得变 READY，阶段卡显示问题原文，同样推飞书 */
+    @Test
+    void wikiRevisionCarryingStandblockIsNotAcceptedAsReady() {
+        var h = new Harness();
+        h.buildManifest = "{\"pages\":[{\"id\":\"api-overview\",\"title\":\"接口总览\",\"summary\":\"历史接口清单\","
+                + "\"content\":\"取消必须带订单号。\\n【卡点】多酒店查价上限未在材料中给出，请用户确认上限值。\"}]}";
+        h.givenTask("WIKI", "上次编译中断");
+
+        h.service.retryStage(1L);
+
+        assertNotEquals("READY", h.task.getStatus(), "残缺 Wiki 不得当成功产物");
+        assertEquals("WIKI", h.task.getStatus(), "停在 WIKI 段");
+        assertEquals("FAILED", AdHocService.stepStatus(h.task.getStatus(), h.task.getError(), "WIKI"), "阶段卡显示失败");
+        assertTrue(h.task.getError().contains("【卡点】多酒店查价上限未在材料中给出"), "阶段卡带问题原文: " + h.task.getError());
+        assertTrue(h.task.getError().contains("重试本段"), "给出续跑指引");
+        assertTrue(h.task.getPendingQuestion().contains("多酒店查价上限"), "待确认卡同样显示");
+        assertEquals(77L, h.task.getBlockedRevision(), "记下被拒版本，重试据此重编而不是原地再拒");
+        assertEquals(1, h.notices.size(), "Wiki 段卡点同样主动推飞书");
+        assertTrue(h.notices.get(0).startsWith("【临时需求·待确认】改历史接口字段"), h.notices.get(0));
+    }
+
+    /** AC4 续跑：答复后「重试本段」重新编译（新版本行），干净产物即 READY */
+    @Test
+    void wikiBlockedRetryRecompilesInsteadOfRejectingSameRevision() {
+        var h = new Harness();
+        h.buildManifest = "{\"pages\":[{\"id\":\"p\",\"title\":\"t\",\"summary\":\"s\",\"content\":\"正文\\n【卡点】上限未给出，请用户确认。\"}]}";
+        h.givenTask("WIKI", "上次编译中断");
+        h.service.retryStage(1L);
+        assertEquals(77L, h.task.getBlockedRevision());
+        int buildsAfterBlock = h.builds.get();
+
+        // 用户在对话框答复（清 pendingQuestion），随后点「重试本段」
+        h.chatReply = "收到，上限按 20 家，已写进 Wiki 材料。";
+        h.service.ask(1L, "上限按 20 家");
+        assertEquals("", h.task.getPendingQuestion());
+        h.buildManifest = "{\"pages\":[{\"id\":\"p\",\"title\":\"t\",\"summary\":\"s\",\"content\":\"多酒店查价上限 20 家。\"}]}";
+
+        h.service.retryStage(1L);
+
+        assertEquals("READY", h.task.getStatus(), "重编出干净产物 → 任务 READY 进对话待命");
+        assertEquals("READY", h.task.getWikiStatus());
+        assertNull(h.task.getBlockedRevision(), "拒绝锚点已消费");
+        assertEquals(buildsAfterBlock + 1, h.builds.get(), "重试触发了一次重新编译");
+        assertEquals(78L, h.wikiRow.getId(), "编译产生新版本行（不是复用被拒的那版）");
+        assertEquals("", h.task.getPendingQuestion());
     }
 }

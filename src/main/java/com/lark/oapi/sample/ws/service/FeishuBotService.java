@@ -828,14 +828,39 @@ public class FeishuBotService {
     /**
      * 主动向指定实例的某个用户推送文本（E2E 流水线终报等系统通知用）。
      * 连接不存在或 openId 为空时静默跳过。
+     * <p>
+     * 语义保持不变（尽力而为、不抛异常、不阻塞调用方）——需要把"为什么没发出去"落库展示的调用方
+     * （如临时需求卡点通知，11-17-adhoc-blocker-notify 决策 4）请改用 {@link #notifyUserChecked}。
      */
     public void notifyUser(Long instanceId, String openId, String content) {
-        if (openId == null || openId.isBlank()) return;
+        NotifyResult result = notifyUserChecked(instanceId, openId, content);
+        if (!result.ok()) log.warn("[Feishu] notifyUser 跳过: 实例 {} — {}", instanceId, result.reason());
+    }
+
+    /**
+     * 推送结果：ok=false 时 {@code reason} 是可直接落库/上屏的人话原因。
+     * 存在的理由：{@link #notifyUser} 对"实例未连接 / 未绑定 openId / 服务端拒收"一律静默 return，
+     * 只留一行 WARN 日志；而卡点通知要求"绝不允许推送失败后用户毫不知情"，故把同一套判定结果返回给调用方。
+     */
+    public record NotifyResult(boolean ok, String reason) {
+        public static final NotifyResult OK = new NotifyResult(true, "");
+    }
+
+    /**
+     * {@link #notifyUser} 的"失败可见"版：投递路径、尽力而为、不抛异常、不阻塞——全部与 notifyUser 一致，
+     * 唯一区别是把失败原因返回给调用方（调用方自行决定落库与展示）。
+     */
+    public NotifyResult notifyUserChecked(Long instanceId, String openId, String content) {
+        if (instanceId == null) return new NotifyResult(false, "未绑定飞书实例");
+        if (openId == null || openId.isBlank()) {
+            return new NotifyResult(false, "该实例尚未绑定飞书私聊用户（先在飞书里私聊它一句完成绑定）");
+        }
         if (!connections.containsKey(instanceId)) {
             log.warn("[Feishu] notifyUser 跳过: 实例 {} 未连接", instanceId);
-            return;
+            return new NotifyResult(false, "飞书实例未连接（长连接未建立或已断开）");
         }
-        replyText(instanceId, openId, "p2p", "", content);
+        String failure = replyText(instanceId, openId, "p2p", "", content);
+        return failure == null ? NotifyResult.OK : new NotifyResult(false, failure);
     }
 
     /** Unlike best-effort chat replies, workflow delivery must report provider failure to its outbox. */
@@ -854,11 +879,18 @@ public class FeishuBotService {
         if (!response.success()) throw new IllegalStateException("飞书发送失败 code=" + response.getCode() + ": " + response.getMsg());
     }
 
-    private void replyText(Long instanceId, String openId, String chatType, String chatId, String content) {
+    /**
+     * 发送文本（自动转卡片、超长自动拆分）。
+     *
+     * @return null = 全部拆分消息投递成功；非 null = 失败原因（人话，可直接落库/上屏）。
+     *         既有调用方（飞书对话回复等）沿用"尽力而为"语义、忽略返回值即可，行为一字未变；
+     *         只有需要把失败暴露给用户的 {@link #notifyUserChecked} 会读它。
+     */
+    private String replyText(Long instanceId, String openId, String chatType, String chatId, String content) {
         InstanceConnection conn = connections.get(instanceId);
         if (conn == null || conn.httpClient == null) {
             log.warn("[Feishu] replyText 跳过: instanceId={}, conn={}", instanceId, conn != null ? "有" : "null");
-            return;
+            return "飞书实例未连接（长连接未建立或已断开）";
         }
 
         // 保存机器人回复到对话历史
@@ -878,6 +910,7 @@ public class FeishuBotService {
         log.info("[Feishu] 发送 {} 条卡片消息{}", cardJsons.size(),
                 options != null ? " (" + options.size() + " 个按钮)" : "");
 
+        String failure = null;
         for (String cardJson : cardJsons) {
             CreateMessageReq req = CreateMessageReq.newBuilder()
                     .receiveIdType(receiveIdType)
@@ -892,11 +925,14 @@ public class FeishuBotService {
                 var resp = conn.httpClient.im().message().create(req);
                 if (!resp.success()) {
                     log.error("[Feishu] 回复失败: code={}, msg={}", resp.getCode(), resp.getMsg());
+                    if (failure == null) failure = "飞书发送失败 code=" + resp.getCode() + ": " + resp.getMsg();
                 }
             } catch (Exception e) {
                 log.error("[Feishu] 发送消息异常", e);
+                if (failure == null) failure = "飞书发送异常: " + (e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage());
             }
         }
+        return failure;
     }
 
     private void saveChatMessage(Long instanceId, String openId, String role, String content, String chatType) {

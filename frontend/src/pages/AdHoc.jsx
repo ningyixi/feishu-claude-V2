@@ -1,6 +1,6 @@
 import Toast from '../components/ui/Toast'
 import { useConfirm, DraftPage } from '../components/ui/FloatingUI'
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, memo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useSearchParams } from 'react-router-dom'
@@ -125,6 +125,7 @@ function TaskListPane({ selectedId, onSelect, onCreate, showToast }) {
               <button className="btn" style={{ fontSize: 11, padding: '1px 8px', color: 'var(--error)', flexShrink: 0 }} onClick={e => remove(t, e)}>删除</button>
             </div>
             <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 3 }}>
+              {t.blocked && <span style={{ color: '#b45309', fontWeight: 700, marginRight: 6 }}>⏸ 待你确认</span>}
               {failed ? <span style={{ color: 'var(--error)' }}>失败，可重试本段</span> : (TASK_STATUS_LABEL[t.status] || t.status)}
               {!ready && !failed && t.running && <span className="spinner" style={{ width: 8, height: 8, marginLeft: 6 }} />}
               <span style={{ marginLeft: 6 }}>{String(t.updatedAt || '').replace('T', ' ').substring(5, 16)}</span>
@@ -213,30 +214,42 @@ function TaskDetail({ taskId, onDeleted, showToast }) {
   const confirmAction = useConfirm()
   const [detail, setDetail] = useState(null)
   const [notFound, setNotFound] = useState(false)
+  const [chatNonce, setChatNonce] = useState(0)   // 待确认卡答复后让 ChatPanel 立刻重拉，不等轮询
   const pollRef = useRef(null)
 
-  const load = () => fetch(`/api/ad-hoc-tasks/${taskId}`)
-    .then(async r => ({ ok: r.ok, data: await r.json().catch(() => ({})) }))
-    .then(({ ok, data }) => { if (ok) setDetail(data); else setNotFound(true) })
-    .catch(() => {})
+  // 轮询只在数据真变化时 setDetail：详情卡/待确认卡的 DOM 因此保持稳定，
+  // 用户拖选问题原文时选区不会被一次轮询冲掉（2026-11-17 用户诉求：对话文字要能拖拽复制）。
+  const applyDetail = data => setDetail(prev => (prev && JSON.stringify(prev) === JSON.stringify(data) ? prev : data))
 
+  const ready = !!detail && detail.status === 'READY'
   useEffect(() => {
     // 任务已删除/不存在：停表，不再对着 404 无限轮询（父级按 taskId remount，切换任务会重新起表）
     if (notFound) return
-    setDetail(null)
+    let stopped = false
+    const load = () => fetch(`/api/ad-hoc-tasks/${taskId}`)
+      .then(async r => ({ ok: r.ok, data: await r.json().catch(() => ({})) }))
+      .then(({ ok, data }) => {
+        if (stopped) return          // 卸载/换任务后不再写 state：删任务后继续轮询的泄漏防线
+        if (ok) applyDetail(data); else setNotFound(true)
+      })
+      .catch(() => {})
     load()
     // 推进中 3s 轮询进度；就绪后放缓（对话进度由 ChatPanel 自己轮询）
-    pollRef.current = setInterval(load, detail && detail.status === 'READY' ? 10000 : 3000)
-    return () => clearInterval(pollRef.current)
+    pollRef.current = setInterval(load, ready ? 10000 : 3000)
+    return () => { stopped = true; clearInterval(pollRef.current) }
+    // 依赖只放 ready 这个布尔（决定轮询档位）。**不要把 detail 对象放进依赖、也不要在 effect 里 setDetail(null)**：
+    // 旧写法两者都做了 → 每次取回详情就翻转依赖 → effect 重跑 → 再取详情，形成每秒上千次请求的自触发循环，
+    // 页面长期停在「加载中…」、对话面板反复卸载重挂，用户拖到一半选区就被冲掉
+    // （2026-11-17 Playwright 实测：8 秒内 /api/ad-hoc-tasks/{id} 被请求 10992 次，.md-body 采样 16/16 次为 0）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskId, notFound, detail && detail.status === 'READY'])
+  }, [taskId, notFound, ready])
 
   async function retryStage() {
     const res = await fetch(`/api/ad-hoc-tasks/${taskId}/retry-stage`, { method: 'POST' })
     const d = await res.json().catch(() => ({}))
     if (!res.ok) return showToast(d.error || '重试失败', 'error')
     showToast('已从本段续跑', 'success')
-    setDetail(d)
+    applyDetail(d)
   }
   async function remove() {
     if (!await confirmAction({ kind: 'popconfirm', title: '删除临时需求任务？', body: `删除任务「${detail.name}」？任务记录、对话流水与专属知识库条目将清除，删除后无法恢复。`, confirmLabel: '删除任务' })) return
@@ -246,10 +259,21 @@ function TaskDetail({ taskId, onDeleted, showToast }) {
     onDeleted()
   }
 
+  /** 待确认卡里直接答复：与对话框同一接口（后端 ask 会清 pendingQuestion，并在同一主会话续跑） */
+  async function answerPending(question) {
+    const res = await fetch(`/api/ad-hoc-tasks/${taskId}/chat`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question }),
+    })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) return showToast(d.error || '发送失败', 'error')
+    showToast('已答复，agent 在同一会话继续', 'success')
+    setChatNonce(n => n + 1)                                              // 对话流水立刻刷新
+    setDetail(prev => (prev ? { ...prev, pendingQuestion: '', notifyError: '' } : prev))   // 卡片立刻收起
+  }
+
   if (notFound) return <div className="card">任务不存在或已删除</div>
   if (!detail) return <div className="card">加载中…</div>
 
-  const ready = detail.status === 'READY'
   const failedStep = detail.error ? (detail.steps || []).find(s => s.status === 'FAILED') : null
   const wiki = detail.wiki || {}
 
@@ -267,6 +291,9 @@ function TaskDetail({ taskId, onDeleted, showToast }) {
           <button className="btn" style={{ fontSize: 11, padding: '2px 10px', color: 'var(--error)' }} onClick={remove}>删除任务</button>
         </div>
       </div>
+
+      {/* 常驻「待你确认」卡：agent 命中卡点时置顶显示问题原文，答复框就在下面（不是消息流里的一行） */}
+      <PendingQuestionCard detail={detail} onAnswer={answerPending} />
 
       {/* 两段步骤条 */}
       <div className="card" style={{ marginTop: 14, padding: '16px 20px' }}>
@@ -323,7 +350,7 @@ function TaskDetail({ taskId, onDeleted, showToast }) {
       </div>
 
       {/* 对话框：任何阶段都可说话——Wiki 未就绪时本轮不带 Wiki 入口，只带一行阶段说明 */}
-      <ChatPanel taskId={taskId} showToast={showToast} wikiReady={ready} taskStatus={detail.status} />
+      <ChatPanel taskId={taskId} showToast={showToast} wikiReady={ready} taskStatus={detail.status} chatNonce={chatNonce} />
 
       {/* 知识库条目（只读） */}
       <KbPanel kbCode={detail.kbCode} showToast={showToast} readOnly />
@@ -375,21 +402,148 @@ function RunningPanel({ detail }) {
   )
 }
 
+// ===== 常驻「待你确认」卡（PRD 11-17-adhoc-blocker-notify 决策 3/4） =====
+
+/**
+ * agent 命中卡点（对话轮回复里出现【卡点】，或 Wiki 编译产物里检出【卡点】）时，后端把问题原文
+ * 落到 ad_hoc_task.pending_question，本卡据此常驻页面顶部：琥珀色、问题原文、答复框就在下面。
+ * 页面这张卡是**权威事实源**，飞书私聊只是提醒——所以通知失败也要在这里明说（notifyError）。
+ * 用户在下面回一句（或在对话框回一句）即视为答复：后端清空 pending_question，卡片收起，同一主会话续跑。
+ * 问题原文必须可拖选复制（用户最常干的事就是把它拷走），故 detail 轮询只在数据真变化时才 setState。
+ */
+function PendingQuestionCard({ detail, onAnswer }) {
+  const [answer, setAnswer] = useState('')
+  const [sending, setSending] = useState(false)
+  const question = (detail?.pendingQuestion || '').trim()
+  if (!question) return null
+
+  async function submit() {
+    const text = answer.trim()
+    if (!text || sending) return
+    setSending(true)
+    try { await onAnswer(text); setAnswer('') } finally { setSending(false) }
+  }
+
+  return (
+    <div className="card" data-pending-question
+      style={{ marginTop: 14, padding: '14px 20px', border: '1px solid rgba(245,158,11,.45)', background: 'rgba(245,158,11,.08)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 14, fontWeight: 700, color: '#b45309' }}>⏸ 待你确认</span>
+        <span style={{ fontSize: 11.5, color: '#b45309' }}>
+          agent 已停下本轮等你拍板（提问纪律要求：输出问题之前不改代码、不写文件）
+        </span>
+        <div style={{ flex: 1 }} />
+        {detail.notifyError
+          ? <span className="hook-badge" style={{ color: '#dc2626', background: 'rgba(220,38,38,.1)', borderColor: 'rgba(220,38,38,.35)' }}
+              data-tooltip="飞书私聊没发出去，但本卡就是权威事实源，在这里答复即可" tabIndex={0}>
+              飞书通知失败：{detail.notifyError}
+            </span>
+          : <span className="hook-badge" style={{ color: '#16a34a', background: 'rgba(22,163,74,.1)', borderColor: 'rgba(22,163,74,.3)' }}>
+              飞书已通知{detail.notifiedAt ? ` · ${String(detail.notifiedAt).replace('T', ' ').substring(5, 16)}` : ''}
+            </span>}
+      </div>
+      <div data-pending-question-text style={{ marginTop: 10, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,.55)', border: '1px solid rgba(245,158,11,.25)', fontSize: 12.5, lineHeight: 1.75, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', userSelect: 'text', cursor: 'text' }}>
+        {question}
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+        <input className="form-input" style={{ flex: 1 }} data-pending-answer
+          placeholder="直接在这里答复（例：上限按 20 家）——回车发送，agent 在同一会话继续"
+          value={answer} onChange={e => setAnswer(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter') submit() }} />
+        <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={!answer.trim() || sending} onClick={submit}>
+          {sending ? '发送中…' : '答复并继续'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 // ===== 对话框（与绑定实例主会话随问随答：实例空闲立即回答；真有一轮在跑才排队，忙完即答） =====
 
-function ChatPanel({ taskId, showToast, wikiReady = true, taskStatus = '' }) {
+/** 单条对话行是否等价（用于轮询合并：等价则复用旧对象引用，React 直接跳过重渲染） */
+const sameMsg = (a, b) => !!a && !!b && a.id === b.id && a.role === b.role && a.status === b.status
+  && a.text === b.text && String(a.createdAt) === String(b.createdAt)
+
+/**
+ * 轮询回来的行与现有行合并：内容全等 → 返回原数组引用（setState 直接 bail out，一次重渲染都不发生）；
+ * 部分变化 → 未变的行保留原对象引用（配合 React.memo 的气泡，PENDING 行的进度文字每 2.5s 变化时，
+ * 已完成回复的 markdown 不会被重新解析、DOM 子树不被替换，用户拖到一半的选区不会被冲掉）。
+ */
+function mergeMsgs(prev, next) {
+  if (!Array.isArray(next)) return prev
+  if (prev.length === next.length && prev.every((row, i) => sameMsg(row, next[i]))) return prev
+  return next.map(row => {
+    const old = prev.find(p => p.id === row.id)
+    return sameMsg(old, row) ? old : row
+  })
+}
+
+/** 单条气泡：memo 化，只有本行数据（或 PENDING 行的 tick）变化才重渲染 markdown */
+const MessageBubble = memo(function MessageBubble({ m, tick }) {
+  if (m.role === 'user') {
+    return (
+      <div data-msg-id={m.id} data-role="user" style={{ alignSelf: 'flex-end', maxWidth: '78%', background: 'var(--accent,#2563eb)', color: '#fff', borderRadius: '10px 10px 2px 10px', padding: '7px 11px', fontSize: 12.5, whiteSpace: 'pre-wrap', userSelect: 'text' }}>
+        {m.text}
+        <div style={{ fontSize: 10, opacity: .65, marginTop: 3 }}>{String(m.createdAt).substring(11, 16)}</div>
+      </div>
+    )
+  }
+  const blocked = m.status === 'BLOCKED'
+  return (
+    <div data-msg-id={m.id} data-role="agent" style={{
+      alignSelf: 'flex-start', maxWidth: '86%', fontSize: 12.5,
+      background: blocked ? 'rgba(245,158,11,.08)' : 'rgba(107,114,128,.1)',
+      border: blocked ? '1px solid rgba(245,158,11,.45)' : '1px solid var(--border,#e5e7eb)',
+      borderRadius: '10px 10px 10px 2px', padding: '7px 11px',
+    }}>
+      {blocked && (
+        <div style={{ fontSize: 11, fontWeight: 700, color: '#b45309', marginBottom: 4 }}>
+          ⏸ 待你确认 · 本轮已停手（问题原文见页面顶部「待你确认」卡）
+        </div>
+      )}
+      {m.status === 'PENDING' ? (
+        m.text ? (
+          // 后端回写的实时进度摘要 — 灰色小字 + spinner，不走 ReactMarkdown（防止误认成最终答案）
+          <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
+            <span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />
+            {m.text}
+          </span>
+        ) : (
+          <span style={{ color: 'var(--text-dim)' }}><span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />处理中…</span>
+        )
+      ) : (
+        <div className="md-body" style={{ color: m.status === 'FAILED' ? 'var(--error)' : 'var(--text)', userSelect: 'text' }}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
+        </div>
+      )}
+      <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>
+        {String(m.createdAt).substring(11, 16)}
+        {m.status === 'PENDING' && elapsedLabel(m.createdAt) ? ` · ${elapsedLabel(m.createdAt)}` : ''}
+      </div>
+    </div>
+  )
+})
+
+function ChatPanel({ taskId, showToast, wikiReady = true, taskStatus = '', chatNonce = 0 }) {
   const [msgs, setMsgs] = useState([])
   const [q, setQ] = useState('')
   const [sending, setSending] = useState(false)
+  const [tick, setTick] = useState(0)   // 每次轮询 +1：只喂给 PENDING 行刷新"已运行"时长，终态气泡不受影响
   const bodyRef = useRef(null)
 
-  const load = () => fetch(`/api/ad-hoc-tasks/${taskId}/chat`).then(r => r.ok ? r.json() : []).then(setMsgs).catch(() => {})
+  const load = () => fetch(`/api/ad-hoc-tasks/${taskId}/chat`)
+    .then(r => r.ok ? r.json() : [])
+    .then(rows => { setMsgs(prev => mergeMsgs(prev, rows)); setTick(t => t + 1) })
+    .catch(() => {})
+  const hasPending = msgs.some(m => m.status === 'PENDING')
   useEffect(() => {
-    load()
-    const hasPending = msgs.some(m => m.status === 'PENDING')
-    const t = setInterval(load, hasPending ? 2500 : 8000)
-    return () => clearInterval(t)
-  }, [taskId, msgs.some(m => m.status === 'PENDING')])
+    let stopped = false
+    const poll = () => { if (!stopped) load() }
+    poll()
+    const t = setInterval(poll, hasPending ? 2500 : 8000)
+    return () => { stopped = true; clearInterval(t) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId, hasPending, chatNonce])
   useEffect(() => {
     if (bodyRef.current) bodyRef.current.scrollTop = bodyRef.current.scrollHeight
   }, [msgs.length, msgs[msgs.length - 1]?.text?.length])
@@ -408,6 +562,10 @@ function ChatPanel({ taskId, showToast, wikiReady = true, taskStatus = '' }) {
     load()
   }
 
+  const placeholder = (msgs.some(m => m.status === 'BLOCKED') || !wikiReady)
+    ? '回一句就是答复（例：上限按 20 家）——agent 在同一会话继续…（回车发送）'
+    : '吩咐临时小改，例如：某供应商把历史接口字段改了，帮我改一下…（回车发送）'
+
   return (
     <div className="card" style={{ marginTop: 14, padding: '14px 20px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -419,39 +577,12 @@ function ChatPanel({ taskId, showToast, wikiReady = true, taskStatus = '' }) {
             : `现在就能说，不用等流水线——流水线仍在「${TASK_STATUS_LABEL[taskStatus] || taskStatus || '推进中'}」，本轮不带 Wiki 入口，需要引用文档请直接给路径。与飞书私聊同一会话上下文，实例空闲立即回答，正忙时排队、忙完即答。`}
         </span>
       </div>
-      <div ref={bodyRef} style={{ maxHeight: 360, overflowY: 'auto', marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div ref={bodyRef} data-chat-body style={{ maxHeight: 360, overflowY: 'auto', marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
         {msgs.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '12px 0', textAlign: 'center' }}>（还没有对话 — 例如："某供应商把历史某个接口的字段改了，帮我改一下"）</div>}
-        {msgs.map(m => m.role === 'user' ? (
-          <div key={m.id} style={{ alignSelf: 'flex-end', maxWidth: '78%', background: 'var(--accent,#2563eb)', color: '#fff', borderRadius: '10px 10px 2px 10px', padding: '7px 11px', fontSize: 12.5, whiteSpace: 'pre-wrap' }}>
-            {m.text}
-            <div style={{ fontSize: 10, opacity: .65, marginTop: 3 }}>{String(m.createdAt).substring(11, 16)}</div>
-          </div>
-        ) : (
-          <div key={m.id} style={{ alignSelf: 'flex-start', maxWidth: '86%', background: 'rgba(107,114,128,.1)', border: '1px solid var(--border,#e5e7eb)', borderRadius: '10px 10px 10px 2px', padding: '7px 11px', fontSize: 12.5 }}>
-            {m.status === 'PENDING' ? (
-              m.text ? (
-                // 后端回写的实时进度摘要 — 灰色小字 + spinner，不走 ReactMarkdown（防止误认成最终答案）
-                <span style={{ color: 'var(--text-dim)', fontSize: 12 }}>
-                  <span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />
-                  {m.text}
-                </span>
-              ) : (
-                <span style={{ color: 'var(--text-dim)' }}><span className="spinner" style={{ width: 9, height: 9, display: 'inline-block', marginRight: 6 }} />处理中…</span>
-              )
-            ) : (
-              <div className="md-body" style={{ color: m.status === 'FAILED' ? 'var(--error)' : 'var(--text)' }}>
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
-              </div>
-            )}
-            <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 3 }}>
-              {String(m.createdAt).substring(11, 16)}
-              {m.status === 'PENDING' && elapsedLabel(m.createdAt) ? ` · ${elapsedLabel(m.createdAt)}` : ''}
-            </div>
-          </div>
-        ))}
+        {msgs.map(m => <MessageBubble key={m.id} m={m} tick={m.status === 'PENDING' ? tick : 0} />)}
       </div>
       <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-        <input className="form-input" style={{ flex: 1 }} placeholder="吩咐临时小改，例如：某供应商把历史接口字段改了，帮我改一下…（回车发送）"
+        <input className="form-input" style={{ flex: 1 }} placeholder={placeholder}
           value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') send() }} />
         <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={!q.trim() || sending} onClick={send}>
           {sending ? '发送中…' : '📤 发送'}

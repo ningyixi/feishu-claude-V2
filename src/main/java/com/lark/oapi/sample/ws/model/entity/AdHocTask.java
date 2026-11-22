@@ -11,6 +11,10 @@ import java.time.LocalDateTime;
  * 生命周期 = 两段流水线（来源入库解析 INGEST → 编译 LLM Wiki WIKI）→ READY 对话待命；
  * {@link #error} 非空表示停在 {@link #status} 记录的段上失败（可「重试本段」）。
  * <p>
+ * 卡点待确认（11-17-adhoc-blocker-notify）：{@link #pendingQuestion} 非空 = agent 停下来等人拍板，
+ * 页面据此渲染常驻「待你确认」卡；{@link #notifiedAt}/{@link #notifyError} 记录同一时刻的飞书私聊
+ * 推送结果（推送只是提醒，卡才是权威事实源，失败必须可见）。
+ * <p>
  * 底座复用（不算耦合）：知识库条目落在 {@code supplier_kb_entry}（kbCode = "adhoc-&lt;id&gt;" 专属命名空间，
  * 经 SupplierKbService 管线）；Wiki 版本行落在 {@code supplier_wiki_revision}（同 kbCode，经
  * SupplierWikiService.build）；对话走 ClaudeCodeService.chat = 绑定实例主会话（与飞书同 session）。
@@ -51,6 +55,40 @@ public class AdHocTask {
     @Column(length = 4000)
     private String error = "";
 
+    /**
+     * 待用户确认的卡点问题原文（11-17-adhoc-blocker-notify 决策 3）；空串 = 当前没有待确认事项。
+     * <p>
+     * 来源有二：①对话轮次终局文本命中 {@code 【卡点】}（{@link AdHocService#ask}）；
+     * ②Wiki 编译产物里检出 {@code 【卡点】}（决策 5，该段不得置 READY）。
+     * <b>页面上的待确认卡是权威事实源</b>：用户在对话框回一句即视为答复 → 清空本列、卡片收起、
+     * 同一主会话自然续跑（不新建 lane、不 steer、不打断）。
+     */
+    @Lob
+    @Column(length = 2147483647, name = "pending_question")
+    private String pendingQuestion = "";
+
+    /** 最近一次卡点飞书私聊推送成功的时间；null = 从未推送成功（配合 {@link #notifyError} 判定） */
+    @Column(name = "notified_at")
+    private LocalDateTime notifiedAt;
+
+    /**
+     * 卡点飞书推送失败原因（决策 4：失败必须可见）；空串 = 无失败。
+     * 例："飞书实例未连接"、"该实例尚未绑定飞书私聊用户"、"飞书发送失败 code=…"。
+     * 推送失败绝不影响页面待确认卡（卡才是权威事实源），只是卡片上会明示"飞书通知失败：&lt;原因&gt;"。
+     */
+    @Column(name = "notify_error", length = 1000)
+    private String notifyError = "";
+
+    /**
+     * 最近一个"因编译产物含【卡点】而被拒绝"的 Wiki 版本行 id（决策 5 的续跑锚点）。
+     * <p>
+     * 为什么需要它：Wiki 段检出卡点后本段置 FAILED，用户答复 → 点「重试本段」→ 若仍拿同一版 READY 产物
+     * 判定，就会永远再次拒绝、续跑变成死路。记下被拒版本后，重试时对这一版触发<b>重新编译</b>
+     * （{@code SupplierWikiService.build} 每次都产生新版本行），新一版仍含卡点才再次停下。
+     */
+    @Column(name = "blocked_revision")
+    private Long blockedRevision;
+
     @Column(name = "created_at")
     private LocalDateTime createdAt;
 
@@ -89,6 +127,19 @@ public class AdHocTask {
 
     public String getError() { return error == null ? "" : error; }
     public void setError(String error) { this.error = error; }
+
+    /** 空值归一：存量行 NULL 按空串（ddl-auto=update 加列语义） */
+    public String getPendingQuestion() { return pendingQuestion == null ? "" : pendingQuestion; }
+    public void setPendingQuestion(String pendingQuestion) { this.pendingQuestion = pendingQuestion; }
+
+    public LocalDateTime getNotifiedAt() { return notifiedAt; }
+    public void setNotifiedAt(LocalDateTime notifiedAt) { this.notifiedAt = notifiedAt; }
+
+    public String getNotifyError() { return notifyError == null ? "" : notifyError; }
+    public void setNotifyError(String notifyError) { this.notifyError = notifyError; }
+
+    public Long getBlockedRevision() { return blockedRevision; }
+    public void setBlockedRevision(Long blockedRevision) { this.blockedRevision = blockedRevision; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }

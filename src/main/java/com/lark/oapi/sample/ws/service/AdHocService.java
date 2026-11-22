@@ -73,6 +73,20 @@ public class AdHocService {
     /** 注入头部总长上限（防御性截断，页面摘要再长也吃不爆上下文） */
     static final int MAX_HEADER_CHARS = 8000;
 
+    // ===== 卡点待确认（11-17-adhoc-blocker-notify） =====
+
+    /** 对话行第 4 态：agent 命中卡点、停下等用户拍板（PENDING/DONE/FAILED 之外；前端渲染琥珀色气泡） */
+    public static final String CHAT_BLOCKED = "BLOCKED";
+    /** 待确认问题原文的落库/展示上限：卡片与飞书私聊都用截断后的同一份文本 */
+    static final int MAX_QUESTION_CHARS = 1500;
+    /**
+     * 命中卡点时视为"本轮可能已经动过手"的工具名。
+     * 提示词纪律无法硬拦 agent（见 {@link #ASK_DISCIPLINE} 的已知局限），只能事后把它调用过的写类工具
+     * 摆到用户面前。Bash 读写两用（可能只是 ls/mvn test），仍计入并在文案里说明"未必真的落盘"——
+     * 宁可多提醒一次，也不让用户以为它老实等着。
+     */
+    static final Set<String> WRITE_TOOLS = Set.of("Write", "Edit", "MultiEdit", "NotebookEdit", "Bash");
+
     private final AdHocTaskRepository taskRepo;
     private final AdHocChatRepository chatRepo;
     private final BotInstanceRepository instanceRepo;
@@ -80,6 +94,7 @@ public class AdHocService {
     private final SupplierWikiService wikiService;
     private final SupplierWikiRevisionRepository wikiRevisions;
     private final ClaudeCodeService claudeCodeService;
+    private final FeishuBotService feishuBotService;
 
     /** 编排中的任务（防重复启动/重复重试；进程内即可——重启后由 recoverInterrupted 兜底） */
     private final Set<Long> orchestrating = ConcurrentHashMap.newKeySet();
@@ -103,7 +118,8 @@ public class AdHocService {
                         SupplierKbService kbService,
                         SupplierWikiService wikiService,
                         SupplierWikiRevisionRepository wikiRevisions,
-                        ClaudeCodeService claudeCodeService) {
+                        ClaudeCodeService claudeCodeService,
+                        FeishuBotService feishuBotService) {
         this.taskRepo = taskRepo;
         this.chatRepo = chatRepo;
         this.instanceRepo = instanceRepo;
@@ -111,6 +127,7 @@ public class AdHocService {
         this.wikiService = wikiService;
         this.wikiRevisions = wikiRevisions;
         this.claudeCodeService = claudeCodeService;
+        this.feishuBotService = feishuBotService;
     }
 
     // ===== 启动恢复 =====
@@ -353,16 +370,34 @@ public class AdHocService {
      * ② 编译 Wiki 至 READY：EMPTY → build；BUILDING → 等待；FAILED → 本次调用内自动重建一次
      * （对齐 QuickProbe/Wiki 惯例——否则重启把 BUILDING 置 FAILED 后「重试本段」会永远撞旧 FAILED 行），
      * 重建仍 FAILED 才置段失败；READY → 完成。状态读取走版本行轻量单读，不做来源指纹重算。
+     * <p>
+     * <b>READY 不等于成功</b>（11-17-adhoc-blocker-notify 决策 5）：编译产物里检出 {@code 【卡点】}
+     * 说明这版 Wiki 是残缺的（旧行为会把它当成功产物置 READY，后续对话/改代码都基于残缺知识——这是缺陷）。
+     * 此时本段置 FAILED、问题原文进阶段卡与页面待确认卡、并推飞书；用户在对话框答复后点「重试本段」，
+     * 靠 {@code blocked_revision} 认出"这一版已经提过卡点"→ 触发重新编译（build 每次都产生新版本行），
+     * 而不是拿同一版再次拒绝（否则续跑变成死路）。
      */
     private void runWikiStage(AdHocTask task) throws InterruptedException {
         final boolean[] rebuilt = { false };
+        final Long[] rejectedRevision = { task.getBlockedRevision() };   // 上次因卡点被拒的版本（跨重试持久）
         waitUntil(task.getId(), () -> {
             SupplierWikiRevision latest = wikiRevisions.findFirstByKbCodeOrderByIdDesc(task.getKbCode()).orElse(null);
             String status = latest == null ? "EMPTY" : (latest.getStatus() == null ? "EMPTY" : latest.getStatus());
             updateWikiStatus(task.getId(), status);
             switch (status) {
                 case "READY":
-                    return "";
+                    String blocker = wikiStandblockQuestion(latest);
+                    if (blocker == null) return "";
+                    if (latest.getId() != null && latest.getId().equals(rejectedRevision[0])) {
+                        // 用户已答复并重试本段：这一版的拒绝已消费 → 重新编译一版，而不是原地再拒一次
+                        rejectedRevision[0] = null;
+                        clearBlockedRevision(task.getId());
+                        return triggerWikiBuild(task);
+                    }
+                    rejectedRevision[0] = latest.getId();
+                    markWikiBlocked(task.getId(), latest.getId(), blocker);
+                    return "Wiki 编译产物里留着待确认问题，本段不置 READY（残缺 Wiki 不当成功产物）：\n" + blocker
+                            + "\n——在对话框答复后点「重试本段」重新编译";
                 case "BUILDING":
                     return null;
                 case "FAILED":
@@ -373,6 +408,33 @@ public class AdHocService {
                     return triggerWikiBuild(task);
             }
         }, "Wiki 编译等待超时（" + (stepTimeoutMs / 60000) + " 分钟），请重试本段");
+    }
+
+    /** Wiki 段卡点：记下被拒版本（重试据此重新编译）+ 走与对话轮同一套"待确认卡 + 飞书推送"落库 */
+    private void markWikiBlocked(Long taskId, Long revisionId, String question) {
+        try {
+            taskRepo.findById(taskId).ifPresent(t -> {
+                t.setBlockedRevision(revisionId);
+                taskRepo.save(t);
+            });
+        } catch (RuntimeException ex) {
+            log.warn("[AdHoc] 任务 {} 记录被拒 Wiki 版本失败: {}", taskId, ex.getMessage());
+        }
+        markStandblock(taskId, question);
+    }
+
+    /** 被拒版本的拒绝已消费（用户答复后重试 → 重新编译）：清掉锚点，让新一版能重新被判定 */
+    private void clearBlockedRevision(Long taskId) {
+        try {
+            taskRepo.findById(taskId).ifPresent(t -> {
+                if (t.getBlockedRevision() != null) {
+                    t.setBlockedRevision(null);
+                    taskRepo.save(t);
+                }
+            });
+        } catch (RuntimeException ex) {
+            log.warn("[AdHoc] 任务 {} 清除被拒 Wiki 版本失败: {}", taskId, ex.getMessage());
+        }
     }
 
     /** 触发一次 Wiki 编译：null=已启动（或已有并发编译），转入等待；非 null=启动失败，作为段失败原因抛出 */
@@ -571,12 +633,202 @@ public class AdHocService {
     }
 
     /**
-     * 纯函数便于单测（A3 注入面）：每轮对话消息 = Wiki 入口头部 + 用户原文 + 措辞纪律。
+     * 对话轮提问纪律（11-17-adhoc-blocker-notify 决策 2）：与 {@link SupplierJobService#WORDING_RULE} 并列的
+     * 独立常量（便于单测直接断言文案）。核心是"先问再改"：需要用户拍板的事一律先输出一行 {@code 【卡点】}
+     * + 具体问题，然后本轮不改任何代码、不写任何文件；用户下一句自然进同一主会话即视为答复
+     * （本服务不新建 lane、不 steer、不打断、不新造注入机制）。
+     * <p>
+     * 卡点标记沿用全项目唯一协议 {@link SupplierJobService#STANDBLOCK}（{@code (?m)^\s*【卡点】}），
+     * 不另造词、不拷正则。
+     * <p>
+     * <b>已知局限（如实写明，不吹成硬保证）</b>：这是提示词级约束，<b>无法硬拦</b> agent "先改完再问"。
+     * 缓解有两处：①本纪律把顺序写死——"输出【卡点】之前不得调用任何写文件/改配置的工具"；
+     * ②页面展示本轮工具动作流水（{@link #chatProgressListener} 把当前工具实时回写进 agent 行），
+     * 并在命中卡点时用 {@link #writeActionBanner} 把本轮出现过的写类工具动作明写在回复里，
+     * 让用户看得见它到底动没动。要真硬保证得在工具层拦截（TerminalSession/CLI 侧禁写），超出本任务范围。
+     */
+    static final String ASK_DISCIPLINE = """
+
+            【提问纪律 · 需要用户拍板的事先问，别猜着改】
+            命中下列任一情况，本轮必须先提问、后动手：
+            1. 要改配置文件，或需要新增/修改配置项；
+            2. 业务参数取值无法从材料中确定（例：多酒店查价的酒店数量上限、超时秒数、分页大小、金额精度）；
+            3. 改动会影响线上行为或线上数据（含数据订正、开关默认值、对外接口字段）；
+            4. 同一句吩咐存在两种以上合理解释，且选哪种会导致不同结果；
+            5. 要动的文件不在本任务 Wiki 覆盖范围内，或 Wiki 与真实代码/文档冲突。
+            做法（顺序不得颠倒）：
+            - 在输出中另起一行、以【卡点】开头写清要用户拍板的具体问题（可给 A/B/C 选项），然后结束本轮；
+            - 输出【卡点】之前不得调用任何写文件、改配置、提交类的工具；命中上述情况时本轮不改任何代码、不写任何文件；
+            - 用户会在本对话直接回一句作为答复，收到后按答复继续，不要另起会话、不要重做已完成的部分。
+            不必问的：纯实现细节（变量命名、局部写法、日志文案、内部函数拆分）——自行决定并在回复里说明即可。
+            注意：【卡点】必须是此刻真正在向用户提出的问题；转述规则、举例说明时不要使用该标记行。
+            """;
+
+    /**
+     * 纯函数便于单测（A3 注入面）：每轮对话消息 = Wiki 入口头部 + 用户原文 + 提问纪律 + 措辞纪律。
      * 对话轮不走 ACTION_SPEC，须自带 {@link SupplierJobService#WORDING_RULE}（对齐 buildAskMessage 的
      * 注入面纪律，见 SupplierPromptWordingTest——本注入面不得遗漏）。
+     * 提问纪律 {@link #ASK_DISCIPLINE} 排在措辞纪律<b>之前</b>：WORDING_RULE 是所有注入面统一的收尾句，
+     * 既有断言（prompt 以 WORDING_RULE 结尾）与 agent 的阅读顺序都依赖它留在最后。
      */
     static String buildChatPrompt(String wikiHeader, String question) {
-        return wikiHeader + "\n\n【用户吩咐】\n" + question.strip() + "\n" + SupplierJobService.WORDING_RULE;
+        return wikiHeader + "\n\n【用户吩咐】\n" + question.strip() + "\n"
+                + ASK_DISCIPLINE + SupplierJobService.WORDING_RULE;
+    }
+
+    // ===== 卡点判定 / 问题原文 / 通知文案（纯函数，便于单测） =====
+
+    /**
+     * 纯函数便于单测：终局文本是否命中卡点。
+     * 直接复用 {@link SupplierJobService#STANDBLOCK}（全项目一套协议），本类不再拷一份正则。
+     */
+    static boolean isStandblock(String text) {
+        return text != null && SupplierJobService.STANDBLOCK.matcher(text).find();
+    }
+
+    /**
+     * 纯函数便于单测：从命中文本里取出问题原文（自 {@code 【卡点】} 标记行起到文本末尾，含标记本身）。
+     * 未命中返回 null；超长截断到 {@value #MAX_QUESTION_CHARS} 字符（卡片与飞书私聊共用同一份）。
+     */
+    static String extractStandblockQuestion(String text) {
+        if (text == null) return null;
+        var m = SupplierJobService.STANDBLOCK.matcher(text);
+        if (!m.find()) return null;
+        String question = text.substring(m.start()).strip();
+        return question.length() > MAX_QUESTION_CHARS ? question.substring(0, MAX_QUESTION_CHARS) + "…" : question;
+    }
+
+    /**
+     * 纯函数便于单测：Wiki 版本行里是否藏着卡点（决策 5——编译产物含【卡点】时该段不得置 READY）。
+     * <p>
+     * 只能看 AdHoc 侧读得到的东西：manifestJson（解码后逐字段扫 pages 的 title/summary/content 与 warnings）、
+     * phase、error。<b>必须解码 JSON 再扫</b>——manifest 里的换行是转义的 {@code \n} 字面量，
+     * 直接对原始 JSON 串用 {@code (?m)^} 多行正则永远匹配不到。
+     * <p>
+     * 已知覆盖不到的情形（如实说明）：模型把【卡点】写在 JSON <b>外面</b>时，
+     * {@code SupplierWikiContract.json} 会判定"非完整 JSON"→ 该来源抽取失败被跳过 → 版本行照样 READY，
+     * 只留下 warnings 里的资料缺口，卡点原文只进了 stderr。要捞回这段原文必须改 SupplierWikiService
+     * 的编译链（本任务硬约束：只动 AdHoc 这条链），故此处不假装能检出。
+     *
+     * @return 问题原文；未检出返回 null
+     */
+    static String wikiStandblockQuestion(SupplierWikiRevision row) {
+        if (row == null) return null;
+        String direct = extractStandblockQuestion(row.getError());
+        if (direct == null) direct = extractStandblockQuestion(row.getPhase());
+        if (direct != null) return direct;
+        try {
+            JsonObject manifest = JsonParser.parseString(
+                    row.getManifestJson() == null || row.getManifestJson().isBlank() ? "{}" : row.getManifestJson()).getAsJsonObject();
+            if (manifest.has("pages") && manifest.get("pages").isJsonArray()) {
+                for (var el : manifest.getAsJsonArray("pages")) {
+                    if (!el.isJsonObject()) continue;
+                    JsonObject p = el.getAsJsonObject();
+                    for (String field : List.of("content", "summary", "title")) {
+                        String hit = extractStandblockQuestion(text(p, field));
+                        if (hit != null) return hit;
+                    }
+                }
+            }
+            if (manifest.has("warnings") && manifest.get("warnings").isJsonArray()) {
+                for (var el : manifest.getAsJsonArray("warnings")) {
+                    if (!el.isJsonPrimitive()) continue;
+                    String hit = extractStandblockQuestion(el.getAsString());
+                    if (hit != null) return hit;
+                }
+            }
+        } catch (RuntimeException ignore) {
+            // manifest 解析不出来 = 检不出卡点；此时版本行本身的 status/error 已由既有逻辑处理
+        }
+        return null;
+    }
+
+    /**
+     * 纯函数便于单测：本轮工具动作 → 写操作警示条（没有写类工具返回空串）。
+     * 存在理由见 {@link #ASK_DISCIPLINE} 的"已知局限"：提示词拦不住，就让用户看见它动过什么。
+     */
+    static String writeActionBanner(List<String> toolNames) {
+        List<String> hits = new ArrayList<>();
+        for (String n : toolNames == null ? List.<String>of() : toolNames) {
+            if (n == null) continue;
+            String name = n.strip();
+            if (WRITE_TOOLS.contains(name) && !hits.contains(name)) hits.add(name);
+        }
+        if (hits.isEmpty()) return "";
+        return "\n\n> ⚠️ 本轮在提问之前已出现可写工具动作：" + String.join("、", hits)
+                + "（Bash 读写两用，未必真的落盘）。提问纪律要求先问再改，请人工复核这些动作有没有改动文件/配置，再决定怎么答复。";
+    }
+
+    /** 纯函数便于单测：卡点飞书私聊文案（决策 4 指定格式，逐字对齐） */
+    static String standblockNotice(String taskName, String question) {
+        return "【临时需求·待确认】" + (taskName == null || taskName.isBlank() ? "(未命名)" : taskName)
+                + "\n" + question.strip() + "\n\n直接在本对话回复即可，我会继续。";
+    }
+
+    /**
+     * 命中卡点后的双写（决策 3+4）：
+     * <ol>
+     *   <li>先把问题原文落 {@code pending_question} —— <b>页面待确认卡是权威事实源</b>，落库成功即用户一定能看到；</li>
+     *   <li>再推飞书私聊提醒（{@link FeishuBotService#notifyUserChecked}：与 notifyUser 同一条投递路径，
+     *       区别只是把失败原因返回来），成功记 {@code notified_at}，失败把原因记进 {@code notify_error}；</li>
+     *   <li>推送失败绝不影响第 1 步：卡片照旧显示，只多一行"飞书通知失败：&lt;原因&gt;"——不静默。</li>
+     * </ol>
+     * 取舍说明：没有改 {@code notifyUser} 的 void 签名（两个既有调用方 EmployeeService/E2EOrchestrator 的
+     * "尽力而为、不阻塞"行为一字未变，AC5），而是新增返回结果的姊妹方法，失败原因由本模块自己落库。
+     */
+    void markStandblock(Long taskId, String question) {
+        AdHocTask t = taskRepo.findById(taskId).orElse(null);
+        if (t == null || question == null || question.isBlank()) return;
+        t.setPendingQuestion(question);
+        t.setNotifyError("");
+        t.setNotifiedAt(null);
+        try {
+            taskRepo.save(t);
+        } catch (RuntimeException ex) {
+            log.warn("[AdHoc] 任务 {} 待确认问题落库失败: {}", taskId, ex.getMessage());
+        }
+
+        FeishuBotService.NotifyResult result;
+        try {
+            BotInstance inst = t.getInstanceId() == null ? null : instanceRepo.findById(t.getInstanceId()).orElse(null);
+            result = feishuBotService.notifyUserChecked(t.getInstanceId(),
+                    inst == null ? null : inst.getAuthorizedOpenId(), standblockNotice(t.getName(), question));
+        } catch (RuntimeException ex) {
+            result = new FeishuBotService.NotifyResult(false,
+                    "推送异常: " + (ex.getMessage() == null ? ex.getClass().getSimpleName() : ex.getMessage()));
+        }
+        if (result == null) result = new FeishuBotService.NotifyResult(false, "推送无结果（通道未返回）");
+        try {
+            if (result.ok()) {
+                t.setNotifiedAt(LocalDateTime.now());
+                t.setNotifyError("");
+            } else {
+                t.setNotifyError(truncate(result.reason(), 900));
+            }
+            taskRepo.save(t);
+        } catch (RuntimeException ex) {
+            log.warn("[AdHoc] 任务 {} 通知结果落库失败: {}", taskId, ex.getMessage());
+        }
+        if (result.ok()) log.info("[AdHoc] 任务 {} 命中卡点，已落待确认并推送飞书私聊，等用户在对话框答复", taskId);
+        else log.warn("[AdHoc] 任务 {} 命中卡点，飞书通知失败（页面待确认卡仍为权威事实源）: {}", taskId, result.reason());
+    }
+
+    /** 用户在对话框发下一句即视为答复：清空待确认（卡片收起），本轮在同一主会话自然续接上下文 */
+    private void clearStandblock(AdHocTask t) {
+        if (t.getPendingQuestion().isBlank() && t.getNotifyError().isBlank()) return;
+        t.setPendingQuestion("");
+        t.setNotifyError("");
+        // notified_at 保留为"最近一次成功推送时间"的审计痕迹（卡片只在 pendingQuestion 非空时渲染）
+        try {
+            taskRepo.save(t);
+        } catch (RuntimeException ex) {
+            log.warn("[AdHoc] 任务 {} 清除待确认失败: {}", t.getId(), ex.getMessage());
+        }
+    }
+
+    private static String truncate(String s, int max) {
+        if (s == null) return "";
+        return s.length() > max ? s.substring(0, max) + "…" : s;
     }
 
     /**
@@ -588,6 +840,11 @@ public class AdHocService {
      * <b>任何任务阶段都可对话</b>（设计变更 2026-11-17）：Wiki 编译要几分钟、失败还会停在 WIKI 段，
      * 这期间把对话框门禁掉正是"被卡住"。未就绪时不注入 Wiki 入口段，改注入一行阶段说明
      * （见 {@link #wikiHeaderBlock}）；Wiki 编译走的是 lane 会话，与主会话对话互不阻塞。
+     * <p>
+     * <b>卡点待确认</b>（11-17-adhoc-blocker-notify）：本轮终局文本命中 {@link SupplierJobService#STANDBLOCK}
+     * → agent 行置 {@value #CHAT_BLOCKED}（保留问题原文）、任务行记 pendingQuestion、并推一条飞书私聊。
+     * 用户回一句（就是本方法的下一次调用）即视为答复：清 pendingQuestion、卡片收起、同一主会话续跑——
+     * 不新建 lane、不 steer、不打断、不新造任何注入机制。
      */
     public void ask(Long taskId, String question) {
         AdHocTask t = require(taskId);
@@ -596,6 +853,9 @@ public class AdHocService {
         BotInstance inst = instanceRepo.findById(t.getInstanceId())
                 .orElseThrow(() -> new IllegalArgumentException("绑定实例不存在"));
         if (!inst.isEnabled()) throw new IllegalArgumentException("绑定实例已停用，无法对话");
+
+        // 用户发下一句即视为对上一个卡点的答复：待确认卡收起，本轮在同一主会话自然续接上下文
+        clearStandblock(t);
 
         String prompt = buildChatPrompt(
                 wikiHeaderBlock(t.getName(), t.getStatus(), wikiSnapshot(t.getKbCode())), question);
@@ -611,19 +871,25 @@ public class AdHocService {
         // 否则 ClaudeCodeService.getOrCreate 会判定"配置变更"而重建实例主会话（=打断飞书那边的上下文）
         String dir = firstNonBlank(inst.getClaudeWorkingDir(), inst.getShellWorkingDir(), "");
         String model = inst.getClaudeModel() == null ? "" : inst.getClaudeModel();
+        ChatProgress progress = chatProgressListener(a, inst.getId());
         try {
             starter.accept("ad-hoc-chat-" + taskId, () -> {
                 try {
                     String reply = claudeCodeService.chat(inst.getId(), "ad-hoc-task-" + taskId, prompt,
-                            dir, model, chatProgressListener(a, inst.getId()));
+                            dir, model, progress);
                     boolean bad = reply == null || reply.startsWith("❌");
-                    a.setText(bad ? (reply == null ? "（无回复）" : reply) : reply);
-                    a.setStatus(bad ? "FAILED" : "DONE");
+                    String blocker = bad ? null : extractStandblockQuestion(reply);
+                    a.setStatus(bad ? "FAILED" : blocker != null ? CHAT_BLOCKED : "DONE");
+                    // 命中卡点时把本轮出现过的写类工具动作明写在回复下方（提示词拦不住，只能让用户看见）
+                    a.setText(bad ? (reply == null ? "（无回复）" : reply)
+                            : reply + (blocker != null ? writeActionBanner(progress.toolNames()) : ""));
+                    saveQuietly(a);
+                    if (blocker != null) markStandblock(taskId, blocker);
                 } catch (Exception e) {
                     a.setText("对话投递失败: " + e.getMessage());
                     a.setStatus("FAILED");
+                    saveQuietly(a);
                 }
-                saveQuietly(a);
             });
         } catch (RuntimeException ex) {
             // 投递线程都起不来：立刻把预占行落终态，否则前端永远转圈
@@ -652,67 +918,90 @@ public class AdHocService {
      * 的 text 字段，前端轮询即可见"在做什么"；轮次结束后由 {@link #ask} 用最终回复覆盖。
      * 回调发生在 TerminalSession reader 线程上，写库失败静默——绝不影响对话主链。
      */
-    private TurnListener chatProgressListener(AdHocChat a, Long instanceId) {
-        return new TurnListener() {
-            private final long sentAt = System.currentTimeMillis();
-            private volatile long startAt = -1;      // <0 = 尚未开始执行（还在排队）
-            private volatile String phase = "QUEUE";
-            private volatile String toolName;
-            private volatile String toolDetail;
-            private volatile int queuedAhead = -1;
-            private volatile long lastWrite;
+    private ChatProgress chatProgressListener(AdHocChat a, Long instanceId) {
+        return new ChatProgress(a, instanceId);
+    }
 
-            private void write(boolean force) {
-                if (!"PENDING".equals(a.getStatus())) return;   // 已落终态（DONE/FAILED），进度不再覆盖
-                long now = System.currentTimeMillis();
-                if (!force && now - lastWrite < 2000) return;
-                lastWrite = now;
-                long elapsed = startAt >= 0 ? now - startAt : now - sentAt;
-                String text = SupplierJobService.chatProgressText(phase, toolName, toolDetail, elapsed, queuedAhead);
-                try {
-                    if (!text.equals(a.getText())) { a.setText(text); chatRepo.save(a); }
-                } catch (Exception ignore) { }
-            }
+    /**
+     * 对话轮进度 + 工具动作留痕。回调发生在 TerminalSession reader 线程上，写库失败静默——绝不影响对话主链。
+     * <p>
+     * 除既有的"实时进度摘要"外，这里还按发生顺序记下本轮调用过的工具名：命中卡点时
+     * {@link #writeActionBanner} 用它告诉用户"提问之前它其实已经动过哪些工具"
+     * （提示词级纪律无法硬拦，见 {@link #ASK_DISCIPLINE} 的已知局限）。
+     */
+    private final class ChatProgress implements TurnListener {
+        private final AdHocChat a;
+        private final Long instanceId;
+        private final long sentAt = System.currentTimeMillis();
+        private final List<String> toolNames = java.util.Collections.synchronizedList(new ArrayList<>());
+        private volatile long startAt = -1;      // <0 = 尚未开始执行（还在排队）
+        private volatile String phase = "QUEUE";
+        private volatile String toolName;
+        private volatile String toolDetail;
+        private volatile int queuedAhead = -1;
+        private volatile long lastWrite;
 
-            @Override public void onQueued() {
-                TerminalSession ts = claudeCodeService.getSession(instanceId);
-                // onQueued 时本条已登记 pendingQueue：快照条数 = 自己 + 前面排队的 ≈ 前面还有 N 条
-                if (ts != null) queuedAhead = ts.queuedSnapshot().size();
-                Thread.ofVirtual().name("ad-hoc-chat-queue-hint").start(() -> {
-                    try { Thread.sleep(5000); } catch (InterruptedException e) { return; }
-                    if (startAt < 0) write(true);   // 从发送到开始执行等待超过 5 秒才显示排队提示
-                });
-            }
-            @Override public void onTurnStart() {
-                startAt = System.currentTimeMillis();
-                phase = "THINKING";
-                write(true);
-            }
-            @Override public void onThinkingDelta(String delta) {
-                if (startAt < 0) return;
-                phase = "THINKING";
-                write(false);
-            }
-            @Override public void onTextDelta(String delta) {
-                if (startAt < 0) return;
-                phase = "GENERATING";
-                write(false);
-            }
-            @Override public void onToolStart(ToolStep step) {
-                phase = "TOOL";
-                toolName = step.name;
-                toolDetail = step.detail;
-                write(true);   // 工具切换是关键节点，跳过节流立即刷新
-            }
-            @Override public void onToolEnd(ToolStep step) {
-                phase = "THINKING";
-                toolName = null;
-                toolDetail = null;
-                write(false);
-            }
-            @Override public void onTurnComplete(TurnResult result) { }
-            @Override public void onTurnError(String message, boolean aborted) { }
-        };
+        ChatProgress(AdHocChat a, Long instanceId) {
+            this.a = a;
+            this.instanceId = instanceId;
+        }
+
+        /** 本轮工具名快照（不可变副本，供轮次结束后判定写操作） */
+        List<String> toolNames() {
+            synchronized (toolNames) { return List.copyOf(toolNames); }
+        }
+
+        private void write(boolean force) {
+            if (!"PENDING".equals(a.getStatus())) return;   // 已落终态（DONE/BLOCKED/FAILED），进度不再覆盖
+            long now = System.currentTimeMillis();
+            if (!force && now - lastWrite < 2000) return;
+            lastWrite = now;
+            long elapsed = startAt >= 0 ? now - startAt : now - sentAt;
+            String text = SupplierJobService.chatProgressText(phase, toolName, toolDetail, elapsed, queuedAhead);
+            try {
+                if (!text.equals(a.getText())) { a.setText(text); chatRepo.save(a); }
+            } catch (Exception ignore) { }
+        }
+
+        @Override public void onQueued() {
+            TerminalSession ts = claudeCodeService.getSession(instanceId);
+            // onQueued 时本条已登记 pendingQueue：快照条数 = 自己 + 前面排队的 ≈ 前面还有 N 条
+            if (ts != null) queuedAhead = ts.queuedSnapshot().size();
+            Thread.ofVirtual().name("ad-hoc-chat-queue-hint").start(() -> {
+                try { Thread.sleep(5000); } catch (InterruptedException e) { return; }
+                if (startAt < 0) write(true);   // 从发送到开始执行等待超过 5 秒才显示排队提示
+            });
+        }
+        @Override public void onTurnStart() {
+            startAt = System.currentTimeMillis();
+            phase = "THINKING";
+            write(true);
+        }
+        @Override public void onThinkingDelta(String delta) {
+            if (startAt < 0) return;
+            phase = "THINKING";
+            write(false);
+        }
+        @Override public void onTextDelta(String delta) {
+            if (startAt < 0) return;
+            phase = "GENERATING";
+            write(false);
+        }
+        @Override public void onToolStart(ToolStep step) {
+            phase = "TOOL";
+            toolName = step.name;
+            toolDetail = step.detail;
+            if (step.name != null) toolNames.add(step.name);
+            write(true);   // 工具切换是关键节点，跳过节流立即刷新
+        }
+        @Override public void onToolEnd(ToolStep step) {
+            phase = "THINKING";
+            toolName = null;
+            toolDetail = null;
+            write(false);
+        }
+        @Override public void onTurnComplete(TurnResult result) { }
+        @Override public void onTurnError(String message, boolean aborted) { }
     }
 
     // ===== 查询（控制器 JSON 数据源） =====
@@ -734,6 +1023,8 @@ public class AdHocService {
             o.addProperty("wikiStatus", t.getWikiStatus());
             o.addProperty("error", t.getError());
             o.addProperty("running", orchestrating.contains(t.getId()));
+            // 列表只给布尔（问题原文在详情里取）：左侧任务行标"⏸ 待你确认"
+            o.addProperty("blocked", !t.getPendingQuestion().isBlank());
             o.addProperty("createdAt", String.valueOf(t.getCreatedAt()));
             o.addProperty("updatedAt", String.valueOf(t.getUpdatedAt()));
             arr.add(o);
@@ -741,7 +1032,7 @@ public class AdHocService {
         return arr;
     }
 
-    /** 详情 JSON：任务 + 两段状态 + Wiki 状态卡（轻量单行读）+ 知识库条目（前端 3s 轮询的数据源） */
+    /** 详情 JSON：任务 + 两段状态 + Wiki 状态卡（轻量单行读）+ 知识库条目 + 待确认卡数据（前端 3s 轮询的数据源） */
     public JsonObject detail(Long taskId) {
         AdHocTask t = require(taskId);
         JsonObject o = new JsonObject();
@@ -756,6 +1047,10 @@ public class AdHocService {
         o.addProperty("error", t.getError());
         o.addProperty("running", orchestrating.contains(taskId));
         o.addProperty("docSources", t.getDocSources());
+        // 待确认卡（决策 3/4）：问题原文是权威事实源；notifyError 非空时卡片明示"飞书通知失败：<原因>"
+        o.addProperty("pendingQuestion", t.getPendingQuestion());
+        o.addProperty("notifyError", t.getNotifyError());
+        if (t.getNotifiedAt() != null) o.addProperty("notifiedAt", String.valueOf(t.getNotifiedAt()));
         o.addProperty("createdAt", String.valueOf(t.getCreatedAt()));
         o.addProperty("updatedAt", String.valueOf(t.getUpdatedAt()));
 
