@@ -63,6 +63,10 @@ public class SupplierJobService {
     @org.springframework.beans.factory.annotation.Autowired
     private org.springframework.beans.factory.ObjectProvider<SupplierWikiService> wikiProvider;
 
+    /** 删除工作级联取消流程（T7①，11-17-free-node-execution）：延迟解析避免与 SupplierWorkflowService 构造器循环依赖 */
+    @org.springframework.beans.factory.annotation.Autowired
+    private org.springframework.beans.factory.ObjectProvider<SupplierWorkflowService> workflowProvider;
+
     public SupplierJobService(SupplierJobRepository jobRepo,
                               SupplierJobNodeRepository nodeRepo,
                               WorkflowTemplateRepository templateRepo,
@@ -578,6 +582,15 @@ public class SupplierJobService {
 
     @Transactional
     public void deleteJob(Long id) {
+        // T7①（11-17-free-node-execution）：先级联取消流程（删流程实例 + run 置 CANCELLED），杜绝 job 删除后
+        // 留下 ACTIVE 孤儿 run 让工作器每 2 秒刷"流程节点快照不匹配"。取消失败不阻断删除——
+        // 漏网孤儿由 T7② 的"不可恢复 → run 置 FAILED 终态即停"兜底，不会再无限刷日志。
+        try {
+            SupplierWorkflowService wf = workflowProvider == null ? null : workflowProvider.getIfAvailable();
+            if (wf != null) wf.cancelForJobDeletion(id);
+        } catch (Exception ex) {
+            log.warn("[SupplierJob] 删除工作时级联取消流程失败（继续删除）: job={}, {}", id, ex.getMessage());
+        }
         nodeRepo.deleteByJobId(id);
         try { nodeChatRepo.deleteByJobId(id); } catch (Exception ignore) { }
         jobRepo.deleteById(id);
@@ -599,11 +612,30 @@ public class SupplierJobService {
     // ===== 节点操作 =====
 
     /**
+     * T4（11-17-free-node-execution）codegen 门禁异常：默认仍拦（话术不变），但属于"可经用户显式
+     * force 确认跳过"的门禁。控制器据此返回 forceable 标记，前端弹二次确认（写清后果）后带 force=true 重试。
+     * 继承 IllegalArgumentException：既有 catch/断言（含工作流审批门禁回滚路径）语义不变。
+     */
+    public static class CodegenGateException extends IllegalArgumentException {
+        public CodegenGateException(String message) { super(message); }
+        public CodegenGateException(String message, Throwable cause) { super(message, cause); }
+    }
+
+    /**
      * 执行 agent/agent_check 节点：发到绑定实例的常驻会话，产物写 artifact（异步）。
      * 回复含【卡点】→ 保持 RUNNING 且 pendingQuestion 挂起待玩家答复（R7），
      * 答复经 {@link #answerNode} 注入同一会话续跑。
      */
-    public void runNode(Long jobId, String nodeId, String extraInstruction) {
+    public List<String> runNode(Long jobId, String nodeId, String extraInstruction) {
+        return runNode(jobId, nodeId, extraInstruction, false);
+    }
+
+    /**
+     * @param force T4：用户在页面二次确认后强制执行——codegen 三连门禁（开发提示词 digest / 会议文档+KV /
+     *              实测证据）不满足时不再拦，按现有材料派发；生成的开发提示词缺失/过期时本次不携带（交付记录留痕）。
+     * @return T3：{artifact:nX} 缺失产物的上游节点 ID 列表（降级派发已在 prompt 内显式声明；控制器透传给前端提示）
+     */
+    public List<String> runNode(Long jobId, String nodeId, String extraInstruction, boolean force) {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
         SupplierJobNode n = nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
                 .orElseThrow(() -> new IllegalArgumentException("节点不存在: " + nodeId));
@@ -619,12 +651,29 @@ public class SupplierJobService {
         if (!instanceRepo.existsById(job.getInstanceId())) throw new IllegalArgumentException("绑定实例不存在");
         kbService.syncFromJob(job);   // 幂等：确保存量文档在知识库中有索引（执行时先查库勿重抓）
 
-        String generated = "codegen".equals(contextStage(n)) ? generatedDevelopmentPrompt(job, codegenPrompt(jobId)) : "";
+        String generated = "";
+        String forceNote = "";
+        if ("codegen".equals(contextStage(n))) {
+            if (force) {
+                generated = generatedDevelopmentPrompt(job, codegenPrompt(jobId, true), true);
+                forceNote = "已按用户确认强制执行：跳过写代码门禁校验"
+                        + (generated.isBlank() ? "，本次未携带公司 Skill 生成的开发提示词" : "");
+            } else {
+                generated = generatedDevelopmentPrompt(job, codegenPrompt(jobId));
+            }
+        }
         Rendered rendered = renderWithKnowledge(n.getPrompt(), job, extraInstruction, contextStage(n));
         String prompt = rendered.prompt();
         if (!generated.isBlank()) prompt += "\n\n## 公司 Skill 生成的开发提示词\n" + generated;
         if (prompt.length() > 400000) throw new IllegalArgumentException("派发请求超过 400000 字符，请拆分任务");
-        n.setDeliveryManifest("准备时间：" + LocalDateTime.now() + "\n知识库：" + kbService.kbCode(job) + "\n阶段：" + contextStage(n) + "\n" + kbService.snapshotDelivery(kbService.kbCode(job), prompt));
+        String manifest = "准备时间：" + LocalDateTime.now() + "\n知识库：" + kbService.kbCode(job) + "\n阶段：" + contextStage(n) + "\n" + kbService.snapshotDelivery(kbService.kbCode(job), prompt);
+        // T3：上游产物缺失不再阻塞——交付记录留痕（prompt 内已含显式"未携带"声明，绝不静默）
+        if (!rendered.missingArtifacts().isEmpty()) {
+            manifest += "\n上游产物缺失：" + String.join("、", rendered.missingArtifacts()) + "（提示词中已声明本次未携带该上下文）";
+            log.info("[SupplierJob] 节点降级派发（上游无产物）: job={}, node={}, 缺失={}", jobId, nodeId, rendered.missingArtifacts());
+        }
+        if (!forceNote.isEmpty()) manifest += "\n" + forceNote;
+        n.setDeliveryManifest(manifest);
         n.setToolEvidence("");
         if (knowledgeService != null) n.setKnowledgeRunId(knowledgeService.record(job, nodeId, contextStage(n), rendered.pack(), prompt));
         n.setStatus("RUNNING");
@@ -634,6 +683,7 @@ public class SupplierJobService {
         nodeRepo.save(n);
 
         deliverToInstance(job, n, "job-node-" + jobId + "-" + nodeId, prompt);
+        return rendered.missingArtifacts();
     }
 
     /** R7 卡点答复：把玩家回答注入执行该节点的原会话，agent 续跑（回复再卡点则继续挂起） */
@@ -803,20 +853,28 @@ public class SupplierJobService {
 
     /** meetingMaterialsUploaded=true：工作流待办已上传会议材料，会议文档视为已交（三通道断连修复） */
     @Transactional
-    public void completeNode(Long jobId, String nodeId, boolean meetingMaterialsUploaded) {
+    public void completeNode(Long jobId, String nodeId, boolean meetingMaterialsUploaded) { completeNode(jobId, nodeId, meetingMaterialsUploaded, false); }
+
+    /**
+     * @param force T4（11-17-free-node-execution）：用户已在页面二次确认——跳过 codegen 三连门禁
+     *              （会议文档+KV / 开发提示词 digest / Postman 实测证据）强制标记完成。默认 false 仍拦，话术不变。
+     */
+    @Transactional
+    public void completeNode(Long jobId, String nodeId, boolean meetingMaterialsUploaded, boolean force) {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
         SupplierJobNode n = nodeRepo.findByJobIdAndNodeId(jobId, nodeId)
                 .orElseThrow(() -> new IllegalArgumentException("节点不存在: " + nodeId));
         if ("RUNNING".equals(n.getStatus())) throw new IllegalArgumentException("节点尚在执行，不能标记完成");
-        if (n.isCodegenPrep()) {
+        if (n.isCodegenPrep() && !force) {
             boolean docDone = !job.getMeetingDocUrl().isBlank() || meetingMaterialsUploaded;
             boolean kvDone = configsComplete(job.getConfigJson());
-            if (!docDone || !kvDone) throw new IllegalArgumentException(prepMissingMessage(docDone, kvDone));
+            if (!docDone || !kvDone) throw new CodegenGateException(prepMissingMessage(docDone, kvDone));
         }
-        if ("codegen".equals(contextStage(n))) generatedDevelopmentPrompt(job, codegenPrompt(jobId));
-        if (isProbeNode(n) && (n.getToolEvidence().isBlank() || n.getArtifact().isBlank())) {
-            throw new IllegalArgumentException("缺少成功的 Postman 实测工具记录（MCP 或 postman CLI 执行均可），请运行实测节点；文字报告与自由 curl 不能代替真实请求/返回");
+        if (!force && "codegen".equals(contextStage(n))) generatedDevelopmentPrompt(job, codegenPrompt(jobId));
+        if (!force && isProbeNode(n) && (n.getToolEvidence().isBlank() || n.getArtifact().isBlank())) {
+            throw new CodegenGateException("缺少成功的 Postman 实测工具记录（MCP 或 postman CLI 执行均可），请运行实测节点；文字报告与自由 curl 不能代替真实请求/返回");
         }
+        if (force) log.info("[SupplierJob] 节点按用户确认强制完成（跳过写代码门禁）: job={}, node={}", jobId, nodeId);
         kbService.archiveArtifact(job, nodeId, n.getTitle(), n.getArtifact()
                 + (n.getToolEvidence().isBlank() ? "" : "\n\n# 实测执行证据\n" + n.getToolEvidence()));
         n.setStatus("DONE");
@@ -998,27 +1056,46 @@ public class SupplierJobService {
     }
 
     private String generatedDevelopmentPrompt(SupplierJob job, String currentContext) {
+        return generatedDevelopmentPrompt(job, currentContext, false);
+    }
+
+    /** force=true（T4）：门禁不满足时返回空串（本次派发不携带生成的开发提示词），不抛异常 */
+    private String generatedDevelopmentPrompt(SupplierJob job, String currentContext, boolean force) {
         if (!SupplierReferenceContext.digest(currentContext).equals(job.getGeneratedPromptDigest())) {
-            throw new IllegalArgumentException("请先用公司 Skill 生成开发提示词；材料变更后需要重新生成");
+            if (force) return "";
+            throw new CodegenGateException("请先用公司 Skill 生成开发提示词；材料变更后需要重新生成");
         }
         var entry = kbService.list(kbService.kbCode(job)).stream()
                 .filter(e -> ("job:" + job.getId() + "/node:generated-prompt").equals(e.getSource()) && "DONE".equals(e.getStatus()))
-                .findFirst().orElseThrow(() -> new IllegalArgumentException("生成的开发提示词已缺失，请重新生成"));
-        try { return kbService.readMd(entry.getId()); }
-        catch (java.io.IOException ex) { throw new IllegalArgumentException("无法读取开发提示词，请重新生成", ex); }
+                .findFirst();
+        if (entry.isEmpty()) {
+            if (force) return "";
+            throw new CodegenGateException("生成的开发提示词已缺失，请重新生成");
+        }
+        try { return kbService.readMd(entry.get().getId()); }
+        catch (java.io.IOException ex) {
+            if (force) return "";
+            throw new CodegenGateException("无法读取开发提示词，请重新生成", ex);
+        }
     }
 
-    public String codegenPrompt(Long jobId) {
+    public String codegenPrompt(Long jobId) { return codegenPrompt(jobId, false); }
+
+    /**
+     * force=true（T4）：跳过"会议文档+完整配置"与"带真实工具证据的实测节点"两道门禁，
+     * 按现有材料直接组装（缺失项由 buildCodegenPrompt 在提示词中如实标注"未提交/尚无实测档案"）。
+     */
+    public String codegenPrompt(Long jobId, boolean force) {
         SupplierJob job = jobRepo.findById(jobId).orElseThrow(() -> new IllegalArgumentException("工作不存在"));
-        if (!prepComplete(job.getMeetingDocUrl(), job.getConfigJson())) throw new IllegalArgumentException("请先保存会议文档和完整配置");
+        if (!force && !prepComplete(job.getMeetingDocUrl(), job.getConfigJson())) throw new CodegenGateException("请先保存会议文档和完整配置");
         String kbIndex = knowledge(job, "codegen").rendered() + referenceContext.load(job, true);
         String skills = formatSkills(job.getSkillsJson());
         List<SupplierJobNode> probes = nodeRepo.findByJobIdOrderBySeqAsc(jobId).stream()
                 .filter(x -> isProbeNode(x) && "DONE".equals(x.getStatus()) && !x.getToolEvidence().isBlank()).toList();
-        if (probes.isEmpty()) throw new IllegalArgumentException("请先完成带真实 Postman 工具证据（MCP 或 CLI）的实测节点");
-        String n2 = "WIKI".equals(job.getKnowledgeMode())
+        if (probes.isEmpty() && !force) throw new CodegenGateException("请先完成带真实 Postman 工具证据（MCP 或 CLI）的实测节点");
+        String n2 = probes.isEmpty() ? "" : ("WIKI".equals(job.getKnowledgeMode())
                 ? "实测结论已编译进本版本 Wiki；完整请求/响应按 Wiki 中的来源 ID 阅读。已校验实测节点：" + probes.stream().map(SupplierJobNode::getNodeId).toList()
-                : probes.stream().map(x -> x.getArtifact() + "\n\n" + x.getToolEvidence()).collect(java.util.stream.Collectors.joining("\n\n"));
+                : probes.stream().map(x -> x.getArtifact() + "\n\n" + x.getToolEvidence()).collect(java.util.stream.Collectors.joining("\n\n")));
         String prompt = buildCodegenPrompt(job.getSupplierName(), job.getSupplierCode(), job.getLibraryPath(),
                 kbIndex, skills, job.getMeetingDocUrl(), job.getSpecDocPath(), job.getConfigJson(), n2);
         if (prompt.length() > 240000) throw new IllegalArgumentException("开发上下文超过 240000 字符，请按使用阶段整理知识库或拆分任务");
@@ -1414,7 +1491,8 @@ public class SupplierJobService {
         return new SupplierKnowledgeService.Pack("TEXT", body, "", null, -1, List.of());
     }
 
-    private record Rendered(String prompt, SupplierKnowledgeService.Pack pack) {}
+    /** missingArtifacts（T3）：{artifact:nX} 引用了但上游尚无产物的节点 ID 列表——降级派发时透传给接口响应/页面提示 */
+    private record Rendered(String prompt, SupplierKnowledgeService.Pack pack, List<String> missingArtifacts) {}
     String renderPrompt(String template, SupplierJob job, String extra, String stage) { return renderWithKnowledge(template, job, extra, stage).prompt(); }
 
     private Rendered renderWithKnowledge(String template, SupplierJob job, String extra, String stage) {
@@ -1439,19 +1517,28 @@ public class SupplierJobService {
         if (!template.contains("{docs}")) {
             out = out + "\n\n" + docs;
         }
-        // {artifact:nX} 引用其他节点工件
+        // {artifact:nX} 引用其他节点工件。
+        // T3（11-17-free-node-execution）：上游无产物不再抛"请先完成上游任务"阻塞乱序执行——渲染为显式声明
+        // "（引用的 nX 尚无产物，本次未携带该上下文）"，绝不静默置空让模型误以为带了上下文；缺失清单随
+        // Rendered.missingArtifacts 透传到接口响应与节点交付记录（页面提示）。
         Matcher m = Pattern.compile("\\{artifact:([\\w-]+)}").matcher(out);
         StringBuilder sb = new StringBuilder();
+        List<String> missing = new java.util.ArrayList<>();
         while (m.find()) {
             String ref = m.group(1);
             String artifact = nodeRepo.findByJobIdAndNodeId(job.getId(), ref)
                     .map(SupplierJobNode::getArtifact).filter(a -> !a.isBlank())
-                    .orElseThrow(() -> new IllegalArgumentException("引用的节点 " + ref + " 还没有产物，请先完成上游任务"));
+                    .orElse("");
+            if (artifact.isBlank()) {
+                missing.add(ref);
+                m.appendReplacement(sb, Matcher.quoteReplacement("（引用的 " + ref + " 尚无产物，本次未携带该上下文）"));
+                continue;
+            }
             if (artifact.length() > 120000) throw new IllegalArgumentException("上游产物超过 120000 字符，请拆分任务：" + ref);
             m.appendReplacement(sb, Matcher.quoteReplacement(artifact));
         }
         m.appendTail(sb);
-        return new Rendered(sb + "\n\n" + referenceContext.load(job, false) + "\n\n" + ACTION_SPEC, pack);
+        return new Rendered(sb + "\n\n" + referenceContext.load(job, false) + "\n\n" + ACTION_SPEC, pack, List.copyOf(missing));
     }
 
     /** R5/R6/R7 统一动作规范：Trellis 四段纪律 + 卡点协议 + Postman 实测协议（追加在所有 agent prompt 末尾） */

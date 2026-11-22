@@ -38,7 +38,10 @@ class SupplierWikiMysqlIT {
         String original=kb.readMd(entry.getId()),sourceId="e"+entry.getId();
         when(model.chatInLane(anyString(),eq(instance.getId()),anyString(),anyString(),nullable(String.class),any(TurnListener.class))).thenAnswer(call->{
             String lane=call.getArgument(0);if(lane.startsWith("wiki-source"))return new Gson().toJson(Map.of("summary","商务规则","facts",List.of(Map.of("statement",SupplierWikiTest.QUOTE,"quote",SupplierWikiTest.QUOTE))));
-            if(lane.startsWith("wiki-synthesis"))return SupplierWikiTest.publication().toString().replace("\"sourceId\":\"e1\"","\"sourceId\":\""+sourceId+"\"");
+            // 存量夹具修复（非本任务回归，与本 diff 中 SupplierWorkflowMysqlIT.wikiArm… 的同款修复同因）：11-06(087a7b3)
+            // 把综合 lane 改名为 "wiki-syn-<rev>-b<批>-a<次>"，本 stub 仍匹配旧前缀 "wiki-synthesis" → 必然抛
+            // IllegalStateException → 批次全灭 → 编译 FAILED。对齐现行 lane 命名；生产代码零改动。
+            if(lane.startsWith("wiki-syn"))return SupplierWikiTest.publication().toString().replace("\"sourceId\":\"e1\"","\"sourceId\":\""+sourceId+"\"");
             throw new IllegalStateException("lane 只应承载 Wiki 编译，出现: "+lane);
         });
         // 11-05：runNode 走实例主会话（与飞书对话同 sessionID/队列/上下文），不再走独立 lane
