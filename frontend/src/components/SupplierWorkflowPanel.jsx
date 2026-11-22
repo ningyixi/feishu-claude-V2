@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { useConfirm, DraftPage } from './ui/FloatingUI'
 import ReactMarkdown from 'react-markdown'
 
-const labels = { NOT_STARTED: '尚未启动', ACTIVE: '运行中', PAUSED: '已暂停', CANCELLED: '已取消', COMPLETED: '已完成' }
+const labels = { NOT_STARTED: '尚未启动', ACTIVE: '运行中', PAUSED: '已暂停', CANCELLED: '已取消', COMPLETED: '已完成', FAILED: '已停止' }
 export default function SupplierWorkflowPanel({ job, showToast, onManaged }) {
   const confirmAction = useConfirm()
   const [state, setState] = useState(null)
@@ -15,7 +15,10 @@ export default function SupplierWorkflowPanel({ job, showToast, onManaged }) {
     try {
       const response = await fetch(api); const data = await response.json()
       if (!response.ok) throw new Error(data.error || '流程加载失败')
-      setState(data); onManaged?.(data.status !== 'NOT_STARTED')
+      setState(data)
+      // T6（11-17-free-node-execution）：只有"活着的"流程才算托管——CANCELLED/FAILED/COMPLETED 的历史 run
+      // 不再锁死工作台手动操作（与后端 assertLegacyWriteAllowed 同口径）
+      onManaged?.(data.status === 'ACTIVE' || data.status === 'PAUSED')
     } catch (error) { showToast(error.message, 'error') }
   }
   useEffect(() => { load(); const timer = setInterval(load, 3000); return () => clearInterval(timer) }, [job.id])
@@ -50,6 +53,7 @@ export default function SupplierWorkflowPanel({ job, showToast, onManaged }) {
         <span>通知：{state.run?.notifyFeishu ? `飞书 ${state.run.recipient}` : '仅工作台待办'}</span>
       </div>
       <p style={{ fontSize: 12, opacity: .7 }}>暂停会阻止后续派发；已经开始的实例执行可继续产出结果。审批不能跳过接口实测、公司 spec / Skill 或 Wiki 就绪检查。</p>
+      {state.status === 'FAILED' && state.run?.error && <p style={{ fontSize: 12, color: 'var(--error)' }}>停止原因：{state.run.error}（流程不再推进；节点仍可在下方手动执行）</p>}
       {state.tasks?.map(task => <DraftPage key={task.id} dirty={!!answers[task.id]?.trim()}><article id={`task-${task.id}`} style={{ border: '1px solid var(--accent)', borderRadius: 8, padding: 16, marginTop: 12 }}>
         <h4>{task.name}</h4>
         <p>{task.description}</p>

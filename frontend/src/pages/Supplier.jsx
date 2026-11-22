@@ -342,20 +342,30 @@ function GameView({ jobId, onBack, showToast }) {
   const cur = nodes.find(n => n.nodeId === (selected || job.currentNodeId)) || nodes[0]
   const running = nodes.some(n => n.status === 'RUNNING')
 
-  async function runNode(nodeId) {
-    if (managed) return showToast('请在持续工作流的待办中处理此节点', 'error')
+  // T1/T4（11-17-free-node-execution）：托管工作不再拦手动执行；后端 codegen 门禁拦截时带 forceable 标记，
+  // 二次确认写清后果后带 force=true 重试（用户显式确认才可强制，默认仍拦）
+  async function runNode(nodeId, force = false) {
     const res = await fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/run`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ instruction }),
+      body: JSON.stringify({ instruction, force }),
     })
     const data = await res.json().catch(() => ({}))
-    if (!res.ok) return showToast(data.error || '执行失败', 'error')
+    if (!res.ok) {
+      if (data.forceable && !force && await confirmAction({
+        title: '写代码门禁未通过',
+        body: `${data.error}\n\n强制执行将跳过该检查：实例会在缺少门禁要求材料（公司 Skill 生成的开发提示词 / 会议文档与配置 / 实测证据）的情况下开工，产出可能缺少对应内容，需要你自行核对把关。`,
+        confirmLabel: '仍要强制执行',
+      })) return runNode(nodeId, true)
+      return showToast(data.error || '执行失败', 'error')
+    }
     setInstruction('')
-    showToast('▶ 已交给实例执行，完成后工件会出现在下方（页面自动刷新状态）', 'success')
+    const miss = data.missingArtifacts || []
+    showToast(miss.length
+      ? `▶ 已交给实例执行；注意：上游 ${miss.join('、')} 尚无产物，本次未携带该上下文`
+      : '▶ 已交给实例执行，完成后工件会出现在下方（页面自动刷新状态）', 'success')
     load()
   }
   async function answerNode(nodeId) {
-    if (managed) return showToast('请在持续工作流的待办中处理此节点', 'error')
     if (!steerAnswer.trim()) return
     const res = await fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/answer`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -377,15 +387,25 @@ function GameView({ jobId, onBack, showToast }) {
     showToast(data.abortedTurn ? '已解除占用（实例活跃轮次已中止），可重新执行该节点' : '已解除占用，可重新执行该节点', 'success')
     load()
   }
-  async function completeNode(nodeId) {
-    if (managed) return showToast('请在持续工作流的待办中处理此节点', 'error')
-    await fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/complete`, { method: 'POST' })
+  async function completeNode(nodeId, force = false) {
+    const res = await fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/complete`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ force }),
+    })
+    const data = await res.json().catch(() => ({}))
+    if (!res.ok) {
+      if (data.forceable && !force && await confirmAction({
+        title: '完成门禁未通过',
+        body: `${data.error}\n\n强制标记完成将跳过该检查：门禁要求的材料（会议文档与配置 / 公司 Skill 生成的开发提示词 / Postman 实测证据）未齐备，节点仍会标记完成并归档进知识库，产出质量需要你自行核对把关。`,
+        confirmLabel: '仍要强制完成',
+      })) return completeNode(nodeId, true)
+      return showToast(data.error || '标记完成失败', 'error')
+    }
     showToast('✅ 节点完成', 'success')
     setSelected(null)   // 自动跳到下一个推荐节点
     load()
   }
   async function saveArtifact(nodeId) {
-    if (managed) return showToast('请在持续工作流的待办中处理此节点', 'error')
     await fetch(`/api/supplier-jobs/${jobId}/nodes/${nodeId}/artifact`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ artifact: artifactDraft }),
@@ -475,6 +495,13 @@ function GameView({ jobId, onBack, showToast }) {
       </div>
 
       <SupplierWorkflowPanel job={job} showToast={showToast} onManaged={setManaged} />
+      {/* T1（11-17-free-node-execution）：托管不再拦截手动操作，改为黄条提示——手动执行与流程待办互不推进 */}
+      {managed && (
+        <div style={{ margin: '0 0 14px', padding: '10px 14px', borderRadius: 8, border: '1px solid rgba(245,158,11,.45)', background: 'rgba(245,158,11,.08)', color: '#b45309', fontSize: 13, lineHeight: 1.7 }}>
+          ⚠️ 此工作已由持续工作流托管：下方节点仍可自由手动执行、答复、完成与编辑工件，但<b>手动执行不会推进流程待办与审批</b>；
+          已被手动完成的节点引擎不会重复派发。若要按流程推进，请处理上方工作流待办。
+        </div>
+      )}
       <div className="supplier-workspace-grid" style={{ display: 'flex', gap: 14, alignItems: 'flex-start' }}>
         {/* 左：节点操作卡 */}
         <div className="card" style={{ flex: 1, minWidth: 0, padding: '16px 20px' }}>

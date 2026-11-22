@@ -26,6 +26,12 @@ public class SupplierJobController {
 
     @org.springframework.beans.factory.annotation.Autowired
     private org.springframework.beans.factory.ObjectProvider<com.lark.oapi.sample.ws.service.SupplierWorkflowService> supplierWorkflows;
+    /**
+     * 托管闸门（T1/T6，11-17-free-node-execution）：现仅保留在工作信息编辑(update)与删除(delete)上，
+     * 且只拦"活着的"流程（ACTIVE/PAUSED，见 assertLegacyWriteAllowed）。
+     * 节点操作（run/answer/complete/artifact）已全面放开——托管工作允许手动乱序执行，
+     * 引擎侧由 plan() 的 SKIPPED 机制防重复派发（T2），前端以黄条提示"手动执行不推进流程待办"。
+     */
     private void manualOnly(Long id) { supplierWorkflows.getObject().assertLegacyWriteAllowed(id); }
     private final SupplierJobService jobService;
     private final WorkflowTemplateRepository templateRepo;
@@ -141,19 +147,30 @@ public class SupplierJobController {
 
     // ===== 节点操作 =====
 
-    /** 执行 agent 节点（异步；body 可带 instruction 作为纠正/补充指示） */
+    /** 执行 agent 节点（异步；body 可带 instruction 作为纠正/补充指示，force=true 为 T4 门禁强制通道） */
     @PostMapping(value = "/api/supplier-jobs/{id}/nodes/{nodeId}/run", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> runNode(@PathVariable Long id, @PathVariable String nodeId,
                                           @RequestBody(required = false) String rawBody) {
         try {
             String instruction = "";
+            boolean force = false;
             if (rawBody != null && !rawBody.isBlank()) {
                 JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
                 instruction = opt(body, "instruction");
+                force = body.has("force") && !body.get("force").isJsonNull() && body.get("force").getAsBoolean();
             }
-            manualOnly(id);
-            jobService.runNode(id, nodeId, instruction);
-            return ResponseEntity.ok("{\"ok\":true}");
+            // T1（11-17-free-node-execution）：托管工作也允许手动执行任意节点，不再走 manualOnly 闸门
+            var missing = jobService.runNode(id, nodeId, instruction, force);
+            JsonObject o = new JsonObject();
+            o.addProperty("ok", true);
+            if (missing != null && !missing.isEmpty()) {   // T3：上游无产物 → 降级派发，响应携带缺失清单供页面提示
+                com.google.gson.JsonArray arr = new com.google.gson.JsonArray();
+                missing.forEach(arr::add);
+                o.add("missingArtifacts", arr);
+            }
+            return ResponseEntity.ok(o.toString());
+        } catch (SupplierJobService.CodegenGateException e) {
+            return errForceable(e.getMessage());   // T4：门禁默认仍拦；前端据 forceable 弹二次确认后带 force 重试
         } catch (IllegalArgumentException e) {
             return err(e.getMessage());
         }
@@ -165,7 +182,7 @@ public class SupplierJobController {
                                              @RequestBody String rawBody) {
         try {
             JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
-            manualOnly(id);
+            // T1：托管工作同样可手动答复卡点（引擎侧 input 待办仍在，两边互不推进，前端黄条已提示）
             jobService.answerNode(id, nodeId, opt(body, "answer"));
             return ResponseEntity.ok("{\"ok\":true}");
         } catch (IllegalArgumentException e) {
@@ -176,7 +193,8 @@ public class SupplierJobController {
     /**
      * S3 解除占用（11-17-unblock-instance-chat）：僵尸 RUNNING 节点打回待执行，会话有活跃轮次先中止。
      * <b>刻意不设 manualOnly 托管闸门</b>——引擎托管的工作同样可能产生僵尸节点，用户必须始终能解锁
-     * （PRD 硬要求）；这是唯一的例外通道，其余写端点维持闸门不变。也不动工作流顺序门禁。
+     * （PRD 硬要求）。11-17-free-node-execution 后其余节点写端点（run/answer/complete/artifact）
+     * 也已放开，闸门仅保留在工作信息编辑与删除上（且只拦 ACTIVE/PAUSED 的活流程）。
      */
     @PostMapping(value = "/api/supplier-jobs/{id}/nodes/{nodeId}/release", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> releaseNode(@PathVariable Long id, @PathVariable String nodeId) {
@@ -191,13 +209,21 @@ public class SupplierJobController {
         }
     }
 
-    /** 玩家确认节点完成：蓝→绿 */
+    /** 玩家确认节点完成：蓝→绿（body 可带 force=true 走 T4 门禁强制通道） */
     @PostMapping(value = "/api/supplier-jobs/{id}/nodes/{nodeId}/complete", produces = "application/json;charset=UTF-8")
-    public ResponseEntity<String> completeNode(@PathVariable Long id, @PathVariable String nodeId) {
+    public ResponseEntity<String> completeNode(@PathVariable Long id, @PathVariable String nodeId,
+                                               @RequestBody(required = false) String rawBody) {
         try {
-            manualOnly(id);
-            jobService.completeNode(id, nodeId);
+            boolean force = false;
+            if (rawBody != null && !rawBody.isBlank()) {
+                JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+                force = body.has("force") && !body.get("force").isJsonNull() && body.get("force").getAsBoolean();
+            }
+            // T1：托管工作也允许手动完成节点（引擎 plan() 会把已完成节点记 SKIPPED，不再重复派发，T2）
+            jobService.completeNode(id, nodeId, false, force);
             return ResponseEntity.ok("{\"ok\":true}");
+        } catch (SupplierJobService.CodegenGateException e) {
+            return errForceable(e.getMessage());
         } catch (IllegalArgumentException e) {
             return err(e.getMessage());
         }
@@ -209,7 +235,7 @@ public class SupplierJobController {
                                                @RequestBody String rawBody) {
         try {
             JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
-            manualOnly(id);
+            // T1：托管工作也允许手动编辑工件（同 run/complete，引擎不因此重复派发）
             jobService.saveArtifact(id, nodeId, opt(body, "artifact"));
             return ResponseEntity.ok("{\"ok\":true}");
         } catch (IllegalArgumentException e) {
@@ -448,6 +474,14 @@ public class SupplierJobController {
     private ResponseEntity<String> err(String msg) {
         JsonObject o = new JsonObject();
         o.addProperty("error", msg != null ? msg : "请求无效");
+        return ResponseEntity.badRequest().body(o.toString());
+    }
+
+    /** T4：codegen 门禁拦截 + forceable 标记——前端据此弹二次确认（写清后果），确认后带 force=true 重试 */
+    private ResponseEntity<String> errForceable(String msg) {
+        JsonObject o = new JsonObject();
+        o.addProperty("error", msg != null ? msg : "请求无效");
+        o.addProperty("forceable", true);
         return ResponseEntity.badRequest().body(o.toString());
     }
 }
