@@ -221,8 +221,12 @@ class AdHocServiceTest {
                 () -> h.service.create("t", 5L, dir.resolve("不存在.pdf").toString()));
         assertTrue(missing.getMessage().contains("文件不存在"), missing.getMessage());
         var unknown = assertThrows(IllegalArgumentException.class,
-                () -> h.service.create("t", 5L, "D:\\docs\\a.docx"));
+                () -> h.service.create("t", 5L, "D:\\docs\\a.csv"));
         assertTrue(unknown.getMessage().contains("无法识别"), unknown.getMessage());
+        // 11-23 起 .docx 是受支持类型：不存在的 docx 走"文件不存在"分支而非"无法识别"
+        var missingOffice = assertThrows(IllegalArgumentException.class,
+                () -> h.service.create("t", 5L, "D:\\docs\\a.docx"));
+        assertTrue(missingOffice.getMessage().contains("文件不存在"), missingOffice.getMessage());
         assertThrows(IllegalArgumentException.class, () -> h.service.create("t", 5L, "   \n "));
     }
 
@@ -478,7 +482,12 @@ class AdHocServiceTest {
         assertEquals("html", AdHocService.detectType("D:\\docs\\a.html"));
         assertEquals("md", AdHocService.detectType("D:\\docs\\a.markdown"));
         assertEquals("md", AdHocService.detectType("D:\\docs\\a.txt"));
-        assertThrows(IllegalArgumentException.class, () -> AdHocService.detectType("D:\\docs\\a.docx"));
+        // 11-23-kb-office-documents：Office 类型三入口一致（判定收口到 DocParser.detectSourceType）
+        assertEquals("docx", AdHocService.detectType("D:\\docs\\a.DOCX"));
+        assertEquals("pptx", AdHocService.detectType("D:\\docs\\a.pptx"));
+        assertEquals("xlsx", AdHocService.detectType("D:\\docs\\a.xlsx"));
+        assertEquals("doc", AdHocService.detectType("D:\\docs\\a.doc"), ".doc 是标记类型：入库时按 magic bytes 定真实格式");
+        assertThrows(IllegalArgumentException.class, () -> AdHocService.detectType("D:\\docs\\a.ppt"));
         assertThrows(IllegalArgumentException.class, () -> AdHocService.detectType("ftp://a.cn"));
     }
 

@@ -187,7 +187,7 @@ class SupplierKbHtmlTest {
         service = newService();
         SupplierKbEntry chat = givenEntry(9L, "chat", "", "沟通记录");
         IllegalArgumentException ex = assertThrows(IllegalArgumentException.class, () -> service.reparse(chat.getId()));
-        assertTrue(ex.getMessage().contains("仅 url/pdf/html/md 支持解析"), ex.getMessage());
+        assertTrue(ex.getMessage().contains("仅 url/pdf/html/md/docx/pptx/xlsx/doc 支持解析"), ex.getMessage());
     }
 
     private SupplierKbEntry givenEntry(Long id, String type, String source, String title) {

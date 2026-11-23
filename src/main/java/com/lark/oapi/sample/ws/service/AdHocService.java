@@ -187,6 +187,10 @@ public class AdHocService {
             if (!"url".equals(type) && !Files.isRegularFile(Paths.get(value))) {
                 throw new IllegalArgumentException("文档来源文件不存在: " + value);
             }
+            // Office 文件建档时即按 magic bytes 预检：加密/老式 .ppt/.xls/损坏/名不符实立刻给可读错误，不建任务
+            if (List.of("docx", "pptx", "xlsx", "doc").contains(type)) {
+                SupplierOfficeParser.resolveOfficeFile(Paths.get(value), type);
+            }
         }
 
         AdHocTask t = new AdHocTask();
@@ -218,15 +222,12 @@ public class AdHocService {
         return List.copyOf(lines);
     }
 
-    /** 来源行类型识别（与 KB 入库管线的映射一致）：http(s) → url；扩展名 → pdf / html / md；其余拒绝 */
+    /**
+     * 来源行类型识别：统一走 {@link DocParser#detectSourceType}（三入口同一判定，O3）。
+     * http(s) → url；扩展名 → pdf / html / md / docx / pptx / xlsx；.doc → 标记类型（入库时按 magic bytes 定真实格式）；其余拒绝。
+     */
     static String detectType(String line) {
-        String v = line == null ? "" : line.strip();
-        String low = v.toLowerCase();
-        if (low.startsWith("http://") || low.startsWith("https://")) return "url";
-        if (low.endsWith(".pdf")) return "pdf";
-        if (low.endsWith(".html") || low.endsWith(".htm")) return "html";
-        if (low.endsWith(".md") || low.endsWith(".markdown") || low.endsWith(".txt")) return "md";
-        throw new IllegalArgumentException("无法识别的文档来源（支持 http(s) 链接 / .pdf/.html/.htm/.md/.markdown/.txt 本地路径）: " + v);
+        return DocParser.detectSourceType(line);
     }
 
     // ===== 重试 / 删除 =====
@@ -340,10 +341,10 @@ public class AdHocService {
             kbService.add(kbCode, type, value, null);
         }
 
-        // 2) 触发解析（RAW=刚入库原文引用 / FAILED=上次解析失败；url/pdf/html 走异步解析，md 入库即 DONE）
+        // 2) 触发解析（RAW=刚入库原文引用 / FAILED=上次解析失败；url/pdf/html/office 走异步解析，md、doc 入库即 DONE）
         for (SupplierKbEntry e : kbService.list(kbCode)) {
             if (("RAW".equals(e.getStatus()) || "FAILED".equals(e.getStatus()))
-                    && List.of("url", "pdf", "html", "md").contains(e.getType())) {
+                    && DocParser.PARSABLE_TYPES.contains(e.getType())) {
                 kbService.reparse(e.getId());
             }
         }

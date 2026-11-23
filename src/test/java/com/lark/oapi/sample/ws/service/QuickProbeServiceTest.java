@@ -474,7 +474,12 @@ class QuickProbeServiceTest {
         // 空格/括号是正常路径字符：整行识别为单一 html 来源，不被按空格拆坏
         assertEquals("html", QuickProbeService.detectType("D:\\supplier-docs\\DIRS\\OTA Default Interface (1).html"));
         assertEquals("html", QuickProbeService.detectType("  D:\\supplier-docs\\OTA Default Interface (1).htm  "));
-        assertThrows(IllegalArgumentException.class, () -> QuickProbeService.detectType("D:\\docs\\api.docx"));
+        // 11-23-kb-office-documents：Office 类型三入口一致（判定收口到 DocParser.detectSourceType）
+        assertEquals("docx", QuickProbeService.detectType("D:\\docs\\api.DOCX"));
+        assertEquals("pptx", QuickProbeService.detectType("D:\\docs\\kick off.pptx"));
+        assertEquals("xlsx", QuickProbeService.detectType("D:\\docs\\hotel list.xlsx"));
+        assertEquals("doc", QuickProbeService.detectType("D:\\docs\\legacy.doc"));
+        assertThrows(IllegalArgumentException.class, () -> QuickProbeService.detectType("D:\\docs\\api.xls"));
         assertThrows(IllegalArgumentException.class, () -> QuickProbeService.detectType("ftp://x"));
     }
 

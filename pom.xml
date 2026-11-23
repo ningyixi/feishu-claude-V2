@@ -80,6 +80,14 @@
             <version>2.11.0</version>
         </dependency>
 
+        <!-- 老式 Word 97-2003 (.doc/OLE2) 解析（11-23-kb-office-documents O2）：HWPF/WordExtractor。
+             docx/pptx/xlsx 走零依赖的 SupplierOfficeParser（java.util.zip + StAX），不依赖 POI。 -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-scratchpad</artifactId>
+            <version>5.2.3</version>
+        </dependency>
+
         <!-- 供应商知识库解析管线（R2）：PDF 文本提取 / HTML 清洗 / HTML→Markdown -->
         <dependency>
             <groupId>org.apache.pdfbox</groupId>

@@ -145,6 +145,7 @@ public class SupplierKbService {
                     repo.save(e);
                 }
             }
+            case "docx", "pptx", "xlsx", "doc" -> addOffice(e, type, value.trim());
             case "chat", "note" -> {
                 e.setSource("");   // 文本内容直接进 md，source 留空
                 e.setStatus("DONE");
@@ -167,11 +168,77 @@ public class SupplierKbService {
         return e;
     }
 
+    /**
+     * Office 文档入库（11-23-kb-office-documents）：真实格式一律按 magic bytes 判定，不信任扩展名（AC2b）。
+     * <ul>
+     *   <li>OOXML(docx/pptx/xlsx)：同 pdf/html 语义——入库 RAW 原文引用，点「解析」后异步提取转 MD；</li>
+     *   <li>Word 97-2003(.doc/OLE2)：HWPF <b>同步</b>提取后立即 DONE——因为 O2b 要求加密/损坏/空正文
+     *       给分类可读错误且<b>不产生任何 KB 条目</b>，只有先解析成功才允许建行；</li>
+     *   <li>扩展名与真实字节不符（docx 改名 .doc、反之亦然）：按真实字节走对应解析器，meta 记 mislabeledExtension=true。</li>
+     * </ul>
+     */
+    private void addOffice(SupplierKbEntry e, String declaredType, String value) {
+        Path p = Paths.get(value);
+        String fn = p.getFileName() == null ? "" : p.getFileName().toString().toLowerCase();
+        if (!fn.endsWith("." + declaredType))
+            throw new IllegalArgumentException("仅接受 ." + declaredType + " 文件: " + value);
+        SupplierOfficeParser.Resolution res = SupplierOfficeParser.resolveOfficeFile(p, declaredType);
+        // 注意：条目 type 保留<b>声明类型</b>（两条流水线的幂等去重与归属匹配都按 type+source，改类型会打破匹配）；
+        // 真实格式只在解析分派时生效，名不符实以 meta.mislabeledExtension 诚实标注（AC2b）
+        e.setSource(value);
+        if (res.mislabeled()) e.setMetaJson("{\"mislabeledExtension\":true}");
+        if (!"doc".equals(res.effectiveType())) {
+            e.setStatus("RAW");                      // OOXML：点"解析"后异步提取（两条流水线会自动触发）
+            repo.save(e);
+            return;
+        }
+        SupplierOfficeParser.Parsed r;
+        try {
+            r = SupplierOfficeParser.docToMarkdown(p);
+        } catch (SupplierOfficeParser.DocParseException ex) {
+            throw new IllegalArgumentException(ex.getMessage(), ex);   // 加密/损坏/老式ppt、xls：分类引导，不入库
+        } catch (IOException ex) {
+            throw new IllegalArgumentException(".doc 解析失败: " + ex.getMessage(), ex);
+        }
+        if (r.extractedChars() < SupplierOfficeParser.MIN_TEXT_CHARS) {
+            throw new IllegalArgumentException(r.extractedChars() == 0
+                    ? "正文为空（未抽取到任何文字），不予入库。下一步：请在 Word 里「另存为 .docx」或导出 PDF 后重新入库"
+                    : "抽取内容极少（" + r.extractedChars() + " 字），该文件可能以图片/扫描件为主，不予入库。"
+                      + "下一步：请在 Word 里「另存为 .docx」或导出 PDF 后重新入库；或用「笔记」人工录入要点");
+        }
+        e.setStatus("PENDING");
+        repo.save(e);                                // 先取 id（产物文件名用）
+        try {
+            String md = "> 来源Word97-2003文件: " + value + "\n\n" + DocParser.chunk(r.markdown().strip() + "\n");
+            writeMd(e, md, officeMeta(r, res));
+            e.setStatus("DONE");
+            e.setError("");
+        } catch (IOException ex) {
+            e.setStatus("FAILED");
+            e.setError("写入条目文件失败: " + ex.getMessage());
+        }
+        repo.save(e);
+    }
+
+    /** Office 解析产物 meta：诚实统计（截断/表格降级/行列数/页数），供页面显示与排查 */
+    private static JsonObject officeMeta(SupplierOfficeParser.Parsed r, SupplierOfficeParser.Resolution res) {
+        return meta(o -> {
+            o.addProperty("chars", r.markdown().length());
+            o.addProperty("localOffice", true);
+            if (res != null && res.mislabeled()) o.addProperty("mislabeledExtension", true);
+            if (r.tablesLost()) o.addProperty("tablesLost", true);
+            if (r.truncated()) o.addProperty("truncated", true);
+            if (r.rows() >= 0) { o.addProperty("rows", r.rows()); o.addProperty("cols", r.cols()); }
+            if (r.sheets() >= 0) o.addProperty("sheets", r.sheets());
+            if (r.slides() >= 0) o.addProperty("slides", r.slides());
+        });
+    }
+
     /** 解析入口（面板"解析/重解析"按钮）：url+site → 站点爬虫；其余单页解析 */
     public void reparse(Long id) {
         SupplierKbEntry e = require(id);
-        if (!List.of("url", "pdf", "html", "md").contains(e.getType())) {
-            throw new IllegalArgumentException("仅 url/pdf/html/md 支持解析");
+        if (!DocParser.PARSABLE_TYPES.contains(e.getType())) {
+            throw new IllegalArgumentException("仅 url/pdf/html/md/docx/pptx/xlsx/doc 支持解析");
         }
         e.setStatus("PENDING");
         e.setError("");
@@ -271,11 +338,14 @@ public class SupplierKbService {
                 if ("url".equals(type)) {
                     mapped = "url";
                 } else {
-                    // 本地路径按扩展名分流（bug 修复：.md 曾被误当 pdf 拒收；.html/.htm 曾被误归 pdf）
-                    String low = value.trim().toLowerCase();
-                    if (low.endsWith(".md") || low.endsWith(".markdown") || low.endsWith(".txt")) mapped = "md";
-                    else if (low.endsWith(".html") || low.endsWith(".htm")) mapped = "html";
-                    else mapped = "pdf";
+                    // 本地路径统一走 DocParser.detectSourceType —— 三入口同一判定（O3；历史 bug：.md 曾被误当 pdf
+                    // 拒收、.html/.htm 曾被误归 pdf，11-23 起判定收口到一处，不允许再各自维护扩展名表）
+                    try {
+                        mapped = DocParser.detectSourceType(value);
+                    } catch (IllegalArgumentException ex) {
+                        log.warn("[SupplierKb] 存量 docs 同步跳过（类型不可识别）: {}（{}）", value, ex.getMessage());
+                        continue;
+                    }
                 }
                 if (repo.existsByKbCodeAndTypeAndSource(kbCode, mapped, value.trim())) continue;
                 if (removedRepo.existsByKbCodeAndTypeAndSource(kbCode, mapped, value.trim())) continue;   // 已删除过的不再带回
@@ -427,6 +497,26 @@ public class SupplierKbService {
             } else if ("html".equals(e.getType())) {
                 md = htmlFileToMarkdown(Paths.get(e.getSource()));
                 meta.addProperty("localHtml", true);
+            } else if (List.of("docx", "pptx", "xlsx", "doc").contains(e.getType())) {
+                Path src = Paths.get(e.getSource());
+                // 真实格式按 magic bytes 重判（文件可能已被替换/本就是改名件）；条目 type 保持不变，
+                // 名不符实以 meta.mislabeledExtension 标注（流水线幂等匹配依赖声明类型）
+                SupplierOfficeParser.Resolution res = SupplierOfficeParser.resolveOfficeFile(src, e.getType());
+                SupplierOfficeParser.Parsed r = SupplierOfficeParser.parse(src, res.effectiveType());
+                if (res.mislabeled() || parseMeta(e.getMetaJson()).has("mislabeledExtension"))
+                    meta.addProperty("mislabeledExtension", true);
+                // O5 诚实：文字型 Office 抽取正文过少 → 判失败给指引，不冒充"已解析"（表格类 xlsx 不适用）
+                if (!"xlsx".equals(res.effectiveType()) && r.extractedChars() < SupplierOfficeParser.MIN_TEXT_CHARS)
+                    throw new IOException("抽取内容极少（" + r.extractedChars() + " 字），该文件可能以图片/截图为主，"
+                            + "建议改用 URL 或 PDF 来源；或人工把要点用「笔记」录入");
+                md = "> 来源" + officeLabel(res.effectiveType()) + "文件: " + e.getSource() + "\n\n"
+                        + DocParser.chunk(r.markdown().strip() + "\n");
+                meta.addProperty("localOffice", true);
+                if (r.truncated()) meta.addProperty("truncated", true);
+                if (r.tablesLost()) meta.addProperty("tablesLost", true);
+                if (r.rows() >= 0) { meta.addProperty("rows", r.rows()); meta.addProperty("cols", r.cols()); }
+                if (r.sheets() >= 0) meta.addProperty("sheets", r.sheets());
+                if (r.slides() >= 0) meta.addProperty("slides", r.slides());
             } else {
                 return;   // chat/note 不走机析
             }
@@ -661,12 +751,23 @@ public class SupplierKbService {
         catch (Exception e) { return new JsonObject(); }
     }
 
+    /** 产物来源头里的格式称呼 */
+    private static String officeLabel(String type) {
+        return switch (type) {
+            case "docx" -> "Word(docx)";
+            case "pptx" -> "PPT(pptx)";
+            case "xlsx" -> "Excel(xlsx)";
+            case "doc" -> "Word97-2003(doc)";
+            default -> "Office";
+        };
+    }
+
     private static String deriveTitle(String type, String value) {
         return switch (type) {
             case "url" -> value.length() > 80 ? value.substring(0, 80) + "…" : value;
-            case "pdf", "md", "html" -> {
+            case "pdf", "md", "html", "docx", "pptx", "xlsx", "doc" -> {
                 String name = Paths.get(value).getFileName().toString();
-                yield name.replaceAll("(?i)\\.(pdf|md|markdown|txt|html|htm)$", "");
+                yield name.replaceAll("(?i)\\.(pdf|md|markdown|txt|html|htm|docx|pptx|xlsx|doc)$", "");
             }
             default -> {
                 String first = value.strip().lines().findFirst().orElse("记录");
@@ -682,6 +783,9 @@ public class SupplierKbService {
             case "html" -> "🌐";
             case "md" -> "📃";
             case "chat" -> "💬";
+            case "docx", "doc" -> "📘";
+            case "pptx" -> "📽";
+            case "xlsx" -> "📗";
             default -> "📝";
         };
     }

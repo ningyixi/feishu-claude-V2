@@ -36,7 +36,7 @@ public class SupplierKbController {
         return kbService.list(kbCode);
     }
 
-    /** 新增条目：{"type":"url|pdf|html|md|chat|note","value":"链接/路径/文本","title":"可选","site":false} */
+    /** 新增条目：{"type":"url|pdf|html|md|docx|pptx|xlsx|doc|chat|note","value":"链接/路径/文本","title":"可选","site":false} */
     @PostMapping(value = "/{kbCode}/entries", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> add(@PathVariable String kbCode, @RequestBody String rawBody) {
         try {

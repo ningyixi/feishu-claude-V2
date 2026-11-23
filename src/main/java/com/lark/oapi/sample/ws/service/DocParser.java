@@ -53,6 +53,34 @@ public final class DocParser {
     /** 抓取结果：Markdown 全文、页面标题、最终 URL（重定向后） */
     public record Fetched(String markdown, String title, String finalUrl) {}
 
+    // ===== 来源类型判定（三入口唯一权威：AdHocService / QuickProbeService / SupplierKbService 必须都走这里） =====
+
+    /** 支持「点解析」异步机析的条目类型（reparse 白名单与两条流水线的触发白名单共用，防再走散） */
+    public static final java.util.List<String> PARSABLE_TYPES =
+            java.util.List.of("url", "pdf", "html", "md", "docx", "pptx", "xlsx", "doc");
+
+    /**
+     * 文档来源行 → KB 条目类型（11-23-kb-office-documents O3：三入口同一判定）。
+     * http(s) → url；扩展名 → pdf / html / md / docx / pptx / xlsx；
+     * .doc 返回标记类型 "doc"——真实格式由 {@link SupplierOfficeParser#resolveOfficeFile} 按 magic bytes 定
+     * （OLE2-Word → 真解析；实为 OOXML(zip) → 按 docx/pptx/xlsx 收录并记 mislabeledExtension），不许按扩展名信任。
+     * 其余抛 IllegalArgumentException。
+     */
+    public static String detectSourceType(String line) {
+        String v = line == null ? "" : line.strip();
+        String low = v.toLowerCase();
+        if (low.startsWith("http://") || low.startsWith("https://")) return "url";
+        if (low.endsWith(".pdf")) return "pdf";
+        if (low.endsWith(".html") || low.endsWith(".htm")) return "html";
+        if (low.endsWith(".md") || low.endsWith(".markdown") || low.endsWith(".txt")) return "md";
+        if (low.endsWith(".docx")) return "docx";
+        if (low.endsWith(".pptx")) return "pptx";
+        if (low.endsWith(".xlsx")) return "xlsx";
+        if (low.endsWith(".doc")) return "doc";
+        throw new IllegalArgumentException("无法识别的文档来源（支持 http(s) 链接 / .pdf/.html/.htm/.md/.markdown/.txt"
+                + "/.docx/.pptx/.xlsx/.doc 本地路径；老式 .ppt/.xls 请先在 Office 里另存为对应新格式）: " + v);
+    }
+
     // ===== URL =====
 
     /** SSRF 防护：仅 http(s)，拒绝回环/私网/链路本地/任意地址（含 IPv6） */
