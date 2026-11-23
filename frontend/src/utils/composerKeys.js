@@ -21,6 +21,24 @@
 /** 多行框统一提示文案（放 placeholder；不要另加 title/tooltip 把同一句叠加两遍） */
 export const COMPOSER_HINT = 'Enter 发送 · Shift/Ctrl+Enter 换行'
 
+/** 聊天多行框自适应高度上限（约 6 行）；超过后框内滚动，页面不再被顶长 */
+export const COMPOSER_MAX_HEIGHT = 150
+
+/**
+ * 聊天 composer 的 textarea 自适应高度（11-23-adhoc-append-sources X1）：
+ * 先收回 'auto' 量真实 scrollHeight，再长到 maxHeight 为止（超出内部滚动）。
+ * 调用时机：受控 value 每次变化（含换行插入）与发送清空后——清空即自然回到单行高度。
+ * 只动 style.height，不碰 value/光标/撤销栈，与 {@link insertLineBreak} 的编辑通道互不干扰。
+ *
+ * @param {HTMLTextAreaElement|null|undefined} el
+ * @param {number} [maxHeight]
+ */
+export function autoGrow(el, maxHeight = COMPOSER_MAX_HEIGHT) {
+  if (!el) return
+  el.style.height = 'auto'
+  el.style.height = Math.min(el.scrollHeight, maxHeight) + 'px'
+}
+
 /**
  * 输入法组字判定。三层兜底，缺一不可：
  * 1. `e.isComposing` —— 原生 DOM 事件上的标准字段；

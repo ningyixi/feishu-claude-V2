@@ -270,6 +270,14 @@ public class AdHocService {
     }
 
     private void startPipeline(Long taskId, String fromStage) {
+        startPipeline(taskId, fromStage, false);
+    }
+
+    /**
+     * @param forceWikiRebuild true = 追加材料触发的重编译（S3）：WIKI 段见到 READY 版本也要重建一版
+     *                         （旧版没吃进新材料；{@code SupplierWikiService.build} 每次产生新版本行）
+     */
+    private void startPipeline(Long taskId, String fromStage, boolean forceWikiRebuild) {
         // 原子占位：add 返回 false = 该任务已有流水线在跑（并发重试竞态）——拒绝而不是双跑
         if (!orchestrating.add(taskId)) {
             throw new IllegalArgumentException("流水线正在推进中，请等待当前段结束");
@@ -277,7 +285,7 @@ public class AdHocService {
         try {
             starter.accept("ad-hoc-pipeline-" + taskId, () -> {
                 try {
-                    runPipeline(taskId, fromStage);
+                    runPipeline(taskId, fromStage, forceWikiRebuild);
                 } finally {
                     orchestrating.remove(taskId);
                 }
@@ -290,9 +298,103 @@ public class AdHocService {
         }
     }
 
+    // ===== 追加材料（11-23-adhoc-append-sources S1/S2/S3） =====
+
+    /**
+     * 向已建任务追加材料：文档来源（多行，类型判定复用 {@link #detectType} = DocParser 唯一权威）/
+     * 聊天记录 / 笔记双框（主要内容+原文，经 {@link SupplierKbService#appendText}）。任意组合，至少一项。
+     * <p>
+     * 幂等（AC6）：文档来源按 type+source 去重（沿用既有语义）；chat/note 按内容指纹去重——
+     * 重复项跳过、不产生重复条目；<b>全部重复时不排队重编译</b>（连点两次不会出两条并发编译）。
+     * <p>
+     * 有新条目 → 自动重新排队流水线（INGEST 等新来源解析 DONE → WIKI 段<b>强制重编译</b>一版），
+     * 串行闸就是既有 {@code orchestrating}：推进中追加会被拒绝（可读错误），不会双跑。
+     * 重编译期间对话照常可用（{@link #ask} 无阶段门禁），注入头带"新增材料尚未进入当前 Wiki 版本"提示。
+     *
+     * @return {added:[…], duplicated:[…], wikiRebuildQueued:bool}
+     */
+    public JsonObject appendSources(Long taskId, String docSources, String chat, String chatTitle,
+                                    String noteTitle, String noteSummary, String noteRaw) {
+        AdHocTask t = require(taskId);
+        if (orchestrating.contains(taskId)) {
+            throw new IllegalArgumentException("流水线正在推进中，请等待当前段结束后再追加材料");
+        }
+        boolean docsGiven = docSources != null && !docSources.isBlank();
+        boolean chatGiven = chat != null && !chat.isBlank();
+        boolean noteGiven = (noteSummary != null && !noteSummary.isBlank()) || (noteRaw != null && !noteRaw.isBlank());
+        if (!docsGiven && !chatGiven && !noteGiven) {
+            boolean noteAttempted = noteSummary != null || noteRaw != null;
+            throw new IllegalArgumentException(noteAttempted
+                    ? "笔记「主要内容」与「原文」不能都为空——至少填写一项"
+                    : "没有可追加的内容：请填写文档来源、聊天记录或笔记（主要内容/原文）至少一项");
+        }
+
+        // 文档来源预检：与 create() 同一套（类型可识别 + 本地文件存在 + Office magic bytes），先验后入库
+        List<String> lines = docsGiven ? sourceLines(docSources) : List.of();
+        if (lines.size() > MAX_SOURCE_LINES) {
+            throw new IllegalArgumentException("单次追加来源过多（≤" + MAX_SOURCE_LINES + " 条），请精简后重试");
+        }
+        for (String value : lines) {
+            if (value.length() > MAX_SOURCE_LINE_CHARS) {
+                throw new IllegalArgumentException("单条文档来源过长（≤" + MAX_SOURCE_LINE_CHARS + " 字符）");
+            }
+            String type = detectType(value);
+            if (!"url".equals(type) && !Files.isRegularFile(Paths.get(value))) {
+                throw new IllegalArgumentException("文档来源文件不存在: " + value);
+            }
+            if (List.of("docx", "pptx", "xlsx", "doc").contains(type)) {
+                SupplierOfficeParser.resolveOfficeFile(Paths.get(value), type);
+            }
+        }
+
+        String kbCode = t.getKbCode();
+        JsonArray added = new JsonArray();
+        JsonArray duplicated = new JsonArray();
+        for (String value : lines) {
+            String type = detectType(value);
+            if (kbService.exists(kbCode, type, value.trim())) {
+                duplicated.add(value);
+                continue;
+            }
+            kbService.add(kbCode, type, value, null);
+            added.add(value);
+        }
+        if (chatGiven) {
+            SupplierKbService.Appended r = kbService.appendText(kbCode, "chat", chatTitle, chat, null, null);
+            (r.created() ? added : duplicated).add("聊天记录：" + title(r.entry()));
+        }
+        if (noteGiven) {
+            SupplierKbService.Appended r = kbService.appendText(kbCode, "note", noteTitle, null, noteSummary, noteRaw);
+            (r.created() ? added : duplicated).add("笔记：" + title(r.entry()));
+        }
+
+        // 追加的文档来源并入任务行（留痕；「重试本段」重跑 INGEST 时同一套去重语义仍然幂等）
+        if (!lines.isEmpty()) {
+            t.setDocSources(String.join("\n", sourceLines(t.getDocSources() + "\n" + String.join("\n", lines))));
+            taskRepo.save(t);
+        }
+
+        boolean rebuild = added.size() > 0;
+        if (rebuild) {
+            startPipeline(taskId, STAGE_INGEST, true);
+            log.info("[AdHoc] 任务 {} 追加材料 {} 项（去重跳过 {} 项），已排队 Wiki 重编译", taskId, added.size(), duplicated.size());
+        } else {
+            log.info("[AdHoc] 任务 {} 追加材料全部命中去重（{} 项），不触发重编译", taskId, duplicated.size());
+        }
+        JsonObject out = new JsonObject();
+        out.add("added", added);
+        out.add("duplicated", duplicated);
+        out.addProperty("wikiRebuildQueued", rebuild);
+        return out;
+    }
+
     // ===== 流水线（同步执行体；生产由 startPipeline 放到虚拟线程） =====
 
     void runPipeline(Long taskId, String fromStage) {
+        runPipeline(taskId, fromStage, false);
+    }
+
+    void runPipeline(Long taskId, String fromStage, boolean forceWikiRebuild) {
         AdHocTask task = taskRepo.findById(taskId).orElse(null);
         if (task == null) return;
         try {
@@ -301,7 +403,7 @@ public class AdHocService {
                 setStage(taskId, stage);
                 log.info("[AdHoc] 任务 {} 进入段 {}", taskId, stage);
                 if (STAGE_INGEST.equals(stage)) runIngestStage(task);
-                else if (STAGE_WIKI.equals(stage)) runWikiStage(task);
+                else if (STAGE_WIKI.equals(stage)) runWikiStage(task, forceWikiRebuild);
                 else throw new IllegalStateException("未知段: " + stage);
             }
             taskRepo.findById(taskId).ifPresent(t -> {
@@ -379,7 +481,16 @@ public class AdHocService {
      * 而不是拿同一版再次拒绝（否则续跑变成死路）。
      */
     private void runWikiStage(AdHocTask task) throws InterruptedException {
+        runWikiStage(task, false);
+    }
+
+    /**
+     * @param forceRebuild true = 追加材料触发（S3）：当前 READY 版本还没吃进新材料，先强制重建一版再走
+     *                     卡点判定（build 每次产生新版本行；只强制一次，新版本 READY 后按既有语义收尾）
+     */
+    private void runWikiStage(AdHocTask task, boolean forceRebuild) throws InterruptedException {
         final boolean[] rebuilt = { false };
+        final boolean[] forcePending = { forceRebuild };
         final Long[] rejectedRevision = { task.getBlockedRevision() };   // 上次因卡点被拒的版本（跨重试持久）
         waitUntil(task.getId(), () -> {
             SupplierWikiRevision latest = wikiRevisions.findFirstByKbCodeOrderByIdDesc(task.getKbCode()).orElse(null);
@@ -387,6 +498,12 @@ public class AdHocService {
             updateWikiStatus(task.getId(), status);
             switch (status) {
                 case "READY":
+                    if (forcePending[0]) {
+                        // 追加材料后的强制重编译：这一版 READY 是追加前的旧版本——重建一版把新材料吃进去
+                        forcePending[0] = false;
+                        log.info("[AdHoc] 任务 {} 追加材料触发 Wiki 重编译（旧版本 #{}）", task.getId(), latest.getId());
+                        return triggerWikiBuild(task);
+                    }
                     String blocker = wikiStandblockQuestion(latest);
                     if (blocker == null) return "";
                     if (latest.getId() != null && latest.getId().equals(rejectedRevision[0])) {
@@ -404,8 +521,10 @@ public class AdHocService {
                 case "FAILED":
                     if (rebuilt[0]) return "Wiki 编译失败：" + (latest.getError() == null || latest.getError().isBlank() ? "未知原因" : latest.getError());
                     rebuilt[0] = true;
+                    forcePending[0] = false;   // 这次重建同样会吃进新材料，强制重建已兑现
                     return triggerWikiBuild(task);
                 default:   // EMPTY
+                    forcePending[0] = false;   // 首版本来就会包含新材料，强制重建已兑现
                     return triggerWikiBuild(task);
             }
         }, "Wiki 编译等待超时（" + (stepTimeoutMs / 60000) + " 分钟），请重试本段");
@@ -546,6 +665,31 @@ public class AdHocService {
         static final WikiSnapshot EMPTY = new WikiSnapshot("EMPTY", null, 0, "", "", "", List.of());
     }
 
+    /**
+     * 尚未进入当前 Wiki 版本的新增材料（S3 诚实提示）：count=条数，titles=条目标题。
+     * 判定锚点 = 最新一条 READY 版本行的创建时间（build 在该时刻取来源快照）——之后入库的条目
+     * 这一版都没吃到。Wiki 从未 READY 时返回 {@link #NONE}（"尚未就绪"话术已覆盖该情形）。
+     */
+    public record PendingMaterials(int count, List<String> titles) {
+        public static final PendingMaterials NONE = new PendingMaterials(0, List.of());
+    }
+
+    /** 轻量单行读 + KB 列表比对（零文件 IO / 零指纹重算，热路径纪律同 wikiSnapshot） */
+    PendingMaterials pendingMaterials(String kbCode) {
+        try {
+            SupplierWikiRevision ready = wikiRevisions.findFirstByKbCodeAndStatusOrderByIdDesc(kbCode, "READY").orElse(null);
+            if (ready == null || ready.getCreatedAt() == null) return PendingMaterials.NONE;
+            List<String> titles = new ArrayList<>();
+            for (SupplierKbEntry e : kbService.list(kbCode)) {
+                if (e.getCreatedAt() != null && e.getCreatedAt().isAfter(ready.getCreatedAt())) titles.add(title(e));
+            }
+            return titles.isEmpty() ? PendingMaterials.NONE : new PendingMaterials(titles.size(), List.copyOf(titles));
+        } catch (RuntimeException ex) {
+            log.warn("[AdHoc] 新增材料盘点失败（不阻断对话）: kb={}, {}", kbCode, ex.getMessage());
+            return PendingMaterials.NONE;
+        }
+    }
+
     WikiSnapshot wikiSnapshot(String kbCode) {
         SupplierWikiRevision latest = wikiRevisions.findFirstByKbCodeOrderByIdDesc(kbCode).orElse(null);
         if (latest == null) return WikiSnapshot.EMPTY;
@@ -584,8 +728,18 @@ public class AdHocService {
      * 只给一行"尚未就绪（当前阶段 X）+ 需要文档请给路径"——对话本身任何阶段都允许（见 {@link #ask}）。
      */
     static String wikiHeaderBlock(String taskName, String taskStatus, WikiSnapshot wiki) {
+        return wikiHeaderBlock(taskName, taskStatus, wiki, PendingMaterials.NONE);
+    }
+
+    /**
+     * 带「新增材料尚未进入当前 Wiki 版本」诚实提示的版本（S3）：只要 pending 非空，提示紧跟任务名行
+     * 注入（放在最前面，防御性截断也切不掉它）——否则用户会以为模型已经读过他刚粘的原文。
+     */
+    static String wikiHeaderBlock(String taskName, String taskStatus, WikiSnapshot wiki, PendingMaterials pending) {
         StringBuilder sb = new StringBuilder();
         sb.append("【临时需求任务】").append(taskName == null || taskName.isBlank() ? "(未命名)" : taskName).append('\n');
+        String hint = pendingHint(pending);
+        if (!hint.isEmpty()) sb.append(hint).append('\n');
         String status = wiki == null ? "EMPTY" : wiki.status();
         if (wiki != null && "READY".equals(status)) {
             sb.append("【任务 LLM Wiki】版本 #").append(wiki.revision()).append("（").append(wiki.sourceCount()).append(" 个来源）已就绪。\n");
@@ -615,6 +769,22 @@ public class AdHocService {
         String header = sb.toString();
         if (header.length() > MAX_HEADER_CHARS) header = header.substring(0, MAX_HEADER_CHARS) + "\n……（清单超长已截断，完整页面索引见 index.md）";
         return header;
+    }
+
+    /** 纯函数便于单测：新增材料提示行（S3 诚实上下文；最多列 5 个标题，每个 ≤40 字符） */
+    static String pendingHint(PendingMaterials pending) {
+        if (pending == null || pending.count() <= 0) return "";
+        StringBuilder sb = new StringBuilder("⚠️ 本任务有 ").append(pending.count())
+                .append(" 条新增材料尚未进入当前 Wiki 版本（正在/待重编译），涉及：");
+        int shown = 0;
+        for (String t : pending.titles()) {
+            if (shown >= 5) { sb.append("……等"); break; }
+            if (shown > 0) sb.append('、');
+            sb.append(t != null && t.length() > 40 ? t.substring(0, 40) + "…" : t);
+            shown++;
+        }
+        sb.append("。回答涉及这些材料的问题前，先按知识库索引 Read 其来源/产物原文；不得声称当前 Wiki 已覆盖它们，也不得猜测其内容。");
+        return sb.toString();
     }
 
     /** 纯函数便于单测：Wiki 未就绪时的"当前阶段"说明（任务段 + 版本状态/编译阶段/失败原因） */
@@ -859,7 +1029,8 @@ public class AdHocService {
         clearStandblock(t);
 
         String prompt = buildChatPrompt(
-                wikiHeaderBlock(t.getName(), t.getStatus(), wikiSnapshot(t.getKbCode())), question);
+                wikiHeaderBlock(t.getName(), t.getStatus(), wikiSnapshot(t.getKbCode()), pendingMaterials(t.getKbCode())),
+                question);
 
         AdHocChat u = new AdHocChat();
         u.setTaskId(taskId); u.setRole("user"); u.setText(question.strip());
@@ -1073,6 +1244,13 @@ public class AdHocService {
         w.addProperty("phase", wiki.phase());
         w.addProperty("error", wiki.error());
         o.add("wiki", w);
+
+        // S3 诚实提示的页面数据源：有新增材料未进当前 Wiki 版本时，Wiki 卡显示"正在基于新增材料重编译"
+        PendingMaterials pending = pendingMaterials(t.getKbCode());
+        o.addProperty("pendingMaterialCount", pending.count());
+        JsonArray pendingTitles = new JsonArray();
+        pending.titles().forEach(pendingTitles::add);
+        o.add("pendingMaterialTitles", pendingTitles);
 
         JsonArray entries = new JsonArray();
         for (SupplierKbEntry e : kbService.list(t.getKbCode())) {

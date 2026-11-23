@@ -3,7 +3,7 @@ import { Surface, useConfirm, useDirtyValue, useQueryParam } from '../components
 import { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { handleComposerKey } from '../utils/composerKeys'
+import { COMPOSER_HINT, handleComposerKey, autoGrow } from '../utils/composerKeys'
 
 // ===== 数字员工（侧边栏独立页面）：员工 CRUD / 需求下发自动并行 / 实例工位实时进度 / 主动上报聊天框 =====
 
@@ -616,10 +616,13 @@ function EmployeeDetail({ empId, onBack, showToast }) {
 /** 💬 员工主动上报聊天框（新消息在下，自动滚到底；打开详情页即全部已读） */
 function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress, chatTimeline, emp, defaultShellInstance, replyTo, clearReplyTo, showToast }) {
   const boxRef = useRef(null)
+  const inputRef = useRef(null)
   const [text, setText] = useState('')
   const [sending, setSending] = useState(false)
   const [mode, setMode] = useState('chat')            // chat | shell
   const [shellInstance, setShellInstance] = useState('')
+  // X1：多行 composer 自适应高度（1 行起，约 6 行封顶内部滚动；发送清空后自动收回单行）
+  useEffect(() => { autoGrow(inputRef.current) }, [text])
   // 只在用户停留在底部附近时自动跟随；往上翻看历史时不被拽回去（自己发消息时强制回到底部）
   const stickRef = useRef(true)
   useEffect(() => {
@@ -723,16 +726,17 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
             <span onClick={clearReplyTo} style={{ cursor: 'pointer', marginLeft: 6, fontWeight: 700 }}>✕</span>
           </div>
         )}
-        <div style={{ display: 'flex', gap: 8 }}>
-          <input className="form-input" style={{ flex: 1, padding: '7px 10px', fontFamily: mode === 'shell' ? 'var(--font-mono)' : undefined }}
+        <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+          <textarea ref={inputRef} rows={1} className="form-input" data-emp-chat-input
+            style={{ flex: 1, padding: '7px 10px', resize: 'none', overflowY: 'auto', fontFamily: mode === 'shell' ? 'var(--font-mono)' : 'inherit' }}
             placeholder={busy
               ? (shellProgress ? '命令执行中，稍候…' : '员工正在回复，稍候…')
               : (mode === 'shell'
-                ? '输入命令直接执行，如 git qpr（Enter 发送，120s 超时）'
-                : '对员工说点什么，可以直接安排小事（Enter 发送）')}
+                ? `输入命令直接执行，如 git qpr（${COMPOSER_HINT}，120s 超时）`
+                : `对员工说点什么，可以直接安排小事（${COMPOSER_HINT}）`)}
             value={text} disabled={busy || sending}
             onChange={e => setText(e.target.value)}
-            onKeyDown={e => handleComposerKey(e, send, { multiline: false })} />
+            onKeyDown={e => handleComposerKey(e, send, { multiline: true })} />
           <button className="btn btn-primary" onClick={send} disabled={!text.trim() || busy || sending}>
             {sending ? '发送中…' : mode === 'shell' ? '▶ 执行' : '发送'}
           </button>

@@ -6,7 +6,7 @@ import remarkGfm from 'remark-gfm'
 import SupplierWikiPanel from '../components/SupplierWikiPanel'
 import SupplierWorkflowPanel from '../components/SupplierWorkflowPanel'
 import { useSearchParams } from 'react-router-dom'
-import { COMPOSER_HINT, handleComposerKey } from '../utils/composerKeys'
+import { COMPOSER_HINT, handleComposerKey, autoGrow } from '../utils/composerKeys'
 
 // ===== 常量 =====
 
@@ -1193,6 +1193,9 @@ function ChatPanel({ jobId, running, showToast }) {
   const [q, setQ] = useState('')
   const [sending, setSending] = useState(false)
   const bodyRef = useRef(null)
+  const inputRef = useRef(null)
+  // X1：多行 composer 自适应高度（1 行起，约 6 行封顶内部滚动；发送清空后自动收回单行）
+  useEffect(() => { autoGrow(inputRef.current) }, [q])
 
   const load = () => fetch(`/api/supplier-jobs/${jobId}/chat`).then(r => r.ok ? r.json() : []).then(setMsgs).catch(() => {})
   useEffect(() => {
@@ -1258,9 +1261,11 @@ function ChatPanel({ jobId, running, showToast }) {
           </div>
         ))}
       </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-        <input className="form-input" style={{ flex: 1 }} placeholder="问实例现在的情况、失败原因、某个结论的依据…（回车发送）"
-          value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => handleComposerKey(e, send, { multiline: false })} />
+      <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'flex-end' }}>
+        <textarea ref={inputRef} rows={1} className="form-input" data-workbench-chat-input
+          style={{ flex: 1, resize: 'none', overflowY: 'auto', fontFamily: 'inherit' }}
+          placeholder={`问实例现在的情况、失败原因、某个结论的依据…（${COMPOSER_HINT}）`}
+          value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => handleComposerKey(e, send, { multiline: true })} />
         <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={!q.trim() || sending} onClick={send}>
           {sending ? '发送中…' : '📤 提问'}
         </button>

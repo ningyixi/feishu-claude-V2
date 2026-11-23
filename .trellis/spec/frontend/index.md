@@ -5,3 +5,5 @@ Read [Floating UI](./floating-ui.md) before editing application navigation, form
 Quality checks: production build, Chromium browser scenarios against the compiled preview, mobile overflow checks, and the running Nginx/API smoke. Browser tests mock all HTTP API calls and must not invoke model or Feishu providers.
 
 Read [Glass material](./glass-material.md) before changing surface materials, global appearance preferences, background sampling or SVG backdrop lenses.
+
+Read [Composer & DOM events](./composer-and-events.md) before touching any chat/composer input, keyboard handling, IME composition guards, or writing PRD mechanics for browser behavior.

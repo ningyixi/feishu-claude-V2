@@ -116,6 +116,43 @@ public class AdHocController {
         }
     }
 
+    /**
+     * 追加材料（11-23-adhoc-append-sources S1/S2/S3）：文档来源（多行）/ 聊天记录 / 笔记双框任意组合。
+     * body: {docSources?, chat?, chatTitle?, noteTitle?, noteSummary?, noteRaw?}
+     * 有新条目即自动重新排队流水线（等新来源解析完成 → 强制重编译 Wiki）；全部命中去重则不排队（AC6）。
+     * S4 闸门：与创建同口径——创建者权限 + 绑定实例独占校验（admin 不能占用员工独占实例）。
+     */
+    @PostMapping(value = "/api/ad-hoc-tasks/{id}/append-sources", produces = "application/json;charset=UTF-8")
+    public ResponseEntity<String> appendSources(@PathVariable Long id, @RequestBody String rawBody,
+                                                jakarta.servlet.http.HttpServletRequest req) {
+        try {
+            JsonObject body = JsonParser.parseString(rawBody).getAsJsonObject();
+            var task = adHocTasks.require(id);
+            Long creator = RequestIdentity.creator(req, null);
+            Long creatorId = null;
+            if (creator != null) {
+                var emp = employeeService.requirePermission(creator, "supplier");
+                creatorId = emp.getId();
+            }
+            if (task.getInstanceId() != null) {
+                employeeService.assertInstancesUsable(List.of(task.getInstanceId()), creatorId);
+            }
+            JsonObject out = adHocTasks.appendSources(id,
+                    strOrNull(body, "docSources"), strOrNull(body, "chat"), strOrNull(body, "chatTitle"),
+                    strOrNull(body, "noteTitle"), strOrNull(body, "noteSummary"), strOrNull(body, "noteRaw"));
+            return ResponseEntity.ok(out.toString());
+        } catch (SecurityException e) {
+            JsonObject fo = new JsonObject();
+            fo.addProperty("error", e.getMessage());
+            return ResponseEntity.status(403).body(fo.toString());
+        } catch (IllegalArgumentException e) {
+            return err(e.getMessage());
+        } catch (Exception e) {
+            log.error("[AdHoc] 追加材料失败 task={}", id, e);
+            return err("追加失败: " + e.getMessage());
+        }
+    }
+
     /** 对话历史（Jackson 直出实体列表，前端 2.5s 轮询） */
     @GetMapping("/api/ad-hoc-tasks/{id}/chat")
     public List<AdHocChat> chatHistory(@PathVariable Long id) {
@@ -124,6 +161,11 @@ public class AdHocController {
 
     private static String opt(JsonObject o, String key) {
         return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsString() : "";
+    }
+
+    /** 追加材料用：缺 key / null → 返回 null（区别于空串——服务层据此判定"用户没填这一项"） */
+    private static String strOrNull(JsonObject o, String key) {
+        return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsString() : null;
     }
 
     private ResponseEntity<String> err(String msg) {

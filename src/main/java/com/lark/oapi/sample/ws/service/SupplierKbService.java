@@ -168,6 +168,95 @@ public class SupplierKbService {
         return e;
     }
 
+    /** 同 kbCode+type+source 是否已有条目（追加入库的幂等判定，沿用既有 source 去重语义） */
+    public boolean exists(String kbCode, String type, String source) {
+        return repo.existsByKbCodeAndTypeAndSource(kbCode, type, source);
+    }
+
+    /** 追加式文本入库结果：created=false = 内容指纹已在库（幂等去重命中），entry 为既有条目 */
+    public record Appended(SupplierKbEntry entry, boolean created) {}
+
+    /**
+     * 追加式文本入库（11-23-adhoc-append-sources S1/S2）：临时需求「继续补充材料」专用通道。
+     * <ul>
+     *   <li><b>note 双框</b>（用户诉求：一个框放主要内容、一个框放原文）：summary=主要内容（用户理解/结论），
+     *       raw=原文（邮件/群消息/口头约定原话），<b>逐字保存</b>——不 trim、不改空白、不重排；
+     *       两段全空 → 可读错误；只填一段 → 另一段以「（未填）」占位（AC3）。
+     *       md 固定两段 {@code ## 主要内容} + {@code ## 原文}，标题行沿用现网「&gt; 笔记（录入于 …）」格式；
+     *       超长仍走 {@link DocParser#chunk}（分块会规范化文件末尾空行，段内空白不受影响）。</li>
+     *   <li><b>chat</b>：单段正文，与老 add() 的 chat 产物同格式（「&gt; 聊天记录补充（录入于 …）」）。</li>
+     *   <li><b>幂等（AC6）</b>：source = "&lt;type&gt;-fp:&lt;内容SHA-256前16位&gt;"，同 kbCode+type+source
+     *       已存在 → 不建新条目，直接返回既有条目（连点两次追加不产生重复）。老形态（工作台单框补充、
+     *       archiveArtifact 归档）source="" 或 "job:…/node:…"，与指纹空间天然不冲突。</li>
+     * </ul>
+     * <b>向后兼容（AC4）</b>：本方法是新增通道，不改动 {@link #add} 的任何既有行为——
+     * 只给 value 的 note/chat 老调用（工作台补充、generated-prompt 归档）依旧走单段老路径。
+     *
+     * @param type    "chat" 或 "note"
+     * @param value   chat 全文（note 忽略）
+     * @param summary note 主要内容（可空）
+     * @param raw     note 原文（可空；非空时逐字保存）
+     */
+    public Appended appendText(String kbCode, String type, String title, String value, String summary, String raw) {
+        if (kbCode == null || kbCode.isBlank()) throw new IllegalArgumentException("kbCode 不能为空");
+        if (!List.of("chat", "note").contains(type)) throw new IllegalArgumentException("追加式文本入库仅支持 chat/note 类型: " + type);
+        boolean isNote = "note".equals(type);
+        String chatBody = value == null ? "" : value;
+        boolean hasSummary = summary != null && !summary.isBlank();
+        boolean hasRaw = raw != null && !raw.isBlank();
+        if (isNote) {
+            if (!hasSummary && !hasRaw)
+                throw new IllegalArgumentException("笔记「主要内容」与「原文」不能都为空——至少填写一项");
+        } else if (chatBody.isBlank()) {
+            throw new IllegalArgumentException("内容不能为空");
+        }
+        String fingerprint = type + "-fp:" + SupplierReferenceContext
+                .digest(isNote ? (summary == null ? "" : summary) + "\u0000" + (raw == null ? "" : raw) : chatBody)
+                .substring(0, 16);
+        SupplierKbEntry dup = repo.findFirstByKbCodeAndTypeAndSource(kbCode.trim(), type, fingerprint).orElse(null);
+        if (dup != null) {
+            log.info("[SupplierKb] 追加去重命中（不产生重复条目）: kb={}, type={}, source={}", kbCode, type, fingerprint);
+            return new Appended(dup, false);
+        }
+        SupplierKbEntry e = new SupplierKbEntry();
+        e.setKbCode(kbCode.trim());
+        e.setType(type);
+        e.setTitle(title != null && !title.isBlank() ? title.trim()
+                : deriveTitle(type, isNote ? (hasSummary ? summary : raw) : chatBody));
+        e.setSource(fingerprint);
+        e.setStatus("DONE");
+        repo.save(e);
+        try {
+            String ts = LocalDateTime.now().toString().substring(0, 19);
+            String md = isNote ? noteMd(ts, summary, raw)
+                    : "> 聊天记录补充（录入于 " + ts + "）\n\n" + chatBody.strip() + "\n";
+            writeMd(e, DocParser.chunk(md), meta(o -> {
+                o.addProperty("chars", md.length());
+                o.addProperty("appended", true);
+            }));
+            e.setStatus("DONE");
+            repo.save(e);
+        } catch (IOException ex) {
+            e.setStatus("FAILED");
+            e.setError("写入条目文件失败: " + ex.getMessage());
+            repo.save(e);
+        }
+        log.info("[SupplierKb] 追加文本入库: id={}, kb={}, type={}, status={}", e.getId(), kbCode, type, e.getStatus());
+        return new Appended(e, true);
+    }
+
+    /**
+     * note 双框的 md 固定结构（S2）：标题行沿用现网「&gt; 笔记（录入于 …）」格式，正文两段
+     * {@code ## 主要内容} + {@code ## 原文}。<b>原文段逐字保存</b>（不 trim、不改空白），
+     * 文件以单个换行收尾；只填一段时另一段以「（未填）」占位（AC3）。包私有便于单测钉结构。
+     */
+    static String noteMd(String recordedAt, String summary, String raw) {
+        boolean hasSummary = summary != null && !summary.isBlank();
+        boolean hasRaw = raw != null && !raw.isBlank();
+        return "> 笔记（录入于 " + recordedAt + "）\n\n## 主要内容\n" + (hasSummary ? summary.strip() : "（未填）")
+                + "\n\n## 原文\n" + (hasRaw ? raw : "（未填）") + "\n";
+    }
+
     /**
      * Office 文档入库（11-23-kb-office-documents）：真实格式一律按 magic bytes 判定，不信任扩展名（AC2b）。
      * <ul>

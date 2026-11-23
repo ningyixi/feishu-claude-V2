@@ -13,7 +13,8 @@ import { job, mockProduct } from './fixtures'
  * 单测级真值表 + 静态扫描（调用点不得内联 Enter 判定）见 `frontend/tests/composer-keys.test.js`。
  *
  * 全部 API 走 mock（fixtures.mockProduct 记录所有非 GET 请求），不打后端、不写库。
- * 跑法：`UI_BASE_URL=http://localhost:5173 npx playwright test tests/composer-keys.spec.js --reporter=list --output=<临时目录>`
+ * 跑法（无需任何环境变量——baseURL 默认 http://localhost:3000，webServer 自动起/复用 vite，浏览器自动探测本机 Chrome/Edge）：
+ *   cd frontend && npx playwright test tests/composer-keys.spec.js
  */
 
 /** mockProduct 记录的非 GET 请求（发送与否的唯一权威证据） */
@@ -150,8 +151,8 @@ test.describe('输入法组字（AC3）', () => {
   })
 })
 
-test.describe('单行 input（AC4）', () => {
-  test('AC4 临时需求·对话框与待确认卡答复：Ctrl/Alt+Enter 不提交、不报错、零多余请求', async ({ page }) => {
+test.describe('原单行 4 处 → 多行 textarea（X1：Ctrl+Enter 真换行）', () => {
+  test('X1 临时需求·对话框与待确认卡答复：Ctrl+Enter 真换行且零请求，Enter 仍发送、请求体字段不变', async ({ page }) => {
     const writes = await mockProduct(page)
     const taskRow = { id: 2, name: '改历史接口字段', kbCode: 'adhoc-2', instanceId: 1, status: 'READY', wikiStatus: 'READY', error: '', running: false, blocked: true, createdAt: '2026-11-23T09:00:00', updatedAt: '2026-11-23T09:30:00' }
     const detail = {
@@ -173,51 +174,81 @@ test.describe('单行 input（AC4）', () => {
     page.on('pageerror', e => errors.push(e.message))
     await page.goto('/ad-hoc?task=2')
 
-    // 1) 对话框（单行 input）
-    const chat = page.locator('.card', { hasText: '💬 对话框' }).locator('input.form-input')
+    // 1) 对话框（原单行 input → 多行 textarea，data-chat-input）
+    const chat = page.locator('.card', { hasText: '💬 对话框' }).locator('textarea[data-chat-input]')
     await expect(chat).toBeVisible({ timeout: 30_000 })
     await chat.click()
     await chat.pressSequentially('把历史接口字段改一下')
     await chat.press('Control+Enter')
+    await expect(chat, 'Ctrl+Enter 必须真换行（textarea 多行框）').toHaveValue('把历史接口字段改一下\n')
+    expect(writes, `Ctrl+Enter 不得发出任何请求，实际=${JSON.stringify(posts(writes))}`).toHaveLength(0)
+    await chat.pressSequentially('第二行补充')
     await chat.press('Alt+Enter')
-    await page.waitForTimeout(300)
-    await expect(chat, '单行框 Ctrl+Enter 不得提交，内容原样保留').toHaveValue('把历史接口字段改一下')
-    expect(writes, `单行框 Ctrl/Alt+Enter 零请求，实际=${JSON.stringify(posts(writes))}`).toHaveLength(0)
+    await page.waitForTimeout(200)
+    await expect(chat, 'Alt+Enter 不承诺换行也不发送——原样不动').toHaveValue('把历史接口字段改一下\n第二行补充')
+    expect(writes, `Alt+Enter 零请求，实际=${JSON.stringify(posts(writes))}`).toHaveLength(0)
     expect(errors, '不得报错').toEqual([])
 
     await chat.press('Enter')
     await expect.poll(() => posts(writes), { timeout: 10_000, message: '裸 Enter 应正常发送' })
       .toContain('POST /api/ad-hoc-tasks/2/chat')
+    const body = JSON.parse(writes.find(w => w.path === '/api/ad-hoc-tasks/2/chat').body)
+    expect(body.question, '请求体字段不变（question），内容=框内所见（含换行）').toBe('把历史接口字段改一下\n第二行补充')
+    await expect(chat, '发送后清空并回到单行高度').toHaveValue('')
 
-    // 2) 待确认卡答复（单行 input，data-pending-answer）
-    const answer = page.locator('[data-pending-answer]')
+    // 2) 待确认卡答复（data-pending-answer，现为 textarea）
+    const answer = page.locator('textarea[data-pending-answer]')
     await expect(answer).toBeVisible({ timeout: 30_000 })
     const before = writes.length
     await answer.click()
     await answer.pressSequentially('上限按 20 家')
     await answer.press('Control+Enter')
-    await page.waitForTimeout(300)
-    await expect(answer).toHaveValue('上限按 20 家')
-    expect(writes.length, `待确认卡答复框 Ctrl+Enter 零请求，实际=${JSON.stringify(posts(writes))}`).toBe(before)
+    await expect(answer, '待确认卡答复框 Ctrl+Enter 必须真换行').toHaveValue('上限按 20 家\n')
+    expect(writes.length, `Ctrl+Enter 零请求，实际=${JSON.stringify(posts(writes))}`).toBe(before)
     expect(errors, '不得报错').toEqual([])
+    await answer.pressSequentially('先按 20 家灰度')
     await answer.press('Enter')
     await expect.poll(() => writes.length, { timeout: 10_000 }).toBeGreaterThan(before)
-    console.log('[实测·单行] AdHoc 两个单行框：Ctrl/Alt+Enter 零请求零报错，Enter 正常发送 →', JSON.stringify(posts(writes)))
+    const answerBody = JSON.parse(writes.filter(w => w.path === '/api/ad-hoc-tasks/2/chat').pop().body)
+    expect(answerBody.question, '答复框同一接口同一字段，内容含换行').toBe('上限按 20 家\n先按 20 家灰度')
+    console.log('[实测·X1 临时需求] 对话框+待确认卡两处 textarea：Ctrl+Enter 真换行零请求，Enter 发送 →', JSON.stringify(posts(writes)))
   })
 
-  test('AC4 供应商工作台对话区（单行 input）：Ctrl+Enter 不提问，Enter 才提问', async ({ page }) => {
+  test('X1 供应商工作台对话区（textarea）：Ctrl+Enter 换行零请求，Enter 才提问', async ({ page }) => {
     const writes = await mockProduct(page)
     await page.goto('/supplier?job=41')
-    const chat = page.locator('input[placeholder*="问实例现在的情况"]')
+    const chat = page.locator('textarea[data-workbench-chat-input]')
     await expect(chat).toBeVisible({ timeout: 30_000 })
     await chat.click()
     await chat.pressSequentially('现在卡在哪个节点')
     await chat.press('Control+Enter')
-    await page.waitForTimeout(300)
-    await expect(chat).toHaveValue('现在卡在哪个节点')
+    await expect(chat, 'Ctrl+Enter 必须真换行').toHaveValue('现在卡在哪个节点\n')
     expect(writes, `工作台对话区 Ctrl+Enter 零请求，实际=${JSON.stringify(posts(writes))}`).toHaveLength(0)
+    await chat.pressSequentially('为什么')
     await chat.press('Enter')
     await expect.poll(() => writes.length, { timeout: 10_000, message: '裸 Enter 应发出提问' }).toBe(1)
-    console.log('[实测·单行] 工作台对话区 →', JSON.stringify(posts(writes)))
+    expect(JSON.parse(writes[0].body).question, '同一接口同一字段，内容含换行').toBe('现在卡在哪个节点\n为什么')
+    console.log('[实测·X1 工作台] 对话区 textarea →', JSON.stringify(posts(writes)))
+  })
+
+  test('X1 员工对话（textarea）：Ctrl+Enter 换行零请求，Enter 仍发送、请求体字段不变', async ({ page }) => {
+    const writes = await mockProduct(page)
+    await page.goto('/employees?employee=7')
+    const box = page.locator('textarea[data-emp-chat-input]')
+    await expect(box).toBeVisible({ timeout: 30_000 })
+    const before = writes.length   // 页面加载期可能有回执类 POST，基线扣除
+    await box.click()
+    await box.pressSequentially('帮我看下接口文档')
+    await box.press('Control+Enter')
+    await expect(box, 'Ctrl+Enter 必须真换行').toHaveValue('帮我看下接口文档\n')
+    expect(writes.length, `员工对话 Ctrl+Enter 零请求，实际=${JSON.stringify(posts(writes))}`).toBe(before)
+    await box.pressSequentially('重点看取消字段')
+    await box.press('Enter')
+    await expect.poll(() => posts(writes).filter(p => p === 'POST /api/employees/7/chat'), { timeout: 10_000 })
+      .toContain('POST /api/employees/7/chat')
+    const w = writes.find(x => x.path === '/api/employees/7/chat')
+    expect(JSON.parse(w.body).text, '同一接口同一字段（text），内容含换行').toBe('帮我看下接口文档\n重点看取消字段')
+    await expect(box, '发送后清空').toHaveValue('')
+    console.log('[实测·X1 员工对话] textarea →', JSON.stringify(posts(writes)))
   })
 })

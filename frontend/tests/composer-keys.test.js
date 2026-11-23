@@ -324,10 +324,10 @@ test('AC5 静态扫描：src 下除 helper 外无任何内联 Enter 判定（新
 
 test('AC5 静态扫描：8 处 composer 调用点全部走 handleComposerKey，且没有第 9 处野生实现', () => {
   const EXPECT = {
-    'src/pages/Supplier.jsx': 4,       // 节点补充指示 / 卡点答复 / 工作台对话区（单行） / DevChat 原始诉求
-    'src/pages/AdHoc.jsx': 2,          // 待确认卡答复（单行） / 对话框（单行）
-    'src/pages/Employees.jsx': 1,      // 员工对话（单行）
-    'src/pages/E2ETest.jsx': 1,        // 流水线聊天（多行）
+    'src/pages/Supplier.jsx': 4,       // 节点补充指示 / 卡点答复 / 工作台对话区 / DevChat 原始诉求
+    'src/pages/AdHoc.jsx': 2,          // 待确认卡答复 / 对话框
+    'src/pages/Employees.jsx': 1,      // 员工对话
+    'src/pages/E2ETest.jsx': 1,        // 流水线聊天
   }
   const actual = {}
   for (const file of sources) {
@@ -343,6 +343,37 @@ test('AC5 静态扫描：8 处 composer 调用点全部走 handleComposerKey，�
   }
 })
 
+test('X1 静态扫描：全部 8 处 composer 都是可换行多行框——src 下不得再有 multiline:false 调用点', () => {
+  // 2026-11-23 用户诉求「所有的输入框都要支持 Ctrl+Enter 换行」：原先 4 处单行 <input>（临时需求对话框 /
+  // 待确认卡答复框 / 工作台对话区 / 员工对话）物理上无法换行，已全部改为自适应高度 <textarea>。
+  // 本断言把"改回去"钉死：任何调用点再传 { multiline: false } 即回归（helper 自身豁免——它要保留单行语义的实现供未来复用）。
+  const offenders = []
+  for (const file of sources) {
+    const path = rel(file)
+    if (path === HELPER) continue
+    read(file).split('\n').forEach((line, i) => {
+      if (/handleComposerKey\([^)]*multiline:\s*false/.test(line) || /multiline:\s*false\s*\}\s*\)\s*$/.test(line)) {
+        offenders.push(`${path}:${i + 1} → ${line.trim().slice(0, 140)}`)
+      }
+    })
+  }
+  assert.deepEqual(offenders, [],
+    `发现仍按单行语义接线的 composer（请改 <textarea> + { multiline: true }，见 AdHoc.jsx 同款写法）:\n${offenders.join('\n')}`)
+  // 4 处原单行框必须已是 textarea（元素级钉住：input 换不回单行）
+  for (const [file, marker] of [
+    ['src/pages/AdHoc.jsx', 'data-pending-answer'],
+    ['src/pages/AdHoc.jsx', 'data-chat-input'],
+    ['src/pages/Supplier.jsx', 'data-workbench-chat-input'],
+    ['src/pages/Employees.jsx', 'data-emp-chat-input'],
+  ]) {
+    const text = read(join(here, '..', file))
+    const i = text.indexOf(marker)
+    assert.ok(i >= 0, `${file} 缺少 ${marker} 标记`)
+    const before = text.slice(Math.max(0, i - 200), i)
+    assert.match(before, /<textarea[^>]*$/s, `${file} 的 ${marker} 必须是 <textarea>（多行可换行），实际片段: ${before.slice(-80)}`)
+  }
+})
+
 // ===== 提示文案：单一来源 + 措辞禁词纪律 =====
 
 test('提示文案统一为「Enter 发送 · Shift/Ctrl+Enter 换行」，单一来源且无游戏类说辞', () => {
@@ -354,8 +385,8 @@ test('提示文案统一为「Enter 发送 · Shift/Ctrl+Enter 换行」，单�
   // 文案只在 helper 里定义一次：src 中不得出现硬编码副本（避免各页各写一句、日后走样）
   const dup = sources.filter(f => rel(f) !== HELPER && read(f).includes('Enter 发送 · Shift/Ctrl+Enter 换行'))
   assert.deepEqual(dup.map(rel), [], '提示文案必须引用 COMPOSER_HINT，不得硬编码副本')
-  // 多行 composer 所在页面确实引用了该常量
-  for (const file of ['src/pages/Supplier.jsx', 'src/pages/E2ETest.jsx']) {
+  // 所有带聊天 composer 的页面都引用该常量（X1 后 4 处原单行框也带换行提示）
+  for (const file of ['src/pages/Supplier.jsx', 'src/pages/E2ETest.jsx', 'src/pages/AdHoc.jsx', 'src/pages/Employees.jsx']) {
     assert.match(read(join(here, '..', file)), /COMPOSER_HINT/, `${file} 的多行框提示须引用 COMPOSER_HINT`)
   }
 })

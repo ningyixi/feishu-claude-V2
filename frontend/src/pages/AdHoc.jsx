@@ -5,7 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useSearchParams } from 'react-router-dom'
 import { useOccupied, KbPanel } from './Supplier'
-import { handleComposerKey } from '../utils/composerKeys'
+import { COMPOSER_HINT, handleComposerKey, autoGrow } from '../utils/composerKeys'
 
 // ===== 常量 =====
 
@@ -216,6 +216,7 @@ function TaskDetail({ taskId, onDeleted, showToast }) {
   const [detail, setDetail] = useState(null)
   const [notFound, setNotFound] = useState(false)
   const [chatNonce, setChatNonce] = useState(0)   // 待确认卡答复后让 ChatPanel 立刻重拉，不等轮询
+  const [appendNonce, setAppendNonce] = useState(0)   // 追加材料成功后立刻重拉详情（重编译状态即时可见）
   const pollRef = useRef(null)
 
   // 轮询只在数据真变化时 setDetail：详情卡/待确认卡的 DOM 因此保持稳定，
@@ -235,7 +236,7 @@ function TaskDetail({ taskId, onDeleted, showToast }) {
       })
       .catch(() => {})
     load()
-    // 推进中 3s 轮询进度；就绪后放缓（对话进度由 ChatPanel 自己轮询）
+    // 推进中 3s 轮询进度；就绪后放缓（对话进度由 ChatPanel 自己轮询）；追加材料成功（appendNonce）立刻重拉一次
     pollRef.current = setInterval(load, ready ? 10000 : 3000)
     return () => { stopped = true; clearInterval(pollRef.current) }
     // 依赖只放 ready 这个布尔（决定轮询档位）。**不要把 detail 对象放进依赖、也不要在 effect 里 setDetail(null)**：
@@ -243,7 +244,7 @@ function TaskDetail({ taskId, onDeleted, showToast }) {
     // 页面长期停在「加载中…」、对话面板反复卸载重挂，用户拖到一半选区就被冲掉
     // （2026-11-17 Playwright 实测：8 秒内 /api/ad-hoc-tasks/{id} 被请求 10992 次，.md-body 采样 16/16 次为 0）。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskId, notFound, ready])
+  }, [taskId, notFound, ready, appendNonce])
 
   async function retryStage() {
     const res = await fetch(`/api/ad-hoc-tasks/${taskId}/retry-stage`, { method: 'POST' })
@@ -348,13 +349,154 @@ function TaskDetail({ taskId, onDeleted, showToast }) {
           {wiki.status === 'BUILDING' && wiki.phase && <span style={{ fontSize: 12, color: '#3b82f6' }}>{wiki.phase}</span>}
           {wiki.status === 'FAILED' && wiki.error && <span style={{ fontSize: 12, color: 'var(--error)', wordBreak: 'break-all' }}>{wiki.error}</span>}
         </div>
+        {/* S3 诚实提示：追加材料后重编译期间常驻——别让用户以为模型已经读过他刚贴的原文 */}
+        {(detail.pendingMaterialCount || 0) > 0 && (
+          <div data-wiki-rebuilding style={{ marginTop: 10, padding: '8px 12px', border: '1px solid rgba(245,158,11,.4)', background: 'rgba(245,158,11,.08)', borderRadius: 8, fontSize: 12.5, color: '#b45309' }}>
+            <span className="spinner" style={{ width: 9, height: 9, marginRight: 6 }} />
+            Wiki 正在基于新增材料重编译 —— 有 {detail.pendingMaterialCount} 条新增材料尚未进入当前 Wiki 版本
+            {Array.isArray(detail.pendingMaterialTitles) && detail.pendingMaterialTitles.length > 0
+              ? `（涉及：${detail.pendingMaterialTitles.slice(0, 5).join('、')}${detail.pendingMaterialTitles.length > 5 ? ' 等' : ''}）` : ''}。
+            对话照常可用；涉及这些材料时 agent 会按注入提示直接读来源原文，不会假装 Wiki 已覆盖。
+          </div>
+        )}
       </div>
 
       {/* 对话框：任何阶段都可说话——Wiki 未就绪时本轮不带 Wiki 入口，只带一行阶段说明 */}
       <ChatPanel taskId={taskId} showToast={showToast} wikiReady={ready} taskStatus={detail.status} chatNonce={chatNonce} />
 
+      {/* 继续补充材料（S1/S2）：追加文档来源 / 聊天记录 / 笔记双框；追加成功后自动重编译 Wiki（S3） */}
+      <AppendSourcesPanel taskId={taskId} disabled={!!detail.running} showToast={showToast}
+        onAppended={() => setAppendNonce(n => n + 1)} />
+
       {/* 知识库条目（只读） */}
       <KbPanel kbCode={detail.kbCode} showToast={showToast} readOnly />
+    </div>
+  )
+}
+
+// ===== 继续补充材料（11-23-adhoc-append-sources S1/S2） =====
+
+/**
+ * 任务详情页底部的追加入口：文档来源（多行，类型由后端 DocParser 唯一权威判定）/ 聊天记录 / 笔记双框。
+ * 笔记双框（用户诉求原话）：框一「主要内容」= 自己的理解/结论/待办；框二「原文」= 粘贴的原始文本，
+ * 后端逐字保存（不 trim、不改空白）。原文框**不做 trim 直传**——粘贴内容长什么样就存什么样。
+ * 追加成功后端自动重排队流水线并重编译 Wiki（S3）；disabled=流水线推进中（后端同一把串行闸兜底）。
+ */
+function AppendSourcesPanel({ taskId, disabled, showToast, onAppended }) {
+  const [docSources, setDocSources] = useState('')
+  const [chat, setChat] = useState('')
+  const [chatTitle, setChatTitle] = useState('')
+  const [noteTitle, setNoteTitle] = useState('')
+  const [noteSummary, setNoteSummary] = useState('')
+  const [noteRaw, setNoteRaw] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const hasInput = !!(docSources.trim() || chat.trim() || noteSummary.trim() || noteRaw.trim())
+
+  async function submit() {
+    if (saving || disabled) return
+    if (!hasInput) return showToast('请至少填写一项：文档来源 / 聊天记录 / 笔记（主要内容或原文）', 'error')
+    setSaving(true)
+    try {
+      const body = {}
+      if (docSources.trim()) body.docSources = docSources
+      if (chat.trim()) {
+        body.chat = chat
+        if (chatTitle.trim()) body.chatTitle = chatTitle.trim()
+      }
+      if (noteSummary.trim() || noteRaw.trim()) {
+        if (noteTitle.trim()) body.noteTitle = noteTitle.trim()
+        body.noteSummary = noteSummary   // 原样直传：原文/主要内容的空白由后端按契约保存
+        body.noteRaw = noteRaw
+      }
+      const res = await fetch(`/api/ad-hoc-tasks/${taskId}/append-sources`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      })
+      const d = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(d.error || '追加失败')
+      const added = (d.added || []).length
+      const dup = (d.duplicated || []).length
+      if (added > 0 && d.wikiRebuildQueued) {
+        showToast(`已追加 ${added} 项材料${dup ? `（另去重跳过 ${dup} 项）` : ''}——Wiki 正在基于新增材料重编译，对话照常可用`, 'success')
+      } else {
+        showToast(`材料都已在知识库中（去重跳过 ${dup} 项），未触发重编译`, 'success')
+      }
+      setDocSources(''); setChat(''); setChatTitle(''); setNoteTitle(''); setNoteSummary(''); setNoteRaw('')
+      onAppended?.()
+    } catch (e) {
+      showToast(e.message, 'error')
+    } finally { setSaving(false) }
+  }
+
+  return (
+    <div className="card" data-append-sources style={{ marginTop: 14, padding: '14px 20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 14, fontWeight: 700 }}>📎 继续补充材料</span>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          建完任务后随时追加：文档来源 / 聊天记录 / 笔记（主要内容 + 原文两个框）。追加成功后 Wiki 自动重编译，期间对话照常可用。
+        </span>
+        {disabled && (
+          <span className="hook-badge" style={{ color: '#b45309', background: 'rgba(245,158,11,.12)', borderColor: 'rgba(245,158,11,.4)' }}>
+            流水线推进中，暂不能追加（等当前段结束）
+          </span>
+        )}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 12, marginTop: 12 }}>
+        {/* 文档来源（多行） */}
+        <div className="form-group" style={{ margin: 0 }}>
+          <label className="form-label">文档来源（每行一条：http(s) 链接 / .pdf / .html / .md/.txt / .docx/.pptx/.xlsx/.doc 本地路径，类型自动判定）</label>
+          <textarea className="form-input" data-append-docs rows={4}
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, resize: 'vertical' }}
+            placeholder={'https://docs.supplier.com/api-v2\nD:\\docs\\补充说明.docx'}
+            value={docSources} disabled={disabled} onChange={e => setDocSources(e.target.value)} />
+        </div>
+
+        {/* 聊天记录 */}
+        <div className="form-group" style={{ margin: 0 }}>
+          <label className="form-label">聊天记录（粘贴与对接人的沟通内容）</label>
+          <input className="form-input" style={{ fontSize: 12, marginBottom: 6 }} placeholder="标题（可选）"
+            value={chatTitle} disabled={disabled} onChange={e => setChatTitle(e.target.value)} />
+          <textarea className="form-input" data-append-chat rows={4} style={{ fontSize: 12.5, resize: 'vertical' }}
+            placeholder="对接群里确认：字段改用 v2……"
+            value={chat} disabled={disabled} onChange={e => setChat(e.target.value)} />
+        </div>
+      </div>
+
+      {/* 笔记双框（S2 用户诉求：一个框主要内容、一个框原文） */}
+      <div style={{ marginTop: 12, border: '1px solid var(--border,#e5e7eb)', borderRadius: 10, padding: '10px 14px', background: 'rgba(59,130,246,.03)' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12.5, fontWeight: 700 }}>📝 笔记</span>
+          <input className="form-input" style={{ width: 200, fontSize: 12 }} placeholder="标题（可选）"
+            value={noteTitle} disabled={disabled} onChange={e => setNoteTitle(e.target.value)} />
+          <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>两个框至少填一个；「原文」逐字保存（不改写、不裁剪、不重排空白）</span>
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: 12, marginTop: 8 }}>
+          <div>
+            <label className="form-label">① 主要内容（你的理解 / 结论 / 待办）</label>
+            <textarea className="form-input" data-append-note-summary rows={5} style={{ fontSize: 12.5, resize: 'vertical' }}
+              placeholder="例：取消接口必须带订单号；押金口径待确认，下周一前给结论。"
+              value={noteSummary} disabled={disabled} onChange={e => setNoteSummary(e.target.value)} />
+          </div>
+          <div>
+            <label className="form-label">② 原文（直接粘贴：邮件 / 群消息 / 口头约定原话 / 合同条款…）</label>
+            <textarea className="form-input" data-append-note-raw rows={5}
+              style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, resize: 'vertical' }}
+              placeholder={'粘贴原始文本，保存时原样入库（含换行与空白）……'}
+              value={noteRaw} disabled={disabled} onChange={e => setNoteRaw(e.target.value)} />
+          </div>
+        </div>
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 12 }}>
+        <button className="btn btn-primary" data-append-submit style={{ fontSize: 12.5, padding: '6px 18px' }}
+          disabled={disabled || saving || !hasInput} onClick={submit}>
+          {saving ? '追加中…' : '＋ 追加材料并重编译 Wiki'}
+        </button>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          重复追加同一条来源/同一段笔记不会产生重复条目；重编译期间对话框照常可用。
+        </span>
+      </div>
     </div>
   )
 }
@@ -415,6 +557,9 @@ function RunningPanel({ detail }) {
 function PendingQuestionCard({ detail, onAnswer }) {
   const [answer, setAnswer] = useState('')
   const [sending, setSending] = useState(false)
+  const inputRef = useRef(null)
+  // X1：多行 composer 自适应高度（1 行起，约 6 行封顶内部滚动；发送清空后自动收回单行）
+  useEffect(() => { autoGrow(inputRef.current) }, [answer])
   const question = (detail?.pendingQuestion || '').trim()
   if (!question) return null
 
@@ -446,11 +591,12 @@ function PendingQuestionCard({ detail, onAnswer }) {
       <div data-pending-question-text style={{ marginTop: 10, padding: '10px 12px', borderRadius: 8, background: 'rgba(255,255,255,.55)', border: '1px solid rgba(245,158,11,.25)', fontSize: 12.5, lineHeight: 1.75, color: 'var(--text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word', userSelect: 'text', cursor: 'text' }}>
         {question}
       </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-        <input className="form-input" style={{ flex: 1 }} data-pending-answer
-          placeholder="直接在这里答复（例：上限按 20 家）——回车发送，agent 在同一会话继续"
+      <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'flex-end' }}>
+        <textarea ref={inputRef} rows={1} className="form-input" data-pending-answer
+          style={{ flex: 1, resize: 'none', overflowY: 'auto', fontFamily: 'inherit' }}
+          placeholder={`直接在这里答复（例：上限按 20 家）——agent 在同一会话继续（${COMPOSER_HINT}）`}
           value={answer} onChange={e => setAnswer(e.target.value)}
-          onKeyDown={e => handleComposerKey(e, submit, { multiline: false })} />
+          onKeyDown={e => handleComposerKey(e, submit, { multiline: true })} />
         <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={!answer.trim() || sending} onClick={submit}>
           {sending ? '发送中…' : '答复并继续'}
         </button>
@@ -531,6 +677,9 @@ function ChatPanel({ taskId, showToast, wikiReady = true, taskStatus = '', chatN
   const [sending, setSending] = useState(false)
   const [tick, setTick] = useState(0)   // 每次轮询 +1：只喂给 PENDING 行刷新"已运行"时长，终态气泡不受影响
   const bodyRef = useRef(null)
+  const inputRef = useRef(null)
+  // X1：多行 composer 自适应高度（1 行起，约 6 行封顶内部滚动；发送清空后自动收回单行）
+  useEffect(() => { autoGrow(inputRef.current) }, [q])
 
   const load = () => fetch(`/api/ad-hoc-tasks/${taskId}/chat`)
     .then(r => r.ok ? r.json() : [])
@@ -564,8 +713,8 @@ function ChatPanel({ taskId, showToast, wikiReady = true, taskStatus = '', chatN
   }
 
   const placeholder = (msgs.some(m => m.status === 'BLOCKED') || !wikiReady)
-    ? '回一句就是答复（例：上限按 20 家）——agent 在同一会话继续…（回车发送）'
-    : '吩咐临时小改，例如：某供应商把历史接口字段改了，帮我改一下…（回车发送）'
+    ? `回一句就是答复（例：上限按 20 家）——agent 在同一会话继续…（${COMPOSER_HINT}）`
+    : `吩咐临时小改，例如：某供应商把历史接口字段改了，帮我改一下…（${COMPOSER_HINT}）`
 
   return (
     <div className="card" style={{ marginTop: 14, padding: '14px 20px' }}>
@@ -582,9 +731,11 @@ function ChatPanel({ taskId, showToast, wikiReady = true, taskStatus = '', chatN
         {msgs.length === 0 && <div style={{ fontSize: 12, color: 'var(--text-dim)', padding: '12px 0', textAlign: 'center' }}>（还没有对话 — 例如："某供应商把历史某个接口的字段改了，帮我改一下"）</div>}
         {msgs.map(m => <MessageBubble key={m.id} m={m} tick={m.status === 'PENDING' ? tick : 0} />)}
       </div>
-      <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-        <input className="form-input" style={{ flex: 1 }} placeholder={placeholder}
-          value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => handleComposerKey(e, send, { multiline: false })} />
+      <div style={{ display: 'flex', gap: 8, marginTop: 10, alignItems: 'flex-end' }}>
+        <textarea ref={inputRef} rows={1} className="form-input" data-chat-input
+          style={{ flex: 1, resize: 'none', overflowY: 'auto', fontFamily: 'inherit' }}
+          placeholder={placeholder}
+          value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => handleComposerKey(e, send, { multiline: true })} />
         <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={!q.trim() || sending} onClick={send}>
           {sending ? '发送中…' : '📤 发送'}
         </button>
