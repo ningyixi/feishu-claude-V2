@@ -3,6 +3,7 @@ import { Surface, useConfirm, useQueryParam, useFormSaved } from '../components/
 import { useState, useEffect, useRef, useCallback } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { COMPOSER_HINT, handleComposerKey } from '../utils/composerKeys'
 
 // ===== 常量与工具 =====
 
@@ -366,7 +367,7 @@ export default function E2ETest() {
     stickBottom.current = true
   }
   function handleKeyDown(e) {
-    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() }
+    handleComposerKey(e, handleSend)
   }
 
   const pipeline = taskInfo?.pipeline
@@ -518,10 +519,10 @@ export default function E2ETest() {
             <textarea className="chat-input" rows={2}
               placeholder={activeTaskId
                 ? (taskInfo?.pendingQuestion
-                  ? '⏸ 回答上面的提问，发送后流水线自动继续…（Enter 发送）'
+                  ? `⏸ 回答上面的提问，发送后流水线自动继续…（${COMPOSER_HINT}）`
                   : taskInfo?.pipelineDone
-                    ? '输入下一个任务需求，发送即续派新一轮编排（历史记录保留、右侧递增）…（Enter 发送）'
-                    : (addressee === 'auto' ? '输入测试指令启动流水线…（Enter 发送）' : `直接对 ${roleOf(addressee).label} 说话…（Enter 发送）`))
+                    ? `输入下一个任务需求，发送即续派新一轮编排（历史记录保留、右侧递增）…（${COMPOSER_HINT}）`
+                    : (addressee === 'auto' ? `输入测试指令启动流水线…（${COMPOSER_HINT}）` : `直接对 ${roleOf(addressee).label} 说话…（${COMPOSER_HINT}）`))
                 : '请先创建/选择任务'}
               value={input} disabled={!activeTaskId || !connected}
               onChange={e => setInput(e.target.value)} onKeyDown={handleKeyDown} />

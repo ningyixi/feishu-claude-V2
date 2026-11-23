@@ -3,6 +3,7 @@ import { Surface, useConfirm, useDirtyValue, useQueryParam } from '../components
 import { useState, useEffect, useRef } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { handleComposerKey } from '../utils/composerKeys'
 
 // ===== 数字员工（侧边栏独立页面）：员工 CRUD / 需求下发自动并行 / 实例工位实时进度 / 主动上报聊天框 =====
 
@@ -731,7 +732,7 @@ function EmpMsgPanel({ empId, messages, unreadCount, chatProgress, shellProgress
                 : '对员工说点什么，可以直接安排小事（Enter 发送）')}
             value={text} disabled={busy || sending}
             onChange={e => setText(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
+            onKeyDown={e => handleComposerKey(e, send, { multiline: false })} />
           <button className="btn btn-primary" onClick={send} disabled={!text.trim() || busy || sending}>
             {sending ? '发送中…' : mode === 'shell' ? '▶ 执行' : '发送'}
           </button>

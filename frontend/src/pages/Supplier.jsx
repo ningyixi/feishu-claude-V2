@@ -6,6 +6,7 @@ import remarkGfm from 'remark-gfm'
 import SupplierWikiPanel from '../components/SupplierWikiPanel'
 import SupplierWorkflowPanel from '../components/SupplierWorkflowPanel'
 import { useSearchParams } from 'react-router-dom'
+import { COMPOSER_HINT, handleComposerKey } from '../utils/composerKeys'
 
 // ===== 常量 =====
 
@@ -232,7 +233,7 @@ function CreateJob({ onBack, onCreated, showToast }) {
                   <option value="url">🔗 链接</option>
                   <option value="path">📁 本地路径</option>
                 </select>
-                <input className="form-input" style={{ flex: 1 }} placeholder={d.type === 'url' ? 'https://docs.supplier.com/api' : 'D:\\docs\\supplier-api.pdf、.html 或 .md 本地文档'}
+                <input className="form-input" style={{ flex: 1 }} placeholder={d.type === 'url' ? 'https://docs.supplier.com/api' : 'D:\\docs\\supplier-api.pdf、.html、.md、.docx/.pptx/.xlsx/.doc 本地文档'}
                   value={d.value}
                   onChange={e => setForm(f => ({ ...f, docs: f.docs.map((x, xi) => xi === i ? { ...x, value: e.target.value } : x) }))} />
                 <button className="btn" style={{ flexShrink: 0, padding: '4px 10px' }}
@@ -551,9 +552,9 @@ function GameView({ jobId, onBack, showToast }) {
                 <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px dashed var(--border,#e5e7eb)' }}>
                   <div style={{ display: 'flex', gap: 8 }}>
                     <textarea className="form-input" rows={3} style={{ flex: 1, padding: '7px 10px', fontSize: 12.5, resize: 'vertical', fontFamily: 'inherit' }}
-                      placeholder={cur.artifact ? '纠正/补充指示（如：验价接口映射错了，应该是 xxx…），Enter 执行，Shift+Enter 换行' : '补充指示（可选），Shift+Enter 换行'}
+                      placeholder={`${cur.artifact ? '纠正/补充指示（如：验价接口映射错了，应该是 xxx…）' : '补充指示（可选）'}，${COMPOSER_HINT}`}
                       value={instruction} onChange={e => setInstruction(e.target.value)}
-                      onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runNode(cur.nodeId) } }} />
+                      onKeyDown={e => handleComposerKey(e, () => runNode(cur.nodeId))} />
                     <button className="btn btn-primary" style={{ fontSize: 12.5, padding: '6px 16px', flexShrink: 0 }}
                       disabled={cur.status === 'RUNNING' || !job.instanceId}
                       onClick={() => runNode(cur.nodeId)}>
@@ -572,9 +573,9 @@ function GameView({ jobId, onBack, showToast }) {
                       </div>
                       <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                         <textarea className="form-input" rows={2} style={{ flex: 1, padding: '7px 10px', fontSize: 12.5, resize: 'vertical', fontFamily: 'inherit' }}
-                          placeholder="回答卡点（凭证 / 决定 / 材料说明…），Enter 发送，Shift+Enter 换行"
+                          placeholder={`回答卡点（凭证 / 决定 / 材料说明…），${COMPOSER_HINT}`}
                           value={steerAnswer} onChange={e => setSteerAnswer(e.target.value)}
-                          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); answerNode(cur.nodeId) } }} />
+                          onKeyDown={e => handleComposerKey(e, () => answerNode(cur.nodeId))} />
                         <button className="btn btn-primary" style={{ fontSize: 12.5, padding: '6px 16px', flexShrink: 0 }}
                           disabled={!steerAnswer.trim()}
                           onClick={() => answerNode(cur.nodeId)}>📤 发送答复</button>
@@ -880,9 +881,15 @@ const KB_TYPES = {
   pdf: { icon: '📕', label: '本地 PDF', ph: 'D:\\docs\\supplier-api.pdf（入库后点「解析」提取转 MD）' },
   html: { icon: '🌐', label: '本地 HTML', ph: 'D:\\supplier-docs\\DIRS\\OTA Default Interface (1).html（入库后点「解析」转 MD；路径可含空格/括号）' },
   md: { icon: '📃', label: '本地 MD', ph: 'D:\\docs\\api.md（已是 Markdown，入库即产物，无需解析）' },
+  docx: { icon: '📘', label: '本地 Word(docx)', ph: 'D:\\docs\\接口文档.docx（入库后点「解析」提取转 MD；自动跳过修订删除与域代码）' },
+  doc: { icon: '📘', label: '本地 Word97-2003(doc)', ph: 'D:\\docs\\legacy.doc（入库即解析；加密/损坏/空正文会给出可执行引导且不入库）' },
+  pptx: { icon: '📽', label: '本地 PPT(pptx)', ph: 'D:\\docs\\kickoff.pptx（按页抽取文本转 MD；截图为主的 PPT 会如实判失败并给指引）' },
+  xlsx: { icon: '📗', label: '本地 Excel(xlsx)', ph: 'D:\\docs\\酒店列表.xlsx（最多 5 个工作表转 MD 表格；超大表自动截断并标注真实行列数）' },
   chat: { icon: '💬', label: '聊天记录', ph: '粘贴与供应商对接人的沟通内容，可分多次补充…' },
   note: { icon: '📝', label: '笔记', ph: '随手记的要点、口头约定、会议结论…' },
 }
+// 与后端 DocParser.PARSABLE_TYPES 对齐：支持「解析/重解析」按钮的类型
+const KB_PARSABLE = ['url', 'pdf', 'html', 'md', 'docx', 'pptx', 'xlsx', 'doc']
 const KB_STATUS = {
   RAW: { label: '未解析', color: '#6b7280' },
   PENDING: { label: '排队解析', color: '#6b7280' },
@@ -927,7 +934,7 @@ export function KbPanel({ kbCode, showToast, readOnly = false }) {
     const d = await res.json().catch(() => ({}))
     if (!res.ok) return showToast(d.error || '添加失败', 'error')
     setValue(''); setTitle('')
-    showToast(type === 'chat' || type === 'note' || type === 'md' ? '已入库，下次节点执行即可引用' : '已入库（原文）。点该行右侧「解析」生成解析文档', 'success')
+    showToast(type === 'chat' || type === 'note' || type === 'md' || type === 'doc' ? '已入库，下次节点执行即可引用' : '已入库（原文）。点该行右侧「解析」生成解析文档', 'success')
     load()
   }
   async function changeStage(id, stage) {
@@ -956,7 +963,7 @@ export function KbPanel({ kbCode, showToast, readOnly = false }) {
     showToast('已重新排队解析', 'success'); load()
   }
   async function removeEntry(e) {
-    if (!await confirmAction({ kind: shared || /"site"\s*:\s*true/.test(e.metaJson || '') ? 'dialog' : 'popconfirm', title: '删除知识库条目？', body: `删除「${e.title || '该条目'}」？${(e.type === 'url' || e.type === 'pdf' || e.type === 'html') && e.source ? '（来源仍在创建时的文档清单里，但不会再被自动同步回来）' : ''}删除后无法恢复，关联的站点页面也会删除，使用这些材料的 Wiki 将过期。`, confirmLabel: '删除条目' })) return
+    if (!await confirmAction({ kind: shared || /"site"\s*:\s*true/.test(e.metaJson || '') ? 'dialog' : 'popconfirm', title: '删除知识库条目？', body: `删除「${e.title || '该条目'}」？${(KB_PARSABLE.includes(e.type) && e.type !== 'md') && e.source ? '（来源仍在创建时的文档清单里，但不会再被自动同步回来）' : ''}删除后无法恢复，关联的站点页面也会删除，使用这些材料的 Wiki 将过期。`, confirmLabel: '删除条目' })) return
     const res = await fetch(`/api/supplier-kb/entries/${e.id}`, { method: 'DELETE' })
     const d = await res.json().catch(() => ({}))
     if (!res.ok) return showToast(d.error || '删除失败', 'error')
@@ -1025,6 +1032,9 @@ export function KbPanel({ kbCode, showToast, readOnly = false }) {
                 </span>
               )}
               {isSite && m.partial && <span className="hook-badge" style={{ color: '#b45309', background: 'rgba(245,158,11,.12)', borderColor: 'rgba(245,158,11,.4)' }}>⚠️ 部分导入</span>}
+              {m.truncated && <span className="hook-badge" style={{ color: '#b45309', background: 'rgba(245,158,11,.12)', borderColor: 'rgba(245,158,11,.4)' }} data-tooltip={`产物超出上下文预算已截断${m.rows != null ? `（共 ${m.rows} 行 ${m.cols} 列）` : ''}，完整数据见来源文件`} tabIndex={0}>✂️ 已截断{m.rows != null ? ` ${m.rows}行×${m.cols}列` : ''}</span>}
+              {m.tablesLost && <span className="hook-badge" style={{ color: '#b45309', background: 'rgba(245,158,11,.12)', borderColor: 'rgba(245,158,11,.4)' }} data-tooltip="Word97 表格结构无法还原，已降级为线性文本" tabIndex={0}>⚠️ 表格降级</span>}
+              {m.mislabeledExtension && <span className="hook-badge" style={{ color: '#6b7280', background: 'rgba(107,114,128,.1)', borderColor: 'rgba(107,114,128,.35)' }} data-tooltip="扩展名与真实格式不符，已按真实字节解析" tabIndex={0}>🔀 扩展名不符</span>}
               {e.status === 'FAILED' && <span style={{ fontSize: 11, color: 'var(--error)' }} data-tooltip={e.error} tabIndex={0}>{String(e.error || '').slice(0, 40)}</span>}
               {!readOnly && (
               <select aria-label="材料使用阶段" className="form-input" style={{ width: 130, fontSize: 11 }} value={e.contextStage || 'all'} onChange={ev => changeStage(e.id, ev.target.value)}>
@@ -1040,10 +1050,10 @@ export function KbPanel({ kbCode, showToast, readOnly = false }) {
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px', color: 'var(--error)' }}
                   onClick={async () => { await fetch(`/api/supplier-kb/entries/${e.id}/cancel`, { method: 'POST' }); showToast('已请求取消，当前页完成后停止', 'success') }}>✋ 取消</button>
               )}
-              {!readOnly && (e.type === 'url' || e.type === 'pdf' || e.type === 'html') && e.status === 'RAW' && (
+              {!readOnly && KB_PARSABLE.includes(e.type) && e.status === 'RAW' && (
                 <button className="btn btn-primary" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔨 解析</button>
               )}
-              {!readOnly && (e.type === 'url' || e.type === 'pdf' || e.type === 'html') && (e.status === 'DONE' || e.status === 'FAILED') && (
+              {!readOnly && KB_PARSABLE.includes(e.type) && (e.status === 'DONE' || e.status === 'FAILED') && (
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔄 重解析</button>
               )}
               {!readOnly && (
@@ -1250,7 +1260,7 @@ function ChatPanel({ jobId, running, showToast }) {
       </div>
       <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
         <input className="form-input" style={{ flex: 1 }} placeholder="问实例现在的情况、失败原因、某个结论的依据…（回车发送）"
-          value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') send() }} />
+          value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => handleComposerKey(e, send, { multiline: false })} />
         <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={!q.trim() || sending} onClick={send}>
           {sending ? '发送中…' : '📤 提问'}
         </button>
@@ -1320,9 +1330,9 @@ function DevChatPanel({ jobId, nodeId, disabled, showToast }) {
       </div>
       <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
         <textarea className="form-input" rows={3} style={{ flex: 1, fontSize: 12.5, resize: 'vertical', fontFamily: 'inherit' }}
-          placeholder={disabled ? '先在右上角绑定执行实例' : '原始诉求（Shift+Enter 换行，Enter 生成）'}
+          placeholder={disabled ? '先在右上角绑定执行实例' : `原始诉求（${COMPOSER_HINT}）`}
           value={text} onChange={e => setText(e.target.value)} disabled={disabled}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send() } }} />
+          onKeyDown={e => handleComposerKey(e, send)} />
         <button className="btn btn-primary" style={{ fontSize: 12.5, padding: '6px 14px', flexShrink: 0 }}
           disabled={disabled || !text.trim() || sending} onClick={send}>✨ 生成</button>
       </div>

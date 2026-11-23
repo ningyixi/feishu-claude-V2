@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useSearchParams } from 'react-router-dom'
 import { useOccupied, KbPanel } from './Supplier'
+import { handleComposerKey } from '../utils/composerKeys'
 
 // ===== 常量 =====
 
@@ -179,7 +180,7 @@ function CreateTask({ onDone, showToast }) {
           onChange={e => setForm(f => ({ ...f, name: e.target.value }))} />
       </div>
       <div className="form-group">
-        <label className="form-label">关联文档 *（每行一条：http(s) 链接 / .pdf / .html / .md/.txt 本地路径）</label>
+        <label className="form-label">关联文档 *（每行一条：http(s) 链接 / .pdf / .html / .md/.txt / .docx/.pptx/.xlsx/.doc 本地路径）</label>
         <textarea className="form-input" rows={6} style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, resize: 'vertical' }}
           placeholder={'https://docs.supplier.com/api\nD:\\docs\\supplier-api.pdf'}
           value={form.docSources} onChange={e => setForm(f => ({ ...f, docSources: e.target.value }))} />
@@ -449,7 +450,7 @@ function PendingQuestionCard({ detail, onAnswer }) {
         <input className="form-input" style={{ flex: 1 }} data-pending-answer
           placeholder="直接在这里答复（例：上限按 20 家）——回车发送，agent 在同一会话继续"
           value={answer} onChange={e => setAnswer(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter') submit() }} />
+          onKeyDown={e => handleComposerKey(e, submit, { multiline: false })} />
         <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={!answer.trim() || sending} onClick={submit}>
           {sending ? '发送中…' : '答复并继续'}
         </button>
@@ -583,7 +584,7 @@ function ChatPanel({ taskId, showToast, wikiReady = true, taskStatus = '', chatN
       </div>
       <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
         <input className="form-input" style={{ flex: 1 }} placeholder={placeholder}
-          value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') send() }} />
+          value={q} onChange={e => setQ(e.target.value)} onKeyDown={e => handleComposerKey(e, send, { multiline: false })} />
         <button className="btn btn-primary" style={{ flexShrink: 0 }} disabled={!q.trim() || sending} onClick={send}>
           {sending ? '发送中…' : '📤 发送'}
         </button>
