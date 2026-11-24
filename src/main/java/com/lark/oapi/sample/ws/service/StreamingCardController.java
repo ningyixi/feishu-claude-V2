@@ -27,6 +27,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  *   <li>节流四件套：300ms 节流 + mutex/needsReflush 合并 + lastFlushedText 去重 + 230020 限频跳帧</li>
  *   <li>终态：card.settings(streaming_mode:false) → card.update(完整终态卡)；即使中间帧全部被跳过也能兜底</li>
  *   <li>降级：CardKit 任一环节失败 → im.message.patch 整卡替换（1500ms 节流），仍是原地更新不刷屏</li>
+ *   <li>保险丝(C2/2026-11-24)：终态卡片通道全部失败 → 普通文本把答案正文发出去（宁可丑、不可没有）；
+ *       messageSent/isDelivered 只由<b>真实成功</b>置位，假成功不再骗过上层的 replyText 回退</li>
  * </ul>
  * 状态机：CREATING → STREAMING → {COMPLETED, ABORTED, FAILED}，终态后所有回调 no-op。
  * <p>
@@ -169,7 +171,7 @@ public class StreamingCardController implements TurnListener {
                 data.addProperty("card_id", newCardId);
                 content.add("data", data);
 
-                CreateMessageResp msgResp = sendInteractive(content.toString());
+                CreateMessageResp msgResp = createInteractiveMessage(content.toString());
                 if (msgResp != null && msgResp.success() && msgResp.getData() != null) {
                     cardId = newCardId;
                     sentMessageId = msgResp.getData().getMessageId();
@@ -197,7 +199,7 @@ public class StreamingCardController implements TurnListener {
         cardId = null;
         try {
             String json = CardBuilder.buildStreamingCardJson("", "", List.of(), 0, false);
-            CreateMessageResp resp = sendInteractive(json);
+            CreateMessageResp resp = createInteractiveMessage(json);
             if (resp != null && resp.success() && resp.getData() != null) {
                 sentMessageId = resp.getData().getMessageId();
                 messageSent = true;
@@ -364,8 +366,13 @@ public class StreamingCardController implements TurnListener {
         }
     }
 
-    private void patchMessage(String cardJson, String displayTextForDedup) {
-        if (sentMessageId == null) return;
+    /**
+     * im.message.patch 整卡替换。
+     * C2：返回是否<b>真的成功</b>——只有 resp.success() 才算送达；错误码（含 230020 限频）与异常一律 false，
+     * 终态调用方据此继续走文本兜底，绝不再"调完就算成功"。
+     */
+    private boolean patchMessage(String cardJson, String displayTextForDedup) {
+        if (sentMessageId == null) return false;
         try {
             PatchMessageResp resp = client.im().message().patch(PatchMessageReq.newBuilder()
                     .messageId(sentMessageId)
@@ -373,13 +380,17 @@ public class StreamingCardController implements TurnListener {
                     .build());
             if (resp.success()) {
                 synchronized (this) { lastFlushedText = displayTextForDedup; }
-            } else if (resp.getCode() == RATE_LIMITED_CODE) {
-                log.debug("[Card] patch 限频(230020)，跳过本帧");
+                return true;
+            }
+            if (resp.getCode() == RATE_LIMITED_CODE) {
+                log.debug("[Card] patch 限频(230020)，本帧未送达");
             } else {
                 log.warn("[Card] im.message.patch 失败 code={} msg={}", resp.getCode(), resp.getMsg());
             }
+            return false;
         } catch (Exception e) {
             log.warn("[Card] im.message.patch 异常: {}", e.getMessage());
+            return false;
         }
     }
 
@@ -399,29 +410,63 @@ public class StreamingCardController implements TurnListener {
             phase = target;
         }
 
+        boolean done = false;
         try {
             if (r.durationMs <= 0) r.durationMs = elapsedMs();
             List<CardBuilder.Option> options = (!r.isError && !aborted && CardBuilder.hasOptions(r.text))
                     ? CardBuilder.extractOptions(r.text) : null;
             String finalJson = CardBuilder.buildFinalCardJson(r, options);
 
-            boolean done = false;
+            // C2：done 只能由真实成功置位——此前 patchMessage 不看返回值就 done=true，
+            //     假成功骗过 isDelivered 保险丝（FeishuBotService 的 replyText 回退永不触发），
+            //     内容既不进卡片也不发文本 → 用户观感"发了没回复"。
             if (!patchMode && cardId != null) {
-                done = closeStreamingAndUpdate(finalJson);
+                done = closeStreamingAndUpdate(finalJson);       // 通道①：CardKit settings + update
             }
             if (!done) {
                 if (sentMessageId != null) {
-                    patchMessage(finalJson, "\u0000final");   // 终态兜底：即使中间帧全被限频跳过也保证最终内容正确
-                    done = true;
+                    // 通道②：patch 整卡替换（即使中间帧全被限频跳过也保证最终内容正确）
+                    done = patchMessage(finalJson, "\u0000final");
                 } else {
-                    done = sendInteractive(finalJson) != null;   // 什么都没发出去过 → 直接发终态卡
+                    // 通道③：什么都没发出去过 → 直接发终态卡
+                    done = sendInteractive(finalJson);
                 }
             }
-            if (done) messageSent = true;
+        } catch (Exception e) {
+            log.error("[Card] 终态更新异常（卡片通道按未送达处理，尝试文本兜底）", e);
+        }
+
+        if (done) {
+            messageSent = true;
+            // C3：只有真实送达才打「终态更新完成」
             log.info("[Card] 终态更新完成: phase={}, {}字, tools={}", target, r.text != null ? r.text.length() : 0,
                     r.toolSteps != null ? r.toolSteps.size() : 0);
-        } catch (Exception e) {
-            log.error("[Card] 终态更新失败", e);
+        } else {
+            // C2/C3：卡片通道全部失败 → 普通文本兜底把答案正文发出去（宁可丑、不可没有），日志如实
+            fallbackToText(r, target);
+        }
+    }
+
+    /** 文本兜底正文上限（对齐终态卡 CardBuilder.MAX_FINAL_TEXT，防超飞书文本消息长度限制） */
+    private static final int TEXT_FALLBACK_MAX_CHARS = 20000;
+
+    /** C2 保险丝：终态卡片通道全部失败后，用普通文本消息发送答案正文；真实成功才置 messageSent */
+    private void fallbackToText(TurnResult r, Phase target) {
+        String body = r.text != null ? r.text : "";
+        int len = body.length();
+        if (body.isBlank()) {
+            log.error("[Card] 终态卡片通道全部失败且无可兜底正文: phase={}, messageSent={}", target, messageSent);
+            return;
+        }
+        log.error("[Card] 终态卡片通道全部失败(update/patch/发卡均未真实成功): phase={}, {}字, 回退普通文本", target, len);
+        if (len > TEXT_FALLBACK_MAX_CHARS) {
+            body = body.substring(0, TEXT_FALLBACK_MAX_CHARS) + "\n\n... (内容过长已截断，共 " + len + " 字符)";
+        }
+        if (sendText(body)) {
+            messageSent = true;
+            log.warn("[Card] 已回退文本: phase={}, {}字正文已用普通文本发出（卡片终态未送达）", target, len);
+        } else {
+            log.error("[Card] 回退也失败: 本轮终态内容未送达 phase={}, {}字, messageSent={}", target, len, messageSent);
         }
     }
 
@@ -509,7 +554,19 @@ public class StreamingCardController implements TurnListener {
         }
     }
 
-    private CreateMessageResp sendInteractive(String cardJson) {
+    /**
+     * C2：发 interactive 卡片消息，只有接口<b>真的成功</b>（resp.success()）才返回 true；
+     * 业务错误码与异常一律 false（此前 `sendInteractive(json) != null` 会把错误响应当成功）。
+     */
+    private boolean sendInteractive(String cardJson) {
+        CreateMessageResp resp = createInteractiveMessage(cardJson);
+        if (resp != null && resp.success()) return true;
+        log.warn("[Card] 卡片消息发送未成功: {}", resp != null ? "code=" + resp.getCode() + " msg=" + resp.getMsg() : "resp=null");
+        return false;
+    }
+
+    /** 创建 interactive 卡片消息，返回原始响应（异常 → null）；仅供需要 messageId 的创建路径使用 */
+    private CreateMessageResp createInteractiveMessage(String cardJson) {
         try {
             CreateMessageReq req = CreateMessageReq.newBuilder()
                     .receiveIdType(receiveIdType)
@@ -527,11 +584,12 @@ public class StreamingCardController implements TurnListener {
         }
     }
 
-    private void sendText(String text) {
+    /** C2：发普通文本消息，只有真的成功才返回 true（onQueued 提示 & 终态文本兜底共用） */
+    private boolean sendText(String text) {
         try {
             JsonObject content = new JsonObject();
             content.addProperty("text", text);
-            client.im().message().create(CreateMessageReq.newBuilder()
+            CreateMessageResp resp = client.im().message().create(CreateMessageReq.newBuilder()
                     .receiveIdType(receiveIdType)
                     .createMessageReqBody(CreateMessageReqBody.newBuilder()
                             .receiveId(receiveId)
@@ -540,8 +598,12 @@ public class StreamingCardController implements TurnListener {
                             .content(content.toString())
                             .build())
                     .build());
+            if (resp != null && resp.success()) return true;
+            log.warn("[Card] 文本消息发送失败: {}", resp != null ? "code=" + resp.getCode() + " msg=" + resp.getMsg() : "resp=null");
+            return false;
         } catch (Exception e) {
             log.warn("[Card] 发送文本提示失败: {}", e.getMessage());
+            return false;
         }
     }
 }

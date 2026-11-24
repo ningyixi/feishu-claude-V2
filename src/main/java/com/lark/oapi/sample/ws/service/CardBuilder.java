@@ -27,7 +27,7 @@ public class CardBuilder {
 
     /**
      * 构建一条或多条卡片 JSON（长文本自动拆分）。
-     * 返回的列表中，只有最后一条可能包含按钮。
+     * 返回的列表中，只有最后一条可能包含可选项列表。
      */
     public static List<String> buildCards(String text, List<Option> options) {
         List<String> cards = new ArrayList<>();
@@ -117,7 +117,9 @@ public class CardBuilder {
     }
 
     /**
-     * 生成飞书交互式卡片 JSON（带按钮选项）
+     * 生成飞书交互式卡片 JSON（可选项以 markdown 列表呈现）。
+     * C1(2026-11-24)：schema V2 不再支持 tag:"action"（code=200861 unsupported tag action），
+     * 按钮组降级为正文列表——用户本来就在输入框回复编号，交互控件非必需。
      */
     public static String buildOptionsCard(String text, List<Option> options) {
         JsonObject card = new JsonObject();
@@ -137,40 +139,11 @@ public class CardBuilder {
         // 完整文本（拆分成多个 markdown 元素，每个不超过 3500 字）
         addTextElements(elements, text, 3500);
 
-        // 分隔线
+        // 分隔线 + 可选项 markdown 列表（C1：替代 schema V2 不支持的 tag:"action" 按钮组）
         JsonObject hr = new JsonObject();
         hr.addProperty("tag", "hr");
         elements.add(hr);
-
-        // 按钮组
-        JsonObject action = new JsonObject();
-        action.addProperty("tag", "action");
-        // 不设 layout → 按钮默认一行一个
-        JsonArray actions = new JsonArray();
-
-        for (Option opt : options) {
-            JsonObject button = new JsonObject();
-            button.addProperty("tag", "button");
-
-            JsonObject btnText = new JsonObject();
-            btnText.addProperty("tag", "plain_text");
-            String label = opt.number + ". " + opt.title;
-            if (label.length() > 20) label = label.substring(0, 18) + "..";
-            btnText.addProperty("content", label);
-            button.add("text", btnText);
-
-            button.addProperty("type", "primary");
-
-            // 点击按钮后发送的值
-            JsonObject value = new JsonObject();
-            value.addProperty("choice", opt.number);
-            button.add("value", value);
-
-            actions.add(button);
-        }
-
-        action.add("actions", actions);
-        elements.add(action);
+        elements.add(buildOptionsMarkdownElement(options));
 
         card.add("elements", elements);
         return card.toString();
@@ -330,12 +303,13 @@ public class CardBuilder {
         }
         addTextElements(elements, text, 3500);
 
-        // 4. 选项按钮（保留交互能力，回调仍走 onP2CardActionTrigger）
+        // 4. 可选项列表（C1/2026-11-24：schema V2 报 200861 unsupported tag action，
+        //    按钮组降级为 markdown 正文列表，用户直接在输入框回复编号）
         if (options != null && !options.isEmpty()) {
             JsonObject hr = new JsonObject();
             hr.addProperty("tag", "hr");
             elements.add(hr);
-            elements.add(buildOptionButtons(options));
+            elements.add(buildOptionsMarkdownElement(options));
         }
 
         // 5. footer
@@ -560,27 +534,20 @@ public class CardBuilder {
         return panel;
     }
 
-    private static JsonObject buildOptionButtons(List<Option> options) {
-        JsonObject action = new JsonObject();
-        action.addProperty("tag", "action");
-        JsonArray actions = new JsonArray();
+    /**
+     * C1(2026-11-24)：可选项 → markdown 列表元素，替代 schema V2 不支持的 tag:"action" 按钮组
+     * （200861 unsupported tag action，导致终态 card.update 与 patch 双双被拒、回复"看不见"）。
+     * 形如：**可选：**\n1) 标题A\n2) 标题B
+     */
+    private static JsonObject buildOptionsMarkdownElement(List<Option> options) {
+        StringBuilder sb = new StringBuilder("**可选：**");
         for (Option opt : options) {
-            JsonObject button = new JsonObject();
-            button.addProperty("tag", "button");
-            JsonObject btnText = new JsonObject();
-            btnText.addProperty("tag", "plain_text");
-            String label = opt.number + ". " + opt.title;
-            if (label.length() > 20) label = label.substring(0, 18) + "..";
-            btnText.addProperty("content", label);
-            button.add("text", btnText);
-            button.addProperty("type", "primary");
-            JsonObject value = new JsonObject();
-            value.addProperty("choice", opt.number);
-            button.add("value", value);
-            actions.add(button);
+            sb.append("\n").append(opt.number).append(") ").append(opt.title);
         }
-        action.add("actions", actions);
-        return action;
+        JsonObject md = new JsonObject();
+        md.addProperty("tag", "markdown");
+        md.addProperty("content", sb.toString());
+        return md;
     }
 
     /** footer 两行：状态·耗时·模型 / tokens·缓存·费用（对照 openclaw-lark formatFooterRuntimeSegments） */
