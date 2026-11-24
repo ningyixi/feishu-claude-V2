@@ -146,6 +146,8 @@ function CreateTask({ onDone, showToast }) {
   const occupied = useOccupied()
   const [instances, setInstances] = useState([])
   const [form, setForm] = useState({ name: '', instanceId: '', docSources: '' })
+  // URL 行按同站点 BFS 递归抓取（11-24-adhoc-site-crawl SC1）：一个总开关，作用于本次提交的全部 URL 行
+  const [siteCrawl, setSiteCrawl] = useState(false)
   const [saving, setSaving] = useState(false)
 
   useEffect(() => {
@@ -160,7 +162,7 @@ function CreateTask({ onDone, showToast }) {
     try {
       const res = await fetch('/api/ad-hoc-tasks', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: form.name.trim() || null, instanceId: Number(form.instanceId), docSources: form.docSources }),
+        body: JSON.stringify({ name: form.name.trim() || null, instanceId: Number(form.instanceId), docSources: form.docSources, siteCrawl }),
       })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) throw new Error(data.error || '创建失败')
@@ -184,6 +186,15 @@ function CreateTask({ onDone, showToast }) {
         <textarea className="form-input" rows={6} style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, resize: 'vertical' }}
           placeholder={'https://docs.supplier.com/api\nD:\\docs\\supplier-api.pdf'}
           value={form.docSources} onChange={e => setForm(f => ({ ...f, docSources: e.target.value }))} />
+        {/* 站点递归抓取总开关（SC1）：文案写清作用范围，别让人以为只勾了某一行 */}
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12.5, marginTop: 8, cursor: 'pointer' }}
+          data-tooltip="从入口页发现链接逐页抓取：严格同源 + 入口第一级路径（如 /docs/），最多发现 200 页；发现第 201 页整体报错终止，不把前 200 页冒充完整成功。JS 渲染的 SPA 站点抓不到正文时如实报失败。" tabIndex={0}>
+          <input type="checkbox" data-site-crawl checked={siteCrawl} onChange={e => setSiteCrawl(e.target.checked)} />
+          URL 按同站点递归抓取（BFS，≤200 页）
+        </label>
+        <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>
+          勾选后作用于本次提交的<b>全部 URL 行</b>；本地文件 / PDF / 笔记不受影响。站点抓取未全部完成前（含取消、超 200 页上限失败）不会开始编译 Wiki。
+        </div>
       </div>
       <div className="form-group">
         <label className="form-label">绑定实例 *（Wiki 编译与后续对话都在这台实例的主会话上，与飞书私聊同会话）</label>
@@ -336,6 +347,9 @@ function TaskDetail({ taskId, onDeleted, showToast }) {
         {!ready && !failedStep && <RunningPanel detail={detail} />}
       </div>
 
+      {/* 站点抓取可见性（11-24-adhoc-site-crawl SC2/SC3）：进度/取消/产物目录/失败页原因，有站点条目即常驻 */}
+      <SiteCrawlPanel detail={detail} showToast={showToast} />
+
       {/* Wiki 状态卡（版本/来源数/页数） */}
       <div className="card" style={{ marginTop: 14, padding: '14px 20px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
@@ -389,6 +403,8 @@ function AppendSourcesPanel({ taskId, disabled, showToast, onAppended }) {
   const [noteTitle, setNoteTitle] = useState('')
   const [noteSummary, setNoteSummary] = useState('')
   const [noteRaw, setNoteRaw] = useState('')
+  // 追加的 URL 行按同站点 BFS 递归抓取（11-24-adhoc-site-crawl SC1）：只作用于本次追加的 URL 行
+  const [siteCrawl, setSiteCrawl] = useState(false)
   const [saving, setSaving] = useState(false)
 
   const hasInput = !!(docSources.trim() || chat.trim() || noteSummary.trim() || noteRaw.trim())
@@ -399,7 +415,10 @@ function AppendSourcesPanel({ taskId, disabled, showToast, onAppended }) {
     setSaving(true)
     try {
       const body = {}
-      if (docSources.trim()) body.docSources = docSources
+      if (docSources.trim()) {
+        body.docSources = docSources
+        if (siteCrawl) body.siteCrawl = true   // 开关只对 URL 行生效（后端按行类型分派）
+      }
       if (chat.trim()) {
         body.chat = chat
         if (chatTitle.trim()) body.chatTitle = chatTitle.trim()
@@ -421,7 +440,7 @@ function AppendSourcesPanel({ taskId, disabled, showToast, onAppended }) {
       } else {
         showToast(`材料都已在知识库中（去重跳过 ${dup} 项），未触发重编译`, 'success')
       }
-      setDocSources(''); setChat(''); setChatTitle(''); setNoteTitle(''); setNoteSummary(''); setNoteRaw('')
+      setDocSources(''); setChat(''); setChatTitle(''); setNoteTitle(''); setNoteSummary(''); setNoteRaw(''); setSiteCrawl(false)
       onAppended?.()
     } catch (e) {
       showToast(e.message, 'error')
@@ -450,6 +469,15 @@ function AppendSourcesPanel({ taskId, disabled, showToast, onAppended }) {
             style={{ fontFamily: 'var(--font-mono)', fontSize: 12.5, resize: 'vertical' }}
             placeholder={'https://docs.supplier.com/api-v2\nD:\\docs\\补充说明.docx'}
             value={docSources} disabled={disabled} onChange={e => setDocSources(e.target.value)} />
+          {/* 站点递归抓取总开关（SC1）：与新建表单同一语义，只作用于本次追加的 URL 行 */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, marginTop: 6, cursor: disabled ? 'default' : 'pointer', color: disabled ? 'var(--text-dim)' : undefined }}
+            data-tooltip="从入口页发现链接逐页抓取：严格同源 + 入口第一级路径（如 /docs/），最多发现 200 页；发现第 201 页整体报错终止，不把前 200 页冒充完整成功。JS 渲染的 SPA 站点抓不到正文时如实报失败。" tabIndex={0}>
+            <input type="checkbox" data-append-site-crawl checked={siteCrawl} disabled={disabled} onChange={e => setSiteCrawl(e.target.checked)} />
+            URL 按同站点递归抓取（BFS，≤200 页）
+          </label>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 3 }}>
+            勾选后作用于本次追加的<b>全部 URL 行</b>；本地文件 / PDF / 聊天记录 / 笔记不受影响。站点抓取未全部完成前不会重编译 Wiki。
+          </div>
         </div>
 
         {/* 聊天记录 */}
@@ -541,6 +569,93 @@ function RunningPanel({ detail }) {
       <span className="spinner" style={{ width: 9, height: 9, marginRight: 6 }} />
       正在编译 LLM Wiki…
       {wiki.phase ? `（${wiki.phase}）` : wiki.status ? `（${WIKI_LABEL[wiki.status] || wiki.status}）` : ''}
+    </div>
+  )
+}
+
+// ===== 站点抓取可见性（11-24-adhoc-site-crawl SC2/SC3） =====
+
+/**
+ * 站点条目进度面板：抓取中显示「已入 N 页 / 共发现 M 页」+「取消抓取」（复用现成 cancelCrawl 端点），
+ * 完成后显示总页数与产物目录，失败/跳过页列出前 3 条原因（不静默丢页）。
+ * 数据源 = detail.kbEntries：AdHocService.detail 把 crawlNow/persistPages 逐页回写的
+ * meta.found/loaded/failed/pending/partial 透传上来；失败原因走现成页面清单接口
+ * /api/supplier-kb/{kb}/entries/{id}/pages（与 KbPanel「📑 页面」弹窗同一数据源）。
+ * 超限（发现第 201 页）时条目按 SiteCrawler 原始错误落 FAILED，本面板原样展示，不截成"部分成功"。
+ */
+function SiteCrawlPanel({ detail, showToast }) {
+  const siteEntries = (detail.kbEntries || []).filter(e => e.site)
+  if (siteEntries.length === 0) return null
+  return (
+    <div className="card" data-site-crawl-panel style={{ marginTop: 14, padding: '14px 20px' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 14, fontWeight: 700 }}>🕸 站点抓取</span>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          同站点 BFS 递归抓取（≤200 页，发现第 201 页整体报错不冒充完整）；站点条目全部就绪前不会编译 Wiki
+        </span>
+      </div>
+      {siteEntries.map(e => <SiteCrawlRow key={e.id} kbCode={detail.kbCode} entry={e} showToast={showToast} />)}
+    </div>
+  )
+}
+
+function SiteCrawlRow({ kbCode, entry: e, showToast }) {
+  const [failedPages, setFailedPages] = useState([])
+  const crawling = ['RAW', 'PENDING', 'PARSING'].includes(e.status)
+  // 失败/跳过原因：抓取中 3s 轮询；终态（DONE 部分导入 / FAILED）也拉一次——原因必须可见，不静默丢页
+  useEffect(() => {
+    let alive = true
+    const load = () => fetch(`/api/supplier-kb/${encodeURIComponent(kbCode || '')}/entries/${e.id}/pages`)
+      .then(r => r.ok ? r.json() : [])
+      .then(rows => { if (alive && Array.isArray(rows)) setFailedPages(rows.filter(p => p.status === 'failed')) })
+      .catch(() => {})
+    load()
+    if (!crawling) return () => { alive = false }
+    const t = setInterval(load, 3000)
+    return () => { alive = false; clearInterval(t) }
+  }, [kbCode, e.id, crawling])
+
+  async function cancel() {
+    const res = await fetch(`/api/supplier-kb/entries/${e.id}/cancel`, { method: 'POST' })
+    if (!res.ok) { const d = await res.json().catch(() => ({})); return showToast(d.error || '取消失败', 'error') }
+    showToast('已请求取消：当前页抓完后停止，条目按「导入中断」如实落失败态，不会伪装完成', 'success')
+  }
+
+  const dir = String(e.mdPath || '').replace(/[/\\]index\.md$/i, '')
+  return (
+    <div data-site-progress style={{ marginTop: 10, padding: '8px 12px', border: '1px solid var(--border,#e5e7eb)', borderRadius: 8, fontSize: 12.5 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        <span style={{ fontWeight: 600, maxWidth: 320, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+          data-tooltip={e.source} tabIndex={0}>{e.title || e.source}</span>
+        {crawling && (
+          <>
+            <span className="spinner" style={{ width: 9, height: 9 }} />
+            <span data-site-progress-text style={{ color: '#3b82f6' }}>
+              站点抓取中：已入 {e.loaded || 0} 页 / 共发现 {e.found || 0} 页
+              {(e.failed || 0) > 0 ? `（失败 ${e.failed}）` : ''}
+            </span>
+            <button className="btn" data-site-cancel style={{ fontSize: 11, padding: '2px 10px', color: 'var(--error)' }} onClick={cancel}>✋ 取消抓取</button>
+          </>
+        )}
+        {e.status === 'DONE' && (
+          <span data-site-progress-text style={{ color: e.partial ? '#b45309' : '#16a34a', wordBreak: 'break-all' }}>
+            ✅ 站点抓取完成：共 {e.found ?? '-'} 页（载入 {e.loaded ?? '-'}{(e.failed || 0) > 0 ? `，失败 ${e.failed}` : ''}）
+            {dir ? ` · 产物目录 ${dir}` : ''}
+            {e.partial ? ' · ⚠️ 部分导入（失败页原因见下，缺口未冒充完整）' : ''}
+          </span>
+        )}
+        {e.status === 'FAILED' && (
+          <span data-site-progress-text style={{ color: 'var(--error)', wordBreak: 'break-all' }}>❌ 站点抓取失败：{e.error}</span>
+        )}
+      </div>
+      {failedPages.length > 0 && (
+        <div data-site-fail-reasons style={{ marginTop: 6, fontSize: 11.5, color: 'var(--error)' }}>
+          失败/跳过页（前 3 条原因{failedPages.length > 3 ? `，共 ${failedPages.length} 页，全部原因见下方知识库「📑 页面」` : ''}）：
+          {failedPages.slice(0, 3).map(p => (
+            <div key={p.id} style={{ marginTop: 2, wordBreak: 'break-all' }}>· {p.url}：{p.error || '(无原因文本)'}</div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }

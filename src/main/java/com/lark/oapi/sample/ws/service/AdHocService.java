@@ -161,13 +161,24 @@ public class AdHocService {
     // ===== 创建 =====
 
     /**
-     * 创建临时需求任务并立即启动两段流水线。
+     * 创建临时需求任务并立即启动两段流水线（单页 URL 语义，与 11-24 之前完全一致，AC2 回归锚点）。
      *
      * @param name       任务名（留空自动生成"临时需求-&lt;时间戳&gt;"兜底）
      * @param instanceId 绑定实例（Wiki 编译与后续对话都在这台实例的主会话上）
      * @param docSources 关联文档多行原文（每行一条：http(s) 链接 / .pdf/.html/.htm/.md/.markdown/.txt 本地路径）
      */
     public AdHocTask create(String name, Long instanceId, String docSources) {
+        return create(name, instanceId, docSources, false);
+    }
+
+    /**
+     * 创建临时需求任务并立即启动两段流水线。
+     *
+     * @param siteCrawl true = 本次提交的<b>全部 URL 行</b>按同站点递归抓取入库（BFS，≤200 页，
+     *                  {@code SupplierKbService.add(..., site=true)}）；本地文件/PDF/笔记行不受影响。
+     *                  标记持久化在任务行——「重试本段」重走 INGEST 时未入库的 URL 行仍按站点条目建。
+     */
+    public AdHocTask create(String name, Long instanceId, String docSources, boolean siteCrawl) {
         if (instanceId == null) throw new IllegalArgumentException("请绑定执行实例");
         BotInstance inst = instanceRepo.findById(instanceId)
                 .orElseThrow(() -> new IllegalArgumentException("执行实例不存在: " + instanceId));
@@ -199,13 +210,15 @@ public class AdHocService {
                 : name.strip());
         t.setDocSources(String.join("\n", lines));
         t.setInstanceId(instanceId);
+        t.setSiteCrawl(siteCrawl);
         t.setStatus(STAGE_INGEST);
         t.setWikiStatus("EMPTY");
         t.setError("");
         taskRepo.save(t);
         t.setKbCode("adhoc-" + t.getId());   // 专属命名空间：不与其他任务共库，删除可整库清理
         taskRepo.save(t);
-        log.info("[AdHoc] 临时需求任务已创建: id={}, kb={}, 来源{}条, 实例={}", t.getId(), t.getKbCode(), lines.size(), instanceId);
+        log.info("[AdHoc] 临时需求任务已创建: id={}, kb={}, 来源{}条, 实例={}, 站点递归={}",
+                t.getId(), t.getKbCode(), lines.size(), instanceId, siteCrawl);
         startPipeline(t.getId(), STAGE_INGEST);
         return t;
     }
@@ -315,6 +328,17 @@ public class AdHocService {
      */
     public JsonObject appendSources(Long taskId, String docSources, String chat, String chatTitle,
                                     String noteTitle, String noteSummary, String noteRaw) {
+        return appendSources(taskId, docSources, chat, chatTitle, noteTitle, noteSummary, noteRaw, false);
+    }
+
+    /**
+     * @param siteCrawl true = 本次追加的<b>全部 URL 行</b>按同站点递归抓取入库（11-24-adhoc-site-crawl SC1，
+     *                  语义与 {@link #create(String, Long, String, boolean)} 的同名开关一致）；
+     *                  聊天记录/笔记/本地文件行不受影响。去重仍按 type+source（AC6）：同一 URL 已在库
+     *                  （无论当初是否站点条目）→ 命中去重跳过，不因站点目录重复入库。
+     */
+    public JsonObject appendSources(Long taskId, String docSources, String chat, String chatTitle,
+                                    String noteTitle, String noteSummary, String noteRaw, boolean siteCrawl) {
         AdHocTask t = require(taskId);
         if (orchestrating.contains(taskId)) {
             throw new IllegalArgumentException("流水线正在推进中，请等待当前段结束后再追加材料");
@@ -356,7 +380,9 @@ public class AdHocService {
                 duplicated.add(value);
                 continue;
             }
-            kbService.add(kbCode, type, value, null);
+            // 站点开关只作用于 URL 行；未勾选时走 4 参老调用（单页语义一字不变，AC2）
+            if (siteCrawl && "url".equals(type)) kbService.add(kbCode, type, value, null, true);
+            else kbService.add(kbCode, type, value, null);
             added.add(value);
         }
         if (chatGiven) {
@@ -440,7 +466,10 @@ public class AdHocService {
         for (String value : lines) {
             String type = detectType(value);
             if (existing.contains(type + "\u0000" + value)) continue;
-            kbService.add(kbCode, type, value, null);
+            // 站点开关（任务行持久化）只作用于 URL 行；未勾选走 4 参老调用，单页语义一字不变（AC2）。
+            // 勾选时 meta.site=true 落在条目上——重试本段/重启后 reparse 仍走站点抓取，不会静默降级。
+            if (task.isSiteCrawl() && "url".equals(type)) kbService.add(kbCode, type, value, null, true);
+            else kbService.add(kbCode, type, value, null);
         }
 
         // 2) 触发解析（RAW=刚入库原文引用 / FAILED=上次解析失败；url/pdf/html/office 走异步解析，md、doc 入库即 DONE）
@@ -1219,6 +1248,7 @@ public class AdHocService {
         o.addProperty("error", t.getError());
         o.addProperty("running", orchestrating.contains(taskId));
         o.addProperty("docSources", t.getDocSources());
+        o.addProperty("siteCrawl", t.isSiteCrawl());
         // 待确认卡（决策 3/4）：问题原文是权威事实源；notifyError 非空时卡片明示"飞书通知失败：<原因>"
         o.addProperty("pendingQuestion", t.getPendingQuestion());
         o.addProperty("notifyError", t.getNotifyError());
@@ -1261,6 +1291,23 @@ public class AdHocService {
             eo.addProperty("status", e.getStatus());
             eo.addProperty("source", e.getSource());
             eo.addProperty("error", e.getError());
+            eo.addProperty("mdPath", e.getMdPath() == null ? "" : e.getMdPath());
+            // 站点条目进度透出（SC2）：crawlNow/persistPages 每页边界回写 metaJson 的
+            // found/loaded/failed/pending/partial——页面据此显示「已入 N 页 / 共发现 M 页」，
+            // meta 解析失败按非站点条目降级（不阻断详情）
+            try {
+                JsonObject m = JsonParser.parseString(
+                        e.getMetaJson() == null || e.getMetaJson().isBlank() ? "{}" : e.getMetaJson()).getAsJsonObject();
+                if (m.has("site") && m.get("site").getAsBoolean()) {
+                    eo.addProperty("site", true);
+                    for (String k : List.of("found", "loaded", "failed", "pending")) {
+                        if (m.has(k) && m.get(k).isJsonPrimitive()) eo.add(k, m.get(k));
+                    }
+                    if (m.has("partial") && m.get("partial").isJsonPrimitive()) eo.add("partial", m.get("partial"));
+                }
+            } catch (RuntimeException ignore) {
+                // metaJson 不是合法 JSON：按普通条目展示
+            }
             entries.add(eo);
         }
         o.add("kbEntries", entries);

@@ -80,6 +80,16 @@ public class AdHocTask {
     private String notifyError = "";
 
     /**
+     * 创建时是否勾选「URL 按同站点递归抓取」（11-24-adhoc-site-crawl SC1）：true = INGEST 段把文档来源里的
+     * URL 行按 url+site 入库（{@code SupplierKbService.add(..., site=true)} → meta.site=true → 解析走
+     * 同站点 BFS 抓取 ≤200 页）。<b>只作用于 URL 行</b>，本地文件/PDF/笔记不受影响。
+     * 落在任务行而不是只留在请求里：「重试本段」/重启续跑重走 INGEST 时，尚未入库的 URL 行仍按本标记
+     * 建站点条目，不静默降级成单页抓取。
+     */
+    @Column(name = "site_crawl")
+    private Boolean siteCrawl;
+
+    /**
      * 最近一个"因编译产物含【卡点】而被拒绝"的 Wiki 版本行 id（决策 5 的续跑锚点）。
      * <p>
      * 为什么需要它：Wiki 段检出卡点后本段置 FAILED，用户答复 → 点「重试本段」→ 若仍拿同一版 READY 产物
@@ -140,6 +150,10 @@ public class AdHocTask {
 
     public Long getBlockedRevision() { return blockedRevision; }
     public void setBlockedRevision(Long blockedRevision) { this.blockedRevision = blockedRevision; }
+
+    /** 空值归一：存量行 NULL 按 false（ddl-auto=update 加列语义）——老任务保持单页抓取（AC2） */
+    public boolean isSiteCrawl() { return siteCrawl != null && siteCrawl; }
+    public void setSiteCrawl(boolean siteCrawl) { this.siteCrawl = siteCrawl; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public LocalDateTime getUpdatedAt() { return updatedAt; }

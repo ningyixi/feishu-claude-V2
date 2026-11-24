@@ -39,7 +39,9 @@ public class AdHocController {
 
     /**
      * 创建任务并立即启动两段流水线（入库解析 → 编译 Wiki → READY 对话待命）。
-     * body: {name?, instanceId, docSources: "多行来源原文"}
+     * body: {name?, instanceId, docSources: "多行来源原文", siteCrawl?: bool}
+     * siteCrawl=true（11-24-adhoc-site-crawl SC1）：本次提交的全部 URL 行按同站点 BFS 递归抓取入库
+     * （≤200 页，发现第 201 页整体报错不冒充完整）；本地文件/PDF/笔记行不受影响。缺省 false=单页语义。
      */
     @PostMapping(value = "/api/ad-hoc-tasks", produces = "application/json;charset=UTF-8")
     public ResponseEntity<String> create(@RequestBody String rawBody, jakarta.servlet.http.HttpServletRequest req) {
@@ -58,7 +60,7 @@ public class AdHocController {
             }
             employeeService.assertInstancesUsable(List.of(instanceId), creatorId);
 
-            var task = adHocTasks.create(opt(body, "name"), instanceId, opt(body, "docSources"));
+            var task = adHocTasks.create(opt(body, "name"), instanceId, opt(body, "docSources"), bool(body, "siteCrawl"));
             return ResponseEntity.ok(adHocTasks.detail(task.getId()).toString());
         } catch (SecurityException e) {
             JsonObject fo = new JsonObject();
@@ -118,8 +120,9 @@ public class AdHocController {
 
     /**
      * 追加材料（11-23-adhoc-append-sources S1/S2/S3）：文档来源（多行）/ 聊天记录 / 笔记双框任意组合。
-     * body: {docSources?, chat?, chatTitle?, noteTitle?, noteSummary?, noteRaw?}
+     * body: {docSources?, chat?, chatTitle?, noteTitle?, noteSummary?, noteRaw?, siteCrawl?}
      * 有新条目即自动重新排队流水线（等新来源解析完成 → 强制重编译 Wiki）；全部命中去重则不排队（AC6）。
+     * siteCrawl=true（11-24-adhoc-site-crawl SC1）：本次追加的全部 URL 行按同站点 BFS 递归抓取入库。
      * S4 闸门：与创建同口径——创建者权限 + 绑定实例独占校验（admin 不能占用员工独占实例）。
      */
     @PostMapping(value = "/api/ad-hoc-tasks/{id}/append-sources", produces = "application/json;charset=UTF-8")
@@ -139,7 +142,8 @@ public class AdHocController {
             }
             JsonObject out = adHocTasks.appendSources(id,
                     strOrNull(body, "docSources"), strOrNull(body, "chat"), strOrNull(body, "chatTitle"),
-                    strOrNull(body, "noteTitle"), strOrNull(body, "noteSummary"), strOrNull(body, "noteRaw"));
+                    strOrNull(body, "noteTitle"), strOrNull(body, "noteSummary"), strOrNull(body, "noteRaw"),
+                    bool(body, "siteCrawl"));
             return ResponseEntity.ok(out.toString());
         } catch (SecurityException e) {
             JsonObject fo = new JsonObject();
@@ -166,6 +170,15 @@ public class AdHocController {
     /** 追加材料用：缺 key / null → 返回 null（区别于空串——服务层据此判定"用户没填这一项"） */
     private static String strOrNull(JsonObject o, String key) {
         return o.has(key) && !o.get(key).isJsonNull() ? o.get(key).getAsString() : null;
+    }
+
+    /** 布尔开关（siteCrawl）：缺 key / null / 非布尔 → false（与勾选框未勾等价，保守走单页语义） */
+    private static boolean bool(JsonObject o, String key) {
+        try {
+            return o.has(key) && o.get(key).isJsonPrimitive() && o.get(key).getAsBoolean();
+        } catch (RuntimeException ex) {
+            return false;
+        }
     }
 
     private ResponseEntity<String> err(String msg) {
