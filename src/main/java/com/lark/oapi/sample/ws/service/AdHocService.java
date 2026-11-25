@@ -374,24 +374,30 @@ public class AdHocService {
         String kbCode = t.getKbCode();
         JsonArray added = new JsonArray();
         JsonArray duplicated = new JsonArray();
+        JsonArray restored = new JsonArray();
         for (String value : lines) {
             String type = detectType(value);
             if (kbService.exists(kbCode, type, value.trim())) {
                 duplicated.add(value);
                 continue;
             }
+            // KD4：删过又贴回来——先记墓碑命中（add 会顺带清墓碑），成功后计入 restored 供页面提示"已恢复该来源"
+            boolean wasRemoved = kbService.removedBefore(kbCode, type, value.trim());
             // 站点开关只作用于 URL 行；未勾选时走 4 参老调用（单页语义一字不变，AC2）
             if (siteCrawl && "url".equals(type)) kbService.add(kbCode, type, value, null, true);
             else kbService.add(kbCode, type, value, null);
             added.add(value);
+            if (wasRemoved) restored.add(value);
         }
         if (chatGiven) {
             SupplierKbService.Appended r = kbService.appendText(kbCode, "chat", chatTitle, chat, null, null);
             (r.created() ? added : duplicated).add("聊天记录：" + title(r.entry()));
+            if (r.created() && r.restored()) restored.add("聊天记录：" + title(r.entry()));
         }
         if (noteGiven) {
             SupplierKbService.Appended r = kbService.appendText(kbCode, "note", noteTitle, null, noteSummary, noteRaw);
             (r.created() ? added : duplicated).add("笔记：" + title(r.entry()));
+            if (r.created() && r.restored()) restored.add("笔记：" + title(r.entry()));
         }
 
         // 追加的文档来源并入任务行（留痕；「重试本段」重跑 INGEST 时同一套去重语义仍然幂等）
@@ -410,6 +416,7 @@ public class AdHocService {
         JsonObject out = new JsonObject();
         out.add("added", added);
         out.add("duplicated", duplicated);
+        out.add("restored", restored);
         out.addProperty("wikiRebuildQueued", rebuild);
         return out;
     }
@@ -466,6 +473,13 @@ public class AdHocService {
         for (String value : lines) {
             String type = detectType(value);
             if (existing.contains(type + "\u0000" + value)) continue;
+            // KD4 复活护栏：用户显式删除过的来源留了墓碑——「重试本段」重跑 INGEST 不得把它自动带回
+            // （否则"删错了想恢复/删对了不想再要"都会被下一次重试悄悄推翻）。恢复只能由用户在
+            // 「继续补充材料」里显式再贴一次（appendSources 会清墓碑并提示"已恢复该来源"）。
+            if (kbService.removedBefore(kbCode, type, value.trim())) {
+                log.info("[AdHoc] 任务 {} INGEST 跳过已删除来源（墓碑，需用户显式重新追加才恢复）: {}", task.getId(), value);
+                continue;
+            }
             // 站点开关（任务行持久化）只作用于 URL 行；未勾选走 4 参老调用，单页语义一字不变（AC2）。
             // 勾选时 meta.site=true 落在条目上——重试本段/重启后 reparse 仍走站点抓取，不会静默降级。
             if (task.isSiteCrawl() && "url".equals(type)) kbService.add(kbCode, type, value, null, true);
@@ -716,6 +730,24 @@ public class AdHocService {
         } catch (RuntimeException ex) {
             log.warn("[AdHoc] 新增材料盘点失败（不阻断对话）: kb={}, {}", kbCode, ex.getMessage());
             return PendingMaterials.NONE;
+        }
+    }
+
+    /**
+     * 已删除、但删除动作发生在"当前 Wiki 版本快照时刻之后"的来源数（KD3 修正版：只提示不自动重编译）。
+     * <p>
+     * 判定锚点与 {@link #pendingMaterials} 对称——最新一条 READY 版本行的创建时间。此时刻之后写入的墓碑
+     * 对应的内容仍留在当前 Wiki 里（那一版没吃到"删除"），需要用户显式点「编译 LLM Wiki」重出一版才生效。
+     * Wiki 从未 READY 时返回 0（"尚未就绪"话术已覆盖）。用户重新显式追加会清墓碑，计数自然回落。
+     */
+    long pendingRemovalCount(String kbCode) {
+        try {
+            SupplierWikiRevision ready = wikiRevisions.findFirstByKbCodeAndStatusOrderByIdDesc(kbCode, "READY").orElse(null);
+            if (ready == null || ready.getCreatedAt() == null) return 0;
+            return kbService.removedCountSince(kbCode, ready.getCreatedAt());
+        } catch (RuntimeException ex) {
+            log.warn("[AdHoc] 已移除材料盘点失败（不阻断）: kb={}, {}", kbCode, ex.getMessage());
+            return 0;
         }
     }
 
@@ -1281,6 +1313,8 @@ public class AdHocService {
         JsonArray pendingTitles = new JsonArray();
         pending.titles().forEach(pendingTitles::add);
         o.add("pendingMaterialTitles", pendingTitles);
+        // KD3 修正版：删除条目不自动重编译，只把"已移除 N 项、需手动点编译才生效"透给页面横幅
+        o.addProperty("pendingRemovalCount", pendingRemovalCount(t.getKbCode()));
 
         JsonArray entries = new JsonArray();
         for (SupplierKbEntry e : kbService.list(t.getKbCode())) {

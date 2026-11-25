@@ -164,6 +164,10 @@ public class SupplierKbService {
             }
             default -> throw new IllegalArgumentException("未知条目类型: " + type);
         }
+        // KD4 墓碑语义：显式重新入库同一来源 = 用户想要它回来 → 清除删除墓碑。
+        // 墓碑只抑制**自动**同步路径（syncFromJob / AdHoc INGEST 重跑）；不清的话该来源
+        // 重新入库后一旦被再次删除，自动路径的判定还是旧账——语义以"最近一次显式操作"为准。
+        clearRemoved(e.getKbCode(), e.getType(), e.getSource());
         log.info("[SupplierKb] 条目入库: id={}, kb={}, type={}, status={}", e.getId(), kbCode, type, e.getStatus());
         return e;
     }
@@ -173,8 +177,41 @@ public class SupplierKbService {
         return repo.existsByKbCodeAndTypeAndSource(kbCode, type, source);
     }
 
-    /** 追加式文本入库结果：created=false = 内容指纹已在库（幂等去重命中），entry 为既有条目 */
-    public record Appended(SupplierKbEntry entry, boolean created) {}
+    /** KD4：该来源此前是否被删除过（墓碑在库）。source 为空恒 false（无来源条目不写墓碑） */
+    public boolean removedBefore(String kbCode, String type, String source) {
+        return source != null && !source.isBlank()
+                && removedRepo.existsByKbCodeAndTypeAndSource(kbCode, type, source);
+    }
+
+    /** 某时刻之后新写入的墓碑数（AdHoc「已移除、尚未编译进 Wiki」提示的数据源；KD3-新：只提示不自动重编译） */
+    public long removedCountSince(String kbCode, java.time.LocalDateTime since) {
+        if (since == null) return 0;
+        return removedRepo.countByKbCodeAndCreatedAtAfter(kbCode, since);
+    }
+
+    /** KD4：清除墓碑（显式重新入库时调用）；source 为空或无墓碑时静默无操作 */
+    private void clearRemoved(String kbCode, String type, String source) {
+        if (source == null || source.isBlank()) return;
+        try {
+            if (removedRepo.existsByKbCodeAndTypeAndSource(kbCode, type, source)) {
+                removedRepo.deleteByKbCodeAndTypeAndSource(kbCode, type, source);
+                log.info("[SupplierKb] 来源重新入库，已清除删除墓碑: kb={}, type={}, source={}", kbCode, type, source);
+            }
+        } catch (RuntimeException ex) {
+            // 墓碑清理失败不阻断入库（条目已建成；残留墓碑只影响自动同步路径，且下次显式入库会再清）
+            log.warn("[SupplierKb] 清除墓碑失败（入库不受影响）: kb={}, type={}, source={}（{}）", kbCode, type, source, ex.getMessage());
+        }
+    }
+
+    /**
+     * 追加式文本入库结果：created=false = 内容指纹已在库（幂等去重命中），entry 为既有条目；
+     * restored=true = 该指纹此前被删除过（墓碑命中），本次是「删了又加回来」——调用方据此提示
+     * 「已恢复该来源」（KD4），墓碑已随入库清除。
+     */
+    public record Appended(SupplierKbEntry entry, boolean created, boolean restored) {
+        /** 兼容既有调用/测试夹具的两参形态：restored 缺省 false */
+        public Appended(SupplierKbEntry entry, boolean created) { this(entry, created, false); }
+    }
 
     /**
      * 追加式文本入库（11-23-adhoc-append-sources S1/S2）：临时需求「继续补充材料」专用通道。
@@ -218,6 +255,8 @@ public class SupplierKbService {
             log.info("[SupplierKb] 追加去重命中（不产生重复条目）: kb={}, type={}, source={}", kbCode, type, fingerprint);
             return new Appended(dup, false);
         }
+        // KD4：该指纹此前被删过（墓碑命中）→ 本次是「删了又贴回来」，入库后清墓碑并回传 restored=true
+        boolean restored = removedBefore(kbCode.trim(), type, fingerprint);
         SupplierKbEntry e = new SupplierKbEntry();
         e.setKbCode(kbCode.trim());
         e.setType(type);
@@ -226,6 +265,7 @@ public class SupplierKbService {
         e.setSource(fingerprint);
         e.setStatus("DONE");
         repo.save(e);
+        clearRemoved(kbCode.trim(), type, fingerprint);
         try {
             String ts = LocalDateTime.now().toString().substring(0, 19);
             String md = isNote ? noteMd(ts, summary, raw)
@@ -241,8 +281,8 @@ public class SupplierKbService {
             e.setError("写入条目文件失败: " + ex.getMessage());
             repo.save(e);
         }
-        log.info("[SupplierKb] 追加文本入库: id={}, kb={}, type={}, status={}", e.getId(), kbCode, type, e.getStatus());
-        return new Appended(e, true);
+        log.info("[SupplierKb] 追加文本入库: id={}, kb={}, type={}, status={}, restored={}", e.getId(), kbCode, type, e.getStatus(), restored);
+        return new Appended(e, true, restored);
     }
 
     /**

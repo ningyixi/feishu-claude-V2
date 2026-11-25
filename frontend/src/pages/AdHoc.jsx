@@ -373,6 +373,20 @@ function TaskDetail({ taskId, onDeleted, showToast }) {
             对话照常可用；涉及这些材料时 agent 会按注入提示直接读来源原文，不会假装 Wiki 已覆盖。
           </div>
         )}
+        {/* KD3（修正版）：删除材料**不自动**重编译——只提示"有移除尚未生效"，等用户自己点编译。
+            移除语义与新增分开计数：删除绝不会被显示成"新增 N 条材料"，删完也不会毫无提示。 */}
+        {(detail.pendingRemovalCount || 0) > 0 && (
+          <div data-removal-pending style={{ marginTop: 10, padding: '8px 12px', border: '1px solid rgba(245,158,11,.4)', background: 'rgba(245,158,11,.08)', borderRadius: 8, fontSize: 12.5, color: '#b45309' }}>
+            ⚠️ 已有 {detail.pendingRemovalCount} 项材料变更（移除）尚未编译进 Wiki —— 当前 Wiki 版本仍含被移除的内容，点「编译 LLM Wiki」生效。
+          </div>
+        )}
+        {/* KD5：材料被删空时的可读状态——旧 Wiki 版本保留可查；如实说明此时重编译会因无来源被拒绝（不会产生空 Wiki），
+            指引先补充材料；「重试本段」不受影响（失败时照常显示、可点）。 */}
+        {(detail.kbEntries || []).length === 0 && wiki.status === 'READY' && (
+          <div data-kb-empty style={{ marginTop: 10, padding: '8px 12px', border: '1px solid rgba(220,38,38,.35)', background: 'rgba(220,38,38,.05)', borderRadius: 8, fontSize: 12.5, color: '#b91c1c' }}>
+            材料已全部移除。此时重编译会因没有任何可用来源被拒绝（不会产生空 Wiki），旧 Wiki 版本保留可查；建议先通过「继续补充材料」补充材料，再重新编译。
+          </div>
+        )}
       </div>
 
       {/* 对话框：任何阶段都可说话——Wiki 未就绪时本轮不带 Wiki 入口，只带一行阶段说明 */}
@@ -382,8 +396,14 @@ function TaskDetail({ taskId, onDeleted, showToast }) {
       <AppendSourcesPanel taskId={taskId} disabled={!!detail.running} showToast={showToast}
         onAppended={() => setAppendNonce(n => n + 1)} />
 
-      {/* 知识库条目（只读） */}
-      <KbPanel kbCode={detail.kbCode} showToast={showToast} readOnly />
+      {/* 知识库条目（KD1 细粒度权限）：无补充表单——添加入口只有上方「继续补充材料」面板（含笔记双框），
+          不出现两套添加入口；删除/重解析放开；阶段下拉不放开（阶段语义属工作台交付管线，本任务 Wiki 编译读全部材料）。
+          流水线推进中暂隐「✕」（避免与解析 worker 抢同一条目），轮询结束自动恢复。 */}
+      <KbPanel kbCode={detail.kbCode} showToast={showToast}
+        canAdd={false} canDelete={!detail.running} canReparse canStage={false}
+        panelHint="本任务材料：可删除 / 重解析；补充材料请用上方「继续补充材料」面板，删除过的来源重新贴上即可恢复"
+        deleteNotice="当前 Wiki 版本仍含该内容，需重编译才生效。"
+        onChanged={() => setAppendNonce(n => n + 1)} />
     </div>
   )
 }
@@ -435,7 +455,11 @@ function AppendSourcesPanel({ taskId, disabled, showToast, onAppended }) {
       if (!res.ok) throw new Error(d.error || '追加失败')
       const added = (d.added || []).length
       const dup = (d.duplicated || []).length
-      if (added > 0 && d.wikiRebuildQueued) {
+      const restored = (d.restored || []).length
+      // KD4：删过又贴回来的来源——明确告知"已恢复该来源"（墓碑已清除），绝不静默
+      if (restored > 0) {
+        showToast(`已恢复该来源（${d.restored.slice(0, 3).join('、')}${restored > 3 ? ' 等' : ''}）——此前删除过的材料已重新入库`, 'success')
+      } else if (added > 0 && d.wikiRebuildQueued) {
         showToast(`已追加 ${added} 项材料${dup ? `（另去重跳过 ${dup} 项）` : ''}——Wiki 正在基于新增材料重编译，对话照常可用`, 'success')
       } else {
         showToast(`材料都已在知识库中（去重跳过 ${dup} 项），未触发重编译`, 'success')

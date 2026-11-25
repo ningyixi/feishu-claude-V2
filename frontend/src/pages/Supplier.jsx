@@ -898,11 +898,25 @@ const KB_STATUS = {
   FAILED: { label: '解析失败', color: '#dc2626' },
 }
 
-/** 供应商知识库面板；readOnly=true 时只读查看（快速建档结果卡复用：隐藏补充表单与全部写操作） */
-export function KbPanel({ kbCode, showToast, readOnly = false }) {
+/**
+ * 供应商知识库面板。
+ * KD1：把粗开关 `readOnly` 拆成细粒度权限 `{ canAdd, canDelete, canReparse, canStage }`——
+ * 未显式传某个 can* 时回落到 `!readOnly`（因此工作台默认全开、接口建档/快速建档结果卡传 readOnly
+ * 即全关，两处调用零改动即逐字等价，AC6）。`canReparse` 一并管解析生命周期与产物：解析/重解析、
+ * 站点取消、以及「产物/校正」编辑按钮（这些同属"改这条条目的产物"，与 reparse 同族）。
+ * @param deleteNotice 追加到删除二次确认末尾的后果说明（KD2：临时需求传"需重编译才生效"文案；缺省=工作台原文逐字不变）
+ * @param panelHint    覆盖标题右侧说明文字（缺省=按是否纯只读视图给出既有两种文案）
+ * @param onChanged    条目增删/校正成功后的回调（临时需求用它立刻重拉详情，刷新"待重编译"横幅）
+ */
+export function KbPanel({ kbCode, showToast, readOnly = false, canAdd, canDelete, canReparse, canStage, deleteNotice = '', panelHint, onChanged }) {
+  const allowAdd = canAdd ?? !readOnly
+  const allowDelete = canDelete ?? !readOnly
+  const allowReparse = canReparse ?? !readOnly
+  const allowStage = canStage ?? !readOnly
+  const readOnlyView = !allowAdd && !allowDelete && !allowReparse && !allowStage
   const confirmAction = useConfirm()
   const [shared, setShared] = useState(true)
-  useEffect(() => { if (readOnly) return; let alive = true; fetch('/api/supplier-jobs').then(r => r.ok ? r.json() : []).then(rows => { if (alive && Array.isArray(rows)) setShared(rows.filter(job => job.supplierCode === kbCode || job.kbCode === kbCode).length > 1) }).catch(() => {}); return () => { alive = false } }, [kbCode, readOnly])
+  useEffect(() => { if (!allowDelete) return; let alive = true; fetch('/api/supplier-jobs').then(r => r.ok ? r.json() : []).then(rows => { if (alive && Array.isArray(rows)) setShared(rows.filter(job => job.supplierCode === kbCode || job.kbCode === kbCode).length > 1) }).catch(() => {}); return () => { alive = false } }, [kbCode, allowDelete])
   const [entries, setEntries] = useState([])
   const [type, setType] = useState('chat')
   const [value, setValue] = useState('')
@@ -963,18 +977,24 @@ export function KbPanel({ kbCode, showToast, readOnly = false }) {
     showToast('已重新排队解析', 'success'); load()
   }
   async function removeEntry(e) {
-    if (!await confirmAction({ kind: shared || /"site"\s*:\s*true/.test(e.metaJson || '') ? 'dialog' : 'popconfirm', title: '删除知识库条目？', body: `删除「${e.title || '该条目'}」？${(KB_PARSABLE.includes(e.type) && e.type !== 'md') && e.source ? '（来源仍在创建时的文档清单里，但不会再被自动同步回来）' : ''}删除后无法恢复，关联的站点页面也会删除，使用这些材料的 Wiki 将过期。`, confirmLabel: '删除条目' })) return
+    const isSite = /"site"\s*:\s*true/.test(e.metaJson || '')
+    // KD2：传了 deleteNotice（临时需求）用细文案——写清删掉的产物（md / site-<id>/ 目录、页数影响）
+    // 与「当前 Wiki 版本仍含该内容，需重编译才生效」；未传（工作台）保持既有文案逐字不变（AC6）。
+    const body = deleteNotice
+      ? `删除「${e.title || '该条目'}」？${isSite ? `该站点条目将连同 site-${e.id}/ 目录下全部已抓页面文件一并删除（最多可达 200 页）` : '将同时删除其解析产物（.md 文件）'}，删除后无法恢复。${deleteNotice}`
+      : `删除「${e.title || '该条目'}」？${(KB_PARSABLE.includes(e.type) && e.type !== 'md') && e.source ? '（来源仍在创建时的文档清单里，但不会再被自动同步回来）' : ''}删除后无法恢复，关联的站点页面也会删除，使用这些材料的 Wiki 将过期。`
+    if (!await confirmAction({ kind: shared || isSite ? 'dialog' : 'popconfirm', title: '删除知识库条目？', body, confirmLabel: '删除条目' })) return
     const res = await fetch(`/api/supplier-kb/entries/${e.id}`, { method: 'DELETE' })
     const d = await res.json().catch(() => ({}))
     if (!res.ok) return showToast(d.error || '删除失败', 'error')
-    showToast('已删除', 'success'); load()
+    showToast('已删除', 'success'); load(); onChanged?.()
   }
 
   return (
     <div className="card" style={{ marginTop: 14, padding: '14px 20px' }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
         <span style={{ fontSize: 14, fontWeight: 700 }}>📚 供应商知识库</span>
-        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{readOnly ? '本次建档任务的知识库材料（只读；补充/管理请到工作台知识库面板）' : '统一补充入口：文档随时进，解析一次永久复用；节点执行自动引用（先查库勿重抓）'}</span>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{panelHint || (readOnlyView ? '本次建档任务的知识库材料（只读；补充/管理请到工作台知识库面板）' : '统一补充入口：文档随时进，解析一次永久复用；节点执行自动引用（先查库勿重抓）')}</span>
         <div style={{ flex: 1 }} />
         {entries.length > 0 && (
           <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => setListOpen(o => !o)}>
@@ -984,8 +1004,8 @@ export function KbPanel({ kbCode, showToast, readOnly = false }) {
         <span style={{ fontSize: 11, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)' }}>{kbCode}</span>
       </div>
 
-      {/* 补充表单（只读查看时隐藏） */}
-      {!readOnly && (
+      {/* 补充表单（canAdd=false 时隐藏：临时需求走专用「继续补充材料」面板，不出现两套添加入口） */}
+      {allowAdd && (
       <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
         <select className="form-input" style={{ width: 120, fontSize: 12 }} value={type} onChange={e => setType(e.target.value)}>
           {Object.entries(KB_TYPES).map(([k, v]) => <option key={k} value={k}>{v.icon} {v.label}</option>)}
@@ -1036,27 +1056,27 @@ export function KbPanel({ kbCode, showToast, readOnly = false }) {
               {m.tablesLost && <span className="hook-badge" style={{ color: '#b45309', background: 'rgba(245,158,11,.12)', borderColor: 'rgba(245,158,11,.4)' }} data-tooltip="Word97 表格结构无法还原，已降级为线性文本" tabIndex={0}>⚠️ 表格降级</span>}
               {m.mislabeledExtension && <span className="hook-badge" style={{ color: '#6b7280', background: 'rgba(107,114,128,.1)', borderColor: 'rgba(107,114,128,.35)' }} data-tooltip="扩展名与真实格式不符，已按真实字节解析" tabIndex={0}>🔀 扩展名不符</span>}
               {e.status === 'FAILED' && <span style={{ fontSize: 11, color: 'var(--error)' }} data-tooltip={e.error} tabIndex={0}>{String(e.error || '').slice(0, 40)}</span>}
-              {!readOnly && (
+              {allowStage && (
               <select aria-label="材料使用阶段" className="form-input" style={{ width: 130, fontSize: 11 }} value={e.contextStage || 'all'} onChange={ev => changeStage(e.id, ev.target.value)}>
                 <option value="all">通用 · 每次交付</option><option value="analysis">文档分析</option><option value="probe">接口实测</option><option value="codegen">代码开发</option><option value="archive">仅留档</option>
               </select>
               )}
               <div style={{ flex: 1 }} />
-              {e.status === 'DONE' && <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => openMd(e)}>{readOnly ? '👁 查看' : '👁 产物/校正'}</button>}
+              {e.status === 'DONE' && <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => openMd(e)}>{allowReparse ? '👁 产物/校正' : '👁 查看'}</button>}
               {isSite && e.status !== 'RAW' && (
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => setPagesModal(e)}>📑 页面</button>
               )}
-              {!readOnly && isSite && e.status === 'PARSING' && (
+              {allowReparse && isSite && e.status === 'PARSING' && (
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px', color: 'var(--error)' }}
                   onClick={async () => { await fetch(`/api/supplier-kb/entries/${e.id}/cancel`, { method: 'POST' }); showToast('已请求取消，当前页完成后停止', 'success') }}>✋ 取消</button>
               )}
-              {!readOnly && KB_PARSABLE.includes(e.type) && e.status === 'RAW' && (
+              {allowReparse && KB_PARSABLE.includes(e.type) && e.status === 'RAW' && (
                 <button className="btn btn-primary" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔨 解析</button>
               )}
-              {!readOnly && KB_PARSABLE.includes(e.type) && (e.status === 'DONE' || e.status === 'FAILED') && (
+              {allowReparse && KB_PARSABLE.includes(e.type) && (e.status === 'DONE' || e.status === 'FAILED') && (
                 <button className="btn" style={{ fontSize: 11, padding: '2px 10px' }} onClick={() => reparse(e)}>🔄 重解析</button>
               )}
-              {!readOnly && (
+              {allowDelete && (
               <button className="btn" style={{ fontSize: 11, padding: '2px 8px', color: 'var(--error)', borderColor: 'rgba(220,38,38,.35)' }}
                 data-tooltip="删除该条目" onClick={() => removeEntry(e)} aria-label="删除该条目">✕</button>
               )}
@@ -1088,7 +1108,7 @@ export function KbPanel({ kbCode, showToast, readOnly = false }) {
                   <button className="btn btn-primary" onClick={saveMd}>💾 保存校正</button>
                 </>
               ) : (
-                !readOnly && <button className="btn" onClick={() => setView(v => ({ ...v, editing: true }))}>✏️ 编辑校正</button>
+                allowReparse && <button className="btn" onClick={() => setView(v => ({ ...v, editing: true }))}>✏️ 编辑校正</button>
               )}
             </div>
           </div>
