@@ -31,5 +31,10 @@ Run Maven verify in Java 21 container, scripts.tests.test_migration against a re
 Wrong: `@Lob @Column(name="nodes_json")` with implicit length=255 and direct H2 SQL import into MySQL.
 Correct: explicit large text length, MySQL driver/profile, portable JDBC migration, content checksums and durable container volumes. Never use docker compose down -v as a routine stop command.
 
+## Repository derived mutations (delete/update)
+Spring Data derived `deleteBy...`/`updateBy...` methods execute as bulk JPQL and REQUIRE a transaction. Annotate the repository interface method itself with `@Transactional` (org.springframework.transaction.annotation) in the same edit that declares it. REQUIRED propagation joins an existing caller transaction, so interface-level annotation is safe even when some callers are already transactional; relying on callers is what ships bugs.
+
+Mock-based service tests structurally cannot detect a missing transaction (no EntityManager exists), so "tests green" proves nothing here. Live evidence from 2026-11-27: `SupplierKbPageRepository.deleteByEntryId` without the annotation made every site-entry "reparse" click fail with `TransactionRequiredException` -> HTTP 500 (fixed in commit 3de5a03); `deleteByKbCodeAndTypeAndSource` had the same defect but its host `clearRemoved` caught RuntimeException into a WARN, degrading into silent tombstone-never-cleared failure instead of a visible error. Broad catch blocks around repository mutations hide exactly this class of bug.
+
 ## Windows handoff boundary
 The runtime can use native Windows Java/MySQL, but `scripts/database.py` explicitly requires Docker. Native migration/backup wrappers and the user's actual source data are not yet verified. The converter lowercases table names; do not assume existing Flowable ACT_* tables or Windows/Linux MySQL dumps are portable without identifier-case and engine-version validation. MySQL lower_case_table_names is an initialization-time setting; never change an existing store to conceal a migration mismatch. See `docs/Windows无Docker迁移交接.md` before native Windows migration.

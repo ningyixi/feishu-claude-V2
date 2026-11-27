@@ -15,9 +15,9 @@ This directory contains guidelines for backend development. Fill in each file wi
 | Guide | Description | Status |
 |-------|-------------|--------|
 | [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
-| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
-| [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
-| [Quality Guidelines](./quality-guidelines.md) | Code standards, forbidden patterns | To fill |
+| [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations, derived-mutation tx contract | Partial |
+| [Error Handling](./error-handling.md) | Error types, crawl failure grading, soft-404 content guards | Partial |
+| [Quality Guidelines](./quality-guidelines.md) | Forbidden/required patterns, build-from-git rule, tx-aware testing | Partial |
 | [Supplier Context](./supplier-context.md) | Supplier context and workflow contracts | Implemented |
 | [Supplier Wiki](./supplier-wiki.md) | TEXT/WIKI modes, compilation, delivery and experiment receipts | Implemented |
 | [Supplier Workflow](./supplier-workflow.md) | Flowable processes, human tasks, files, notifications and recovery | Implemented |
