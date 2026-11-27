@@ -79,6 +79,29 @@ class DocParserSoftNotFoundTest {
     }
 
     @Test
+    void notFoundSampleInsideCodeFenceIsNotSoftNotFound() {
+        // 前 10 行内以围栏代码块展示 404 响应示例的合法文档页——围栏内的行不是
+        // markdown 标题行，即使全文含 "does not exist" 也不得误判（fence 口径同 setextToAtx）
+        String tutorial = """
+                # Error Handling Guide
+
+                A missing resource responds with HTTP 404 and a markdown body:
+
+                ```
+                # Page Not Found
+                The URL `orders/42` does not exist.
+                ```
+
+                Callers should retry with the collection endpoint.
+                """;
+        assertFalse(DocParser.looksLikeSoftNotFound(tutorial),
+                "代码块内的 not-found 示例文案不得判为软 404");
+        String tildeFence = tutorial.replace("```", "~~~");
+        assertFalse(DocParser.looksLikeSoftNotFound(tildeFence),
+                "~~~ 围栏同样须识别");
+    }
+
+    @Test
     void headingHitWithoutNotExistPhraseIsNotSoftNotFound() {
         // 只有标题命中、没有"does not exist"自述 → 不拦（合取条件缺一即假）
         String onlyHeading = "# Not Found\n\nThis section documents our 404 campaign page.";

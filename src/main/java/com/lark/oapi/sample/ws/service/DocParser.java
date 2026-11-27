@@ -230,7 +230,9 @@ public final class DocParser {
 
     /**
      * 判定"状态码 200 但内容是 404 兜底壳"。双条件合取缺一不可：
-     * ① 前 10 行内出现 not-found 风格标题；② 正文自述 "does not exist"。
+     * ① 前 10 行内出现 not-found 风格**标题行**（围栏代码块内的行不是标题，跳过——
+     * 与 {@link #setextToAtx} 同一 fence 判定口径，防止"展示 404 响应示例"的合法
+     * 文档页被误伤）；② 正文自述 "does not exist"。
      * 如此不误伤讲错误码的合法文档页（如标题 "Handling 404 errors"）——
      * 正反夹具均以 Mews 实测响应原文写死在 DocParserSoftNotFoundTest。
      */
@@ -238,8 +240,11 @@ public final class DocParser {
         if (md == null || md.isBlank()) return false;
         String[] lines = md.split("\n", 12);
         boolean headingHit = false;
+        boolean inFence = false;
         for (int i = 0; i < Math.min(10, lines.length); i++) {
-            if (SOFT_404_HEADING.matcher(lines[i].strip()).find()) { headingHit = true; break; }
+            String t = lines[i].strip();
+            if (t.startsWith("```") || t.startsWith("~~~")) { inFence = !inFence; continue; }
+            if (!inFence && SOFT_404_HEADING.matcher(t).find()) { headingHit = true; break; }
         }
         return headingHit && md.toLowerCase().contains("does not exist");
     }
