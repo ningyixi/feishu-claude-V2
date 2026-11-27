@@ -112,6 +112,7 @@ public final class DocParser {
     /**
      * URL → Markdown。策略：先探测 url+".md" 直链（参考方案"优先 Markdown 地址"），
      * 失败/回 HTML 则抓原页清洗转换；content-type 或 .pdf 后缀识别 PDF 下载并转字节流管线。
+     * 探测采信与最终正文均过软 404 守卫（11-27，同 {@link #fetchPage}）。
      */
     public static Fetched fetchUrlToMarkdown(String url) throws IOException {
         assertSafeUrl(url);
@@ -121,7 +122,7 @@ public final class DocParser {
             try {
                 Body probe = httpGet(mdProbe, MAX_FETCH_BYTES, MD_PROBE_TIMEOUT);
                 String text = new String(probe.bytes(), StandardCharsets.UTF_8);
-                if (!looksLikeHtml(text)) {
+                if (adoptMdProbe(text)) {   // 软 404 壳不采信，回退抓原 URL（11-27）
                     String title = firstHeadingOr(text, url);
                     return new Fetched(chunk(header("来源URL(MD直链)", probe.finalUrl()) + text.strip() + "\n"),
                             title, probe.finalUrl());
@@ -139,6 +140,7 @@ public final class DocParser {
         }
         if (ctype.contains("text/markdown") || (ctype.startsWith("text/") && !looksLikeHtml(new String(resp.bytes(), StandardCharsets.UTF_8)))) {
             String text = new String(resp.bytes(), StandardCharsets.UTF_8);
+            if (looksLikeSoftNotFound(text)) throw new IOException(softNotFoundHint(resp.finalUrl()));   // 软 404 守卫（11-27）
             return new Fetched(header("来源URL(纯文本)", resp.finalUrl()) + chunk(text.strip()), firstHeadingOr(text, url), resp.finalUrl());
         }
         String html = new String(resp.bytes(), StandardCharsets.UTF_8);
@@ -148,6 +150,7 @@ public final class DocParser {
             throw new IOException("页面正文提取为空（疑似 JS 动态渲染站点，需浏览器渲染——不在当前支持范围；"
                     + "建议改用导出 PDF 入库，或把文档内容粘贴为「笔记」条目）");
         }
+        if (looksLikeSoftNotFound(md)) throw new IOException(softNotFoundHint(resp.finalUrl()));   // 软 404 守卫（11-27）
         Document doc = Jsoup.parse(html, resp.finalUrl());
         String title = doc.title() != null && !doc.title().isBlank()
                 ? doc.title() : firstHeadingOr(md, url);
@@ -217,13 +220,49 @@ public final class DocParser {
         }
     }
 
+    // ===== 软 404 守卫（11-27-gitbook-404） =====
+    // GitBook 对"HTML 路由存在、.md 后缀路由不认"的路径（如空间根别名）返回
+    // HTTP 200 + text/markdown 的 "Page Not Found" 兜底文案（软 404）。docs.mews.com
+    // 实测证据与原文夹具见 .trellis/tasks/11-27-gitbook-404/research/gitbook-soft-404.md。
+
+    private static final java.util.regex.Pattern SOFT_404_HEADING = java.util.regex.Pattern.compile(
+            "(?i)^#{1,3}\\s*(page\\s+not\\s+found|not\\s+found|404)\\b");
+
+    /**
+     * 判定"状态码 200 但内容是 404 兜底壳"。双条件合取缺一不可：
+     * ① 前 10 行内出现 not-found 风格标题；② 正文自述 "does not exist"。
+     * 如此不误伤讲错误码的合法文档页（如标题 "Handling 404 errors"）——
+     * 正反夹具均以 Mews 实测响应原文写死在 DocParserSoftNotFoundTest。
+     */
+    static boolean looksLikeSoftNotFound(String md) {
+        if (md == null || md.isBlank()) return false;
+        String[] lines = md.split("\n", 12);
+        boolean headingHit = false;
+        for (int i = 0; i < Math.min(10, lines.length); i++) {
+            if (SOFT_404_HEADING.matcher(lines[i].strip()).find()) { headingHit = true; break; }
+        }
+        return headingHit && md.toLowerCase().contains("does not exist");
+    }
+
+    /** md 直链探测采信判定：非 HTML 且非软 404 壳才直接采信，否则回退抓原 URL */
+    static boolean adoptMdProbe(String text) {
+        return !looksLikeHtml(text) && !looksLikeSoftNotFound(text);
+    }
+
+    private static String softNotFoundHint(String url) {
+        return "页面内容形如 404 兜底页（URL 可能不是真实页面路径；GitBook 类站点可查站点 llms.txt"
+                + " 索引或在真实页面内确认 .md 地址）: " + url;
+    }
+
     // ===== 站点抓取原语（11-03-kb-site-crawl） =====
 
     public static final int MAX_DECODE_CHARS = 100_000;   // 单页解码字符上限，超出=截断=致命
     private static final int CRAWL_MAX_REDIRECTS = 5;
 
     /**
-     * 抓取一个页面用于站点导入：md 直链优先 → HTML 回退转 Markdown。
+     * 抓取一个页面用于站点导入：md 直链优先 → HTML 回退转 Markdown；
+     * 两处都过软 404 守卫（11-27：GitBook 对不认的 .md 路由返回 200+兜底壳，
+     * 探测命中视为无直链，回退后仍是壳则该页判失败，不让 404 文案入库）。
      * 与单页解析的区别：重定向 ≤5 且必须由 redirectOk 判定同源/同域（跨源不跟随=单页失败）；
      * 响应超 5MB / 解码超 100k 字符 / SSRF 违规 = {@link SiteCrawler.FatalCrawlError}（终止整个导入，截断不冒充完整）。
      */
@@ -234,7 +273,7 @@ public final class DocParser {
             try {
                 Body b = httpGetCrawl(mdUrl, redirectOk);
                 String text = new String(b.bytes(), StandardCharsets.UTF_8);
-                if (!looksLikeHtml(text)) {
+                if (adoptMdProbe(text)) {   // 软 404 壳不采信，回退抓原 URL（11-27）
                     if (text.length() > MAX_DECODE_CHARS) throw new SiteCrawler.FatalCrawlError("单页解码超出 " + MAX_DECODE_CHARS + " 字符上限（截断不允许）");
                     return new SiteCrawler.FetchedPage(b.finalUrl(), text.strip());
                 }
@@ -249,9 +288,12 @@ public final class DocParser {
         String text = new String(resp.bytes(), StandardCharsets.UTF_8);
         if (text.length() > MAX_DECODE_CHARS) throw new SiteCrawler.FatalCrawlError("单页解码超出 " + MAX_DECODE_CHARS + " 字符上限（截断不允许）");
         if (ctype.contains("markdown") || !looksLikeHtml(text)) {
+            if (looksLikeSoftNotFound(text)) throw new IOException(softNotFoundHint(resp.finalUrl()));   // 软 404 守卫（11-27）
             return new SiteCrawler.FetchedPage(resp.finalUrl(), text.strip());
         }
-        return new SiteCrawler.FetchedPage(resp.finalUrl(), cleanHtmlToMarkdown(text, resp.finalUrl()));
+        String pageMd = cleanHtmlToMarkdown(text, resp.finalUrl());
+        if (looksLikeSoftNotFound(pageMd)) throw new IOException(softNotFoundHint(resp.finalUrl()));   // 软 404 守卫（11-27）
+        return new SiteCrawler.FetchedPage(resp.finalUrl(), pageMd);
     }
 
     private static void assertSafeUrlChecked(String url) {
